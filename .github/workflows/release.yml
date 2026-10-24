@@ -1,0 +1,34 @@
+name: Create release
+
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: "Version of the program to build. This will be used for the tag and release name."
+        required: true
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    runs-on: windows-latest
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up MSVC environment
+        uses: microsoft/setup-msbuild@v2
+
+      - name: Build executable
+        shell: pwsh
+        run: .\build.ps1
+
+      - name: Create release
+        uses: ncipollo/release-action@v1
+        with:
+          tag: Synchronus-v${{ inputs.version }}
+          name: Synchronus v${{ inputs.version }}
+          artifacts: ./dist/Synchronus.exe
+          generateReleaseNotes: true
