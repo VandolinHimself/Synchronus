@@ -191,6 +191,7 @@ struct Host {
     bool ppmSkip = false;                                       // --no-ppm
     bool gpuForce = false;                                      // --gpu
     bool gpuSkip = false;                                       // --no-gpu
+    bool afterburnerSkip = false;                               // --no-afterburner
     bool prepareSkip = false;
     bool memorySkip = false;
     bool storageSkip = false;
@@ -204,6 +205,7 @@ struct Host {
     std::function<GpuProbeView()> probeGpu;
     std::function<int(Feed&)> applyPpm;                         // 0 ok, 1 fail
     std::function<int(Feed&)> applyGpu;                         // 0 ok, 1 fail
+    std::function<int(Feed&)> applyAfterburner;                 // 0 ok, 1 fail
     std::function<int(Feed&)> applyPrepare;
     std::function<int(Feed&)> applyMemory;
     std::function<int(Feed&)> applyStorage;

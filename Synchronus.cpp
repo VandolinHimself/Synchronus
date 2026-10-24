@@ -2559,16 +2559,22 @@ bool ApplyGpuTweaks() {
                    wrote, failed ? Format(L", %d did not confirm", failed).c_str() : L""));
     Out(Format(L"Applied %d GPU tweak(s)%s. Reboot for HAGS / ReBAR. Uninstall restores the previous values.",
                wrote, failed ? Format(L", %d failed", failed).c_str() : L""));
+    Dwell(1600);
+    return true;
+}
+
+bool ApplyAfterburner() {
     Narrate(L"Afterburner",
             L"MSI Afterburner and RivaTuner are installed if they are missing. On an NVIDIA GPU the OC "
             L"scanner runs next. That scan can take about 30 minutes. The result is applied at every logon.");
-    std::wstring abErr;
-    if (!gui::InstallAfterburner(g_feed, abErr)) {
-        Out(L"Afterburner: " + (abErr.empty() ? L"could not be installed." : abErr));
-    } else {
-        Out(L"Afterburner and RivaTuner will apply the saved overclock at every logon.");
+    ReportPhase(L"AFTERBURNER", L"installing Afterburner and RivaTuner");
+    Out(L"Installing MSI Afterburner and RivaTuner, then scanning a startup overclock.");
+    std::wstring err;
+    if (!gui::InstallAfterburner(g_feed, err)) {
+        Err(err.empty() ? L"Afterburner did not install." : err);
+        return false;
     }
-    Dwell(1600);
+    Out(L"Afterburner and RivaTuner will apply the saved overclock at every logon.");
     return true;
 }
 
@@ -3308,6 +3314,10 @@ void PrintHelp() {
         L"  Synchronus.exe --apply-gpu           Apply GPU driver / Windows graphics tweaks only.\n"
         L"      --gpu                            Force the GPU Config step.\n"
         L"      --no-gpu                         Skip the GPU Config step.\n"
+        L"  Synchronus.exe --apply-afterburner  Install Afterburner and RivaTuner, scan, and\n"
+        L"                                       apply the overclock at every logon. This step only.\n"
+        L"      --afterburner                    Force that step in the full flow.\n"
+        L"      --no-afterburner                 Skip the Afterburner step.\n"
         L"  Synchronus.exe --apply-memory        Pagefile + disable memory compression only.\n"
         L"  Synchronus.exe --apply-storage       PCIe/USB/disk/TRIM/SysMain tweaks only.\n"
         L"      --no-prepare / --no-memory / --no-storage\n"
@@ -3333,6 +3343,8 @@ struct Options {
     bool noPpm = false;    // skip the PPM step
     bool gpu = false;      // force GPU tweaks
     bool noGpu = false;    // skip the GPU step
+    bool afterburner = false;
+    bool noAfterburner = false;
     bool noPrepare = false;
     bool noMemory = false;
     bool noStorage = false;
@@ -3371,6 +3383,12 @@ bool ParseOptions(const std::vector<std::wstring>& args, Options& opts) {
             opts.command = L"ppm";
         } else if (a == L"--apply-gpu") {
             opts.command = L"gpu";
+        } else if (a == L"--apply-afterburner") {
+            opts.command = L"afterburner";
+        } else if (a == L"--afterburner") {
+            opts.afterburner = true;
+        } else if (a == L"--no-afterburner") {
+            opts.noAfterburner = true;
         } else if (a == L"--apply-prepare") {
             opts.command = L"prepare";
         } else if (a == L"--apply-memory") {
@@ -3477,6 +3495,10 @@ bool ParseOptions(const std::vector<std::wstring>& args, Options& opts) {
     }
     if (opts.gpu && opts.noGpu) {
         Err(L"--gpu and --no-gpu cannot be used together.");
+        return false;
+    }
+    if (opts.afterburner && opts.noAfterburner) {
+        Err(L"--afterburner and --no-afterburner cannot be used together.");
         return false;
     }
     return true;
@@ -3629,6 +3651,24 @@ int OfferGpu(const Options& opts) {
     g_ppmDwell = !opts.noPause;
     Out(L"Applying GPU driver optimization tweaks. Each change is explained before it is written.");
     return ApplyGpuTweaks() ? 0 : 1;
+}
+
+int OfferAfterburner(const Options& opts) {
+    if (opts.noAfterburner) {
+        Out(L"Skipping Afterburner (--no-afterburner).");
+        return 2;
+    }
+    bool apply = opts.afterburner || opts.yes;
+    if (!apply) {
+        apply = Confirm(opts,
+                        L"Install MSI Afterburner and RivaTuner, scan an NVIDIA overclock, "
+                        L"and apply it at every logon?");
+    }
+    if (!apply) {
+        Out(L"Afterburner was not installed. Re-run with --apply-afterburner.");
+        return 2;
+    }
+    return ApplyAfterburner() ? 0 : 1;
 }
 
 int CmdApplyPpm(const Options& opts) {
@@ -3804,6 +3844,7 @@ int CmdInstall(const Options& opts, bool interactiveDefault) {
     Out(L"Remove with:          Synchronus.exe --uninstall");
     OfferPpm(opts);
     OfferGpu(opts);
+    OfferAfterburner(opts);
     if (!opts.noMemory) {
         if (opts.yes || Confirm(opts, L"Apply memory tweaks (system-managed pagefile, disable memory compression)?")) {
             g_ppmDwell = !opts.noPause;
@@ -3921,7 +3962,8 @@ int RunCli(const Options& opts, const std::vector<std::wstring>& args) {
     const bool needsAdmin = interactiveDefault || opts.command == L"install" ||
                             opts.command == L"uninstall" || opts.command == L"start" ||
                             opts.command == L"stop" || opts.command == L"ppm" ||
-                            opts.command == L"gpu" || opts.command == L"benchmark" ||
+                            opts.command == L"gpu" || opts.command == L"afterburner" ||
+                            opts.command == L"benchmark" ||
                             opts.command == L"prepare" || opts.command == L"memory" ||
                             opts.command == L"storage";
 
@@ -3968,6 +4010,8 @@ int RunCli(const Options& opts, const std::vector<std::wstring>& args) {
             exitCode = CmdApplyPpm(opts);
         } else if (opts.command == L"gpu") {
             exitCode = CmdApplyGpu(opts);
+        } else if (opts.command == L"afterburner") {
+            exitCode = ApplyAfterburner() ? 0 : 1;
         } else if (opts.command == L"prepare") {
             g_ppmDwell = !opts.noPause;
             exitCode = ApplyPrepareTweaks() ? 0 : 1;
@@ -4146,6 +4190,7 @@ int RunGui(const Options& opts, const std::vector<std::wstring>&) {
     host.ppmSkip = opts.noPpm;
     host.gpuForce = opts.gpu;
     host.gpuSkip = opts.noGpu;
+    host.afterburnerSkip = opts.noAfterburner;
     host.prepareSkip = opts.noPrepare;
     host.memorySkip = opts.noMemory;
     host.storageSkip = opts.noStorage;
@@ -4206,6 +4251,14 @@ int RunGui(const Options& opts, const std::vector<std::wstring>&) {
         g_ppmDwell = true;
         feed.Phase(L"GPU CONFIG", L"applying GPU driver / Windows graphics tweaks");
         const bool ok = ApplyGpuTweaks();
+        g_feed = nullptr;
+        return ok ? 0 : 1;
+    };
+    host.applyAfterburner = [](gui::Feed& feed) -> int {
+        g_feed = &feed;
+        g_ppmDwell = true;
+        feed.Phase(L"AFTERBURNER", L"installing Afterburner and RivaTuner");
+        const bool ok = ApplyAfterburner();
         g_feed = nullptr;
         return ok ? 0 : 1;
     };

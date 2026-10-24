@@ -1326,12 +1326,13 @@ enum class Stage {
     PpmPrompt, PpmApplying, PpmDone, PpmFailed,
     GpuClean,
     GpuPrompt, GpuApplying, GpuDone, GpuFailed,
+    AfterburnerPrompt, AfterburnerApplying, AfterburnerDone, AfterburnerFailed,
     MemoryPrompt, MemoryApplying, MemoryDone, MemoryFailed,
     StoragePrompt, StorageApplying, StorageDone, StorageFailed,
     Review
 };
 
-constexpr int kStepCount = 10;
+constexpr int kStepCount = 11;
 
 struct StepMeta {
     int number;
@@ -1371,19 +1372,24 @@ StepMeta Meta(Stage s) {
         case Stage::GpuDone:
         case Stage::GpuFailed:
             return {7, L"GPU Config", L"Power, latency, overlays"};
+        case Stage::AfterburnerPrompt:
+        case Stage::AfterburnerApplying:
+        case Stage::AfterburnerDone:
+        case Stage::AfterburnerFailed:
+            return {8, L"Afterburner", L"OC scan, apply at logon"};
         case Stage::MemoryPrompt:
         case Stage::MemoryApplying:
         case Stage::MemoryDone:
         case Stage::MemoryFailed:
-            return {8, L"Memory", L"Pagefile and compression"};
+            return {9, L"Memory", L"Pagefile and compression"};
         case Stage::StoragePrompt:
         case Stage::StorageApplying:
         case Stage::StorageDone:
         case Stage::StorageFailed:
-            return {9, L"Storage", L"SSD, PCIe, USB, TRIM"};
+            return {10, L"Storage", L"SSD, PCIe, USB, TRIM"};
         case Stage::Review:
         default:
-            return {10, L"Review", L"Validate, then restart"};
+            return {11, L"Review", L"Validate, then restart"};
     }
 }
 
@@ -1403,6 +1409,10 @@ bool IsTuneStage(Stage s) {
         case Stage::GpuApplying:
         case Stage::GpuDone:
         case Stage::GpuFailed:
+        case Stage::AfterburnerPrompt:
+        case Stage::AfterburnerApplying:
+        case Stage::AfterburnerDone:
+        case Stage::AfterburnerFailed:
         case Stage::MemoryPrompt:
         case Stage::MemoryApplying:
         case Stage::MemoryDone:
@@ -1426,6 +1436,7 @@ enum {
     kWantCpu,
     kWantGpuClean,
     kWantGpu,
+    kWantAfterburner,
     kWantMemory,
     kWantStorage,
     kWantCount
@@ -1444,6 +1455,7 @@ public:
         if (host_.prepareSkip) want_[kWantPrepare] = false;
         if (host_.ppmSkip) want_[kWantCpu] = false;
         if (host_.gpuSkip) want_[kWantGpu] = false;
+        if (host_.afterburnerSkip) want_[kWantAfterburner] = false;
         if (host_.memorySkip) want_[kWantMemory] = false;
         if (host_.storageSkip) want_[kWantStorage] = false;
     }
@@ -1902,6 +1914,15 @@ private:
                         state_.Phase(L"GPU CONFIG", g.detail.empty() ? L"driver / Windows graphics settings" : g.detail);
                     }
                     return;
+                case kWantAfterburner:
+                    if (!host_.applyAfterburner) continue;
+                    if (host_.autoInstall) {
+                        StartAfterburner();
+                        return;
+                    }
+                    stage_ = Stage::AfterburnerPrompt;
+                    state_.Phase(L"AFTERBURNER", L"OC scan, apply at every logon");
+                    return;
                 case kWantMemory:
                     if (!host_.applyMemory) continue;
                     if (host_.autoInstall) {
@@ -1930,6 +1951,7 @@ private:
 
     void MaybeStartPpm() { StartAtOrAfter(kWantCpu); }
     void MaybeStartGpu() { StartAtOrAfter(kWantGpu); }
+    void MaybeStartAfterburner() { StartAtOrAfter(kWantAfterburner); }
     void MaybeStartMemory() { StartAtOrAfter(kWantMemory); }
     void MaybeStartStorage() { StartAtOrAfter(kWantStorage); }
 
@@ -1964,6 +1986,22 @@ private:
             } else {
                 state_.Phase(L"GPU CONFIG", L"see the log for details");
                 stage_ = Stage::GpuFailed;
+            }
+        });
+    }
+
+    void StartAfterburner() {
+        JoinWorker();
+        stage_ = Stage::AfterburnerApplying;
+        worker_ = std::thread([this] {
+            state_.Phase(L"AFTERBURNER", L"installing Afterburner and RivaTuner");
+            const int rc = host_.applyAfterburner ? host_.applyAfterburner(state_) : 1;
+            if (rc == 0) {
+                state_.Phase(L"AFTERBURNER", L"overclock applies at every logon");
+                stage_ = Stage::AfterburnerDone;
+            } else {
+                state_.Phase(L"AFTERBURNER", L"see the log for details");
+                stage_ = Stage::AfterburnerFailed;
             }
         });
     }
@@ -2017,7 +2055,8 @@ private:
             }
             if (entered == Stage::PrepareDone) StartAtOrAfter(kWantBios);
             if (entered == Stage::PpmDone) StartAtOrAfter(kWantGpuClean);
-            if (entered == Stage::GpuDone) StartAtOrAfter(kWantMemory);
+            if (entered == Stage::GpuDone) StartAtOrAfter(kWantAfterburner);
+            if (entered == Stage::AfterburnerDone) StartAtOrAfter(kWantMemory);
             if (entered == Stage::MemoryDone) StartAtOrAfter(kWantStorage);
             if (entered == Stage::StorageDone) {
                 stage_ = Stage::Review;
@@ -2125,17 +2164,21 @@ private:
         const std::wstring phase = snap_.phase.empty() ? Upper(std::wstring(meta.name)) : snap_.phase;
         D2D1_COLOR_F phaseColor = col::cyan;
         if (stage == Stage::Result || stage == Stage::Installed || stage == Stage::PpmDone || stage == Stage::GpuDone ||
+            stage == Stage::AfterburnerDone ||
             stage == Stage::PrepareDone || stage == Stage::MemoryDone || stage == Stage::StorageDone ||
             stage == Stage::Review)
             phaseColor = col::green;
         if (stage == Stage::Failed || stage == Stage::InstallFailed || stage == Stage::Cancelled ||
-            stage == Stage::PpmFailed || stage == Stage::GpuFailed || stage == Stage::PrepareFailed ||
+            stage == Stage::PpmFailed || stage == Stage::GpuFailed || stage == Stage::AfterburnerFailed ||
+            stage == Stage::PrepareFailed ||
             stage == Stage::MemoryFailed || stage == Stage::StorageFailed)
             phaseColor = col::red;
         if (stage == Stage::Installing || stage == Stage::PpmApplying || stage == Stage::GpuApplying ||
+            stage == Stage::AfterburnerApplying ||
             stage == Stage::PrepareApplying || stage == Stage::MemoryApplying || stage == Stage::StorageApplying)
             phaseColor = col::amber;
-        if (stage == Stage::PpmPrompt || stage == Stage::GpuPrompt || stage == Stage::Welcome ||
+        if (stage == Stage::PpmPrompt || stage == Stage::GpuPrompt || stage == Stage::AfterburnerPrompt ||
+            stage == Stage::Welcome ||
             stage == Stage::PreparePrompt || stage == Stage::Bios || stage == Stage::GpuClean ||
             stage == Stage::MemoryPrompt || stage == Stage::StoragePrompt)
             phaseColor = col::violet;
@@ -2850,16 +2893,19 @@ private:
             L"CPU Tune \u2014 Ultimate + PPM",
             L"GPU Clean \u2014 latest driver, no extras",
             L"GPU Config \u2014 power & latency",
+            L"Afterburner \u2014 OC scan, apply at boot",
             L"Memory \u2014 pagefile, compression",
             L"Storage \u2014 ASPM, TRIM, USB",
             L"Review \u2014 always last",
         };
         const float colW = (W(card) - 88) / 2;
+        const int rows = 6;
+        const float rowH = 28.0f;
         for (int i = 0; i < kWantCount + 1; ++i) {
-            const float colN = (i < 5) ? 0.0f : 1.0f;
-            const float row = static_cast<float>(i % 5);
+            const float colN = i < rows ? 0.0f : 1.0f;
+            const float row = static_cast<float>(i < rows ? i : i - rows);
             const float x = card.left + 36 + colN * (colW + 16);
-            const float yy = y + row * 34;
+            const float yy = y + row * rowH;
             const D2D1_RECT_F cell = D2D1::RectF(x, yy, x + colW, yy + 30);
             const bool locked = (i == kWantCount);
             const bool on = locked ? true : want_[i];
@@ -3547,7 +3593,7 @@ private:
         if (Button(7, btnB, L"Skip this step", col::muted, false, true, dt)) {
             gpuSkipped_ = true;
             state_.Phase(L"GPU CONFIG", L"GPU tweaks skipped");
-            StartAtOrAfter(kWantMemory);
+            StartAtOrAfter(kWantAfterburner);
         }
     }
 
