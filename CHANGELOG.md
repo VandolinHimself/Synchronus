@@ -6,6 +6,8 @@ Current release: **1.12.7**.
 
 - The OC scanner opens on its own and then sits on its Scan button. That button is pressed once the scanner is connected to Afterburner, so the test starts without a click.
 - The step watches the scanner's report and finishes when the curve is exported.
+- The Afterburner step says that the download and the OC scan take about 30 minutes.
+- The scanned curve is saved as Afterburner profile 1 and as the startup profile. The logon task starts Afterburner with that profile.
 
 ## 1.12.6 — 2026-10-24
 

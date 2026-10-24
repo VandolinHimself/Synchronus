@@ -23,6 +23,7 @@
 #include <algorithm>
 #include <atomic>
 #include <cstdarg>
+#include <cstring>
 #include <cwctype>
 #include <functional>
 #include <initializer_list>
@@ -1412,6 +1413,7 @@ void ConfigureAfterburner(const std::wstring& exe) {
     SetCfgKey(text, "UnlockVoltageControl", "1");
     SetCfgKey(text, "UnlockVoltageMonitoring", "1");
     SetCfgKey(text, "FirstRun", "0");
+    SetCfgKey(text, "EnableServer", "1");
     WriteTextFile(cfg, text);
 }
 
@@ -1603,6 +1605,266 @@ double ScanPointFrac(const std::wstring& report) {
     return static_cast<double>(cur) / static_cast<double>(total);
 }
 
+// Afterburner's control memory is the 32-bit layout shipped with 4.6.6:
+// 36-byte header, command at byte 32, 3760-byte GPU entries, id at byte 3500.
+constexpr DWORD kMacmSig = 0x4D41434D;
+constexpr DWORD kMacmFlush = 0x00AB0001;
+constexpr DWORD kMacmHeader = 36;
+constexpr DWORD kMacmEntry = 3760;
+constexpr DWORD kMacmId = 3500;
+constexpr DWORD kMacmPoints = 276 + 4;
+
+DWORD ReadDword(const void* p) {
+    DWORD v = 0;
+    memcpy(&v, p, sizeof(v));
+    return v;
+}
+
+HWND FindAfterburnerWindow(DWORD pid) {
+    struct Hit {
+        DWORD pid;
+        HWND hwnd;
+    } hit{pid, nullptr};
+    EnumWindows(
+        [](HWND hwnd, LPARAM lp) -> BOOL {
+            auto* hit = reinterpret_cast<Hit*>(lp);
+            DWORD windowPid = 0;
+            GetWindowThreadProcessId(hwnd, &windowPid);
+            wchar_t title[256]{};
+            GetWindowTextW(hwnd, title, 256);
+            if (wcsncmp(title, L"MSI Afterburner", 15) != 0) return TRUE;
+            if (!hit->hwnd || windowPid == hit->pid) hit->hwnd = hwnd;
+            if (windowPid == hit->pid) return FALSE;
+            return TRUE;
+        },
+        reinterpret_cast<LPARAM>(&hit));
+    return hit.hwnd;
+}
+
+struct CurveApply {
+    bool flushed = false;
+    std::string gpuId;
+};
+
+CurveApply FlushScannedCurve(DWORD pid) {
+    CurveApply out;
+    HANDLE mutex = CreateMutexW(nullptr, FALSE, L"Global\\Access_MACMSharedMemory");
+    bool own = false;
+    auto lock = [&] {
+        if (!mutex) return true;
+        const DWORD w = WaitForSingleObject(mutex, 5000);
+        own = w == WAIT_OBJECT_0 || w == WAIT_ABANDONED;
+        return own;
+    };
+    auto unlock = [&] {
+        if (own && mutex) {
+            ReleaseMutex(mutex);
+            own = false;
+        }
+    };
+    if (!lock()) {
+        if (mutex) CloseHandle(mutex);
+        return out;
+    }
+    const HANDLE map = OpenFileMappingW(FILE_MAP_ALL_ACCESS, FALSE, L"MACMSharedMemory");
+    BYTE* base = map ? static_cast<BYTE*>(MapViewOfFile(map, FILE_MAP_ALL_ACCESS, 0, 0, 0)) : nullptr;
+    if (!base || ReadDword(base) != kMacmSig || ReadDword(base + 8) < kMacmHeader) {
+        unlock();
+        if (base) UnmapViewOfFile(base);
+        if (map) CloseHandle(map);
+        if (mutex) CloseHandle(mutex);
+        return out;
+    }
+    const DWORD gpus = ReadDword(base + 12);
+    const DWORD entry = ReadDword(base + 16);
+    if (entry == kMacmEntry) {
+        for (DWORD i = 0; i < gpus; ++i) {
+            BYTE* gpu = base + kMacmHeader + i * entry;
+            const char* id = reinterpret_cast<const char*>(gpu + kMacmId);
+            if (std::strncmp(id, "VEN_10DE", 8) != 0) continue;
+            const DWORD points = ReadDword(gpu + kMacmPoints);
+            if (!points) continue;
+            out.gpuId.assign(id, strnlen(id, 220));
+            break;
+        }
+    }
+    memcpy(base + 32, &kMacmFlush, sizeof(kMacmFlush));
+    unlock();
+    const UINT msg = RegisterWindowMessageW(L"MACMCmdNotification");
+    const HWND hwnd = FindAfterburnerWindow(pid);
+    if (hwnd && msg) PostMessageW(hwnd, msg, 0, 0);
+    for (int i = 0; i < 80; ++i) {
+        Sleep(100);
+        if (!lock()) continue;
+        const DWORD cmd = ReadDword(base + 32);
+        unlock();
+        if (cmd == 0) {
+            out.flushed = true;
+            break;
+        }
+    }
+    UnmapViewOfFile(base);
+    CloseHandle(map);
+    if (mutex) CloseHandle(mutex);
+    return out;
+}
+
+std::vector<std::string> SplitLines(const std::string& text) {
+    std::vector<std::string> lines;
+    std::string cur;
+    for (char c : text) {
+        if (c == '\n') {
+            if (!cur.empty() && cur.back() == '\r') cur.pop_back();
+            lines.push_back(std::move(cur));
+            cur.clear();
+        } else {
+            cur.push_back(c);
+        }
+    }
+    if (!cur.empty()) {
+        if (cur.back() == '\r') cur.pop_back();
+        lines.push_back(std::move(cur));
+    }
+    return lines;
+}
+
+std::string JoinLines(const std::vector<std::string>& lines, bool crlf) {
+    std::string out;
+    const char* nl = crlf ? "\r\n" : "\n";
+    for (size_t i = 0; i < lines.size(); ++i) {
+        if (i) out += nl;
+        out += lines[i];
+    }
+    if (!lines.empty()) out += nl;
+    return out;
+}
+
+int FindHeader(const std::vector<std::string>& lines, const char* name) {
+    const std::string header = std::string("[") + name + "]";
+    for (int i = 0; i < static_cast<int>(lines.size()); ++i)
+        if (lines[i] == header) return i;
+    return -1;
+}
+
+int NextHeader(const std::vector<std::string>& lines, int start) {
+    for (int i = start + 1; i < static_cast<int>(lines.size()); ++i)
+        if (!lines[i].empty() && lines[i][0] == '[') return i;
+    return static_cast<int>(lines.size());
+}
+
+std::string KeyLine(const std::vector<std::string>& lines, int start, int end, const char* key) {
+    const std::string prefix = std::string(key) + "=";
+    for (int i = start + 1; i < end; ++i)
+        if (lines[i].compare(0, prefix.size(), prefix) == 0) return lines[i];
+    return {};
+}
+
+void PutKey(std::vector<std::string>& lines, const char* section, const std::string& line) {
+    const size_t eq = line.find('=');
+    if (eq == std::string::npos) return;
+    const std::string prefix = line.substr(0, eq + 1);
+    int start = FindHeader(lines, section);
+    if (start < 0) {
+        int at = FindHeader(lines, "Defaults");
+        if (at < 0) at = static_cast<int>(lines.size());
+        lines.insert(lines.begin() + at, line);
+        lines.insert(lines.begin() + at, std::string("[") + section + "]");
+        return;
+    }
+    int end = NextHeader(lines, start);
+    for (int i = start + 1; i < end; ++i) {
+        if (lines[i].compare(0, prefix.size(), prefix) == 0) {
+            lines[i] = line;
+            return;
+        }
+    }
+    lines.insert(lines.begin() + end, line);
+}
+
+std::wstring ProfilesDir(const std::wstring& exe) {
+    const size_t slash = exe.find_last_of(L"\\/");
+    if (slash == std::wstring::npos) return {};
+    return exe.substr(0, slash) + L"\\Profiles";
+}
+
+std::wstring HardwareProfile(const std::wstring& exe, const std::string& gpuId) {
+    const std::wstring dir = ProfilesDir(exe);
+    if (dir.empty()) return {};
+    if (!gpuId.empty()) {
+        const std::wstring named = dir + L"\\" + std::wstring(gpuId.begin(), gpuId.end()) + L".cfg";
+        if (GetFileAttributesW(named.c_str()) != INVALID_FILE_ATTRIBUTES) return named;
+    }
+    WIN32_FIND_DATAW fd{};
+    const HANDLE find = FindFirstFileW((dir + L"\\VEN_10DE*.cfg").c_str(), &fd);
+    if (find == INVALID_HANDLE_VALUE) return {};
+    std::wstring best;
+    ULONGLONG bestTime = 0;
+    do {
+        if (fd.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY) continue;
+        const ULONGLONG stamp = (static_cast<ULONGLONG>(fd.ftLastWriteTime.dwHighDateTime) << 32) |
+                                fd.ftLastWriteTime.dwLowDateTime;
+        if (stamp >= bestTime) {
+            bestTime = stamp;
+            best = dir + L"\\" + fd.cFileName;
+        }
+    } while (FindNextFileW(find, &fd));
+    FindClose(find);
+    return best;
+}
+
+int KeyNumber(const std::string& line) {
+    const size_t eq = line.find('=');
+    if (eq == std::string::npos) return 0;
+    int value = 0;
+    for (size_t i = eq + 1; i < line.size() && line[i] >= '0' && line[i] <= '9'; ++i)
+        value = value * 10 + (line[i] - '0');
+    return value;
+}
+
+// Copies the scanned startup curve onto profile 1. Afterburner applies that
+// profile at logon with "-profile1", and the [Startup] section when
+// StartWithWindows is set. Fan lines in profile 1 are left alone.
+bool SaveStartupAsProfile1(const std::wstring& exe, const std::string& gpuId, std::wstring& detail) {
+    const std::wstring path = HardwareProfile(exe, gpuId);
+    if (path.empty()) return false;
+    std::string text;
+    if (!ReadFileText(path, text)) return false;
+    const bool crlf = text.find("\r\n") != std::string::npos;
+    auto lines = SplitLines(text);
+    const int startup = FindHeader(lines, "Startup");
+    if (startup < 0) return false;
+    const int startupEnd = NextHeader(lines, startup);
+    const char* keys[] = {"Format", "PowerLimit", "ThermalLimit", "ThermalPrioritize",
+                          "CoreClkBoost", "VFCurve", "MemClkBoost"};
+    bool any = false;
+    for (const char* key : keys) {
+        const std::string line = KeyLine(lines, startup, startupEnd, key);
+        if (line.empty()) continue;
+        PutKey(lines, "Profile1", line);
+        any = true;
+    }
+    if (!any) return false;
+    const int startupNow = FindHeader(lines, "Startup");
+    const int profile = FindHeader(lines, "Profile1");
+    if (startupNow < 0 || profile < 0) return false;
+    const int startupEndNow = NextHeader(lines, startupNow);
+    const int profileEnd = NextHeader(lines, profile);
+    const std::string startupCurve = KeyLine(lines, startupNow, startupEndNow, "VFCurve");
+    const std::string profileCurve = KeyLine(lines, profile, profileEnd, "VFCurve");
+    if (startupCurve.empty() || startupCurve != profileCurve) return false;
+    const std::string joined = JoinLines(lines, crlf);
+    if (joined != text && !WriteTextFile(path, joined)) return false;
+    const int core = KeyNumber(KeyLine(lines, startupNow, startupEndNow, "CoreClkBoost"));
+    const int memory = KeyNumber(KeyLine(lines, startupNow, startupEndNow, "MemClkBoost"));
+    if (core || memory) {
+        detail = L"Profile 1 applies the scanned curve at every logon (core +" + std::to_wstring(core / 1000) +
+                 L" MHz, memory +" + std::to_wstring(memory / 1000) + L" MHz).";
+    } else {
+        detail = L"Profile 1 applies the scanned voltage curve at every logon.";
+    }
+    return true;
+}
+
 }  // namespace
 
 bool InstallAfterburner(Feed* feed, std::wstring& err) {
@@ -1613,6 +1875,8 @@ bool InstallAfterburner(Feed* feed, std::wstring& err) {
         err = L"Stopped.";
         return false;
     }
+    phase(L"download and scan, about 30 minutes");
+    log(L"The Afterburner download and OC scan take about 30 minutes.");
 
     std::wstring ab = AfterburnerExe();
     if (ab.empty()) {
@@ -1718,6 +1982,8 @@ bool InstallAfterburner(Feed* feed, std::wstring& err) {
                                      ? L""
                                      : ab.substr(0, slash) + L"\\Bundle\\OCScanner\\MSIOCScanner_x64.exe";
     bool scanned = false;
+    bool profileReady = false;
+    std::string scannedGpuId;
     if (!nvidia) {
         log(L"The OC scanner targets NVIDIA. Afterburner will still apply its saved settings at logon.");
     } else if (GetFileAttributesW(scanner.c_str()) == INVALID_FILE_ATTRIBUTES) {
@@ -1726,8 +1992,8 @@ bool InstallAfterburner(Feed* feed, std::wstring& err) {
         phase(L"scanning a stable overclock");
         if (feed) {
             feed->Narrate(L"OC scanner",
-                          L"MSI's scanner is testing this NVIDIA GPU. It usually takes about 30 minutes. "
-                          L"Leave the scanner window open. The result is applied at every logon.");
+                          L"The Afterburner download and this scan take about 30 minutes. Leave the scanner "
+                          L"window open. The curve is saved as profile 1 and applied at every logon.");
         }
         log(L"Starting MSI Afterburner, then the OC scanner.");
         Started burner = StartShown(ab, L"");
@@ -1849,6 +2115,10 @@ bool InstallAfterburner(Feed* feed, std::wstring& err) {
                     }
                     if (scanned) {
                         log(L"The OC scanner finished and sent the curve to Afterburner.");
+                        const CurveApply applied = FlushScannedCurve(burner.pid);
+                        scannedGpuId = applied.gpuId;
+                        if (applied.flushed) log(L"Applied the scanned curve on the GPU.");
+                        else log(L"Afterburner did not confirm the apply. The exported curve is still saved if it wrote its profile.");
                         Sleep(2000);
                         if (dlg && IsWindow(dlg)) PostMessageW(dlg, WM_CLOSE, 0, 0);
                         if (WaitForSingleObject(scan.process, 15000) != WAIT_OBJECT_0) TerminateProcess(scan.process, 0);
@@ -1856,6 +2126,13 @@ bool InstallAfterburner(Feed* feed, std::wstring& err) {
                         EnumWindows(ClosePidWindow, static_cast<LPARAM>(burner.pid));
                         if (WaitForSingleObject(burner.process, 15000) != WAIT_OBJECT_0) TerminateProcess(burner.process, 0);
                         CloseStarted(burner);
+                        std::wstring profileDetail;
+                        for (int attempt = 0; attempt < 8 && !profileReady; ++attempt) {
+                            profileReady = SaveStartupAsProfile1(ab, scannedGpuId, profileDetail);
+                            if (!profileReady) Sleep(400);
+                        }
+                        if (profileReady) log(profileDetail);
+                        else log(L"The scanned curve was not copied onto Afterburner profile 1.");
                     } else if (!done) {
                         log(L"The OC scanner is still running after 45 minutes. It was left open.");
                         CloseStarted(scan);
@@ -1874,11 +2151,13 @@ bool InstallAfterburner(Feed* feed, std::wstring& err) {
         }
     }
 
-    const std::wstring abTr = L"\\\"" + ab + L"\\\" /s";
+    const std::wstring abTr = profileReady ? L"\\\"" + ab + L"\\\" -profile1 /s" : L"\\\"" + ab + L"\\\" /s";
     if (!ScheduleLogon(L"Synchronus Afterburner", abTr)) {
         log(L"Could not create the Afterburner logon task. Start with Windows is still set in its config.");
+    } else if (profileReady) {
+        log(L"Afterburner will start at logon and apply profile 1.");
     } else {
-        log(L"Afterburner will start at logon and apply the saved overclock.");
+        log(L"Afterburner will start at logon and apply its startup settings.");
     }
     if (!rtss.empty()) {
         const std::wstring rtTr = L"\\\"" + rtss + L"\\\"";

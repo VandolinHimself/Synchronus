@@ -1376,7 +1376,7 @@ StepMeta Meta(Stage s) {
         case Stage::AfterburnerApplying:
         case Stage::AfterburnerDone:
         case Stage::AfterburnerFailed:
-            return {8, L"Afterburner", L"OC scan, apply at logon"};
+            return {8, L"Afterburner", L"download and scan, ~30 min"};
         case Stage::MemoryPrompt:
         case Stage::MemoryApplying:
         case Stage::MemoryDone:
@@ -1921,7 +1921,7 @@ private:
                         return;
                     }
                     stage_ = Stage::AfterburnerPrompt;
-                    state_.Phase(L"AFTERBURNER", L"OC scan, apply at every logon");
+                    state_.Phase(L"AFTERBURNER", L"download and scan, about 30 minutes");
                     return;
                 case kWantMemory:
                     if (!host_.applyMemory) continue;
@@ -2893,7 +2893,7 @@ private:
             L"CPU Tune \u2014 Ultimate + PPM",
             L"GPU Clean \u2014 latest driver, no extras",
             L"GPU Config \u2014 power & latency",
-            L"Afterburner \u2014 OC scan, apply at boot",
+            L"Afterburner \u2014 download and scan, ~30 min",
             L"Memory \u2014 pagefile, compression",
             L"Storage \u2014 ASPM, TRIM, USB",
             L"Review \u2014 always last",
@@ -3139,9 +3139,9 @@ private:
                 break;
             case Stage::AfterburnerPrompt:
                 DrawPackPrompt(B, dt, L"Afterburner and RivaTuner",
-                               L"Downloads MSI Afterburner 4.6.6 and RivaTuner if they are not installed. "
-                               L"On an NVIDIA GPU the OC scanner starts on its own (about 30 minutes). The saved overclock "
-                               L"is applied every time you log on. This step does not change the GPU driver.",
+                               L"The Afterburner download and the OC scan take about 30 minutes. MSI Afterburner 4.6.6 and "
+                               L"RivaTuner are installed if they are missing. On an NVIDIA GPU the scanner starts on its own. "
+                               L"The curve it finds is saved as profile 1 and applied every time you log on. This step does not change the GPU driver.",
                                L"Continue  \u2014  install and scan", col::green,
                                [this] { StartAfterburner(); },
                                [this] { MaybeStartMemory(); });

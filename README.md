@@ -62,7 +62,8 @@ the AMD Anti-Lag / ULPS set. DDU, NVCleanstall, and BIOS ReBAR still have
 to be done by you — this process cannot wipe a driver or flash firmware.
 
 A separate step, which can be run on its own, installs MSI Afterburner and
-RivaTuner, runs the NVIDIA OC scanner, and applies that result at every logon.
+RivaTuner. The download and the NVIDIA OC scan take about 30 minutes. The
+curve is saved as profile 1 and applied at every logon.
 
 The app **requires administrator rights** at launch (UAC). `--uninstall`
 restores the previous power-plan and GPU values.

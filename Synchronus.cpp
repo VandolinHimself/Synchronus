@@ -2565,16 +2565,17 @@ bool ApplyGpuTweaks() {
 
 bool ApplyAfterburner() {
     Narrate(L"Afterburner",
-            L"MSI Afterburner and RivaTuner are installed if they are missing. On an NVIDIA GPU the OC "
-            L"scanner starts on its own. That scan can take about 30 minutes. The result is applied at every logon.");
-    ReportPhase(L"AFTERBURNER", L"installing Afterburner and RivaTuner");
-    Out(L"Installing MSI Afterburner and RivaTuner, then scanning a startup overclock.");
+            L"The Afterburner download and OC scan take about 30 minutes. MSI Afterburner and RivaTuner "
+            L"are installed if they are missing. On an NVIDIA GPU the scanner starts on its own. The curve "
+            L"is saved as profile 1 and applied at every logon.");
+    ReportPhase(L"AFTERBURNER", L"download and scan, about 30 minutes");
+    Out(L"Installing MSI Afterburner and RivaTuner, then scanning a startup overclock. This takes about 30 minutes.");
     std::wstring err;
     if (!gui::InstallAfterburner(g_feed, err)) {
         Err(err.empty() ? L"Afterburner did not install." : err);
         return false;
     }
-    Out(L"Afterburner and RivaTuner will apply the saved overclock at every logon.");
+    Out(L"Afterburner and RivaTuner will apply profile 1 at every logon.");
     return true;
 }
 
@@ -3661,8 +3662,9 @@ int OfferAfterburner(const Options& opts) {
     bool apply = opts.afterburner || opts.yes;
     if (!apply) {
         apply = Confirm(opts,
-                        L"Install MSI Afterburner and RivaTuner, scan an NVIDIA overclock, "
-                        L"and apply it at every logon?");
+                        L"Download MSI Afterburner if it is missing and scan an NVIDIA overclock? "
+                        L"The download and scan take about 30 minutes. The curve is saved as profile 1 "
+                        L"and applied at every logon.");
     }
     if (!apply) {
         Out(L"Afterburner was not installed. Re-run with --apply-afterburner.");
