@@ -3137,6 +3137,24 @@ private:
                 if (Button(6, btnA, L"Retry GPU", col::violet, true, true, dt, true, true)) StartGpu();
                 if (Button(7, btnB, L"Skip", col::muted, false, true, dt)) stage_ = Stage::GpuDone;
                 break;
+            case Stage::AfterburnerPrompt:
+                DrawPackPrompt(B, dt, L"Afterburner and RivaTuner",
+                               L"Downloads MSI Afterburner 4.6.6 and RivaTuner if they are not installed. "
+                               L"On an NVIDIA GPU the OC scanner runs (about 30 minutes). The saved overclock "
+                               L"is applied every time you log on. This step does not change the GPU driver.",
+                               L"Continue  \u2014  install and scan", col::green,
+                               [this] { StartAfterburner(); },
+                               [this] { MaybeStartMemory(); });
+                break;
+            case Stage::AfterburnerApplying:
+            case Stage::AfterburnerDone:
+                DrawTweakProgress(B, dt, stage == Stage::AfterburnerDone, false);
+                break;
+            case Stage::AfterburnerFailed:
+                DrawPackFail(B, dt, L"Afterburner failed \u2014 see the log. The GPU driver settings are unchanged.",
+                             [this] { StartAfterburner(); },
+                             [this] { MaybeStartMemory(); });
+                break;
             case Stage::MemoryPrompt:
                 DrawPackPrompt(B, dt, L"Pagefile and memory compression",
                                L"Keeps a system-managed pagefile so commit never hits a zero-pagefile cliff, and "
