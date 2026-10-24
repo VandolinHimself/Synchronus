@@ -69,7 +69,7 @@ gui::MeasurePlan gui::MeasurePlanFor(int fidelity) {
 
 namespace {
 
-constexpr wchar_t kVersion[] = L"1.12.4";
+constexpr wchar_t kVersion[] = L"1.12.5";
 constexpr wchar_t kProduct[] = L"Synchronus";
 constexpr wchar_t kCompany[] = L"Lucius And Wayne Systems LLC";
 constexpr wchar_t kCompanyUrl[] = L"https://luciuswayne.com";

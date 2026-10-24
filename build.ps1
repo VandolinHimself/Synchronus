@@ -15,7 +15,7 @@ param(
 
 $ErrorActionPreference = 'Stop'
 $root = $PSScriptRoot
-$solution = Join-Path $root 'Synchronus\Synchronus.sln'
+$solution = Join-Path $root 'Synchronus.sln'
 
 # --- locate MSBuild -------------------------------------------------------
 $msbuild = $null
@@ -89,7 +89,7 @@ if ($sdkVersion) {
 & $msbuild $solution /p:Configuration=$Configuration /p:Platform=x64 /p:PlatformToolset=$toolset @sdkArgs /m /v:minimal /nologo
 if ($LASTEXITCODE -ne 0) { throw "Build failed with exit code $LASTEXITCODE" }
 
-$built = Join-Path $root "Synchronus\x64\$Configuration\Synchronus.exe"
+$built = Join-Path $root "x64\$Configuration\Synchronus.exe"
 if (-not (Test-Path $built)) { throw "Build reported success but $built was not produced." }
 
 $dist = Join-Path $root 'dist'

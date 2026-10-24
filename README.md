@@ -107,28 +107,28 @@ Opening the window checks one address for a newer build:
 https://luciuswayne.com/synchronus/latest.json
 ```
 
-That address does not change. The request is a GET, and the query `?current=1.12.4` (the running version) can be ignored. Serve the file over HTTPS with `Cache-Control: no-store`. Plain HTTP is refused. The list may be read from `luciuswayne.com`, `www.luciuswayne.com`, or `media.luciuswayne.com`.
+That address does not change. The request is a GET, and the query `?current=1.12.5` (the running version) can be ignored. Serve the file over HTTPS with `Cache-Control: no-store`. Plain HTTP is refused. The list may be read from `luciuswayne.com`, `www.luciuswayne.com`, or `media.luciuswayne.com`.
 
 The executable must be `https://media.luciuswayne.com/Synchronus.exe` or `https://media.luciuswayne.com/Synchronus-<release>.exe`, including after a redirect. The release token is 1–64 characters of letters, numbers, `.`, `_`, and `-`, and it cannot contain `..`. This release is published as:
 
 ```
-https://media.luciuswayne.com/Synchronus-1.12.4.exe
+https://media.luciuswayne.com/Synchronus-1.12.5.exe
 ```
 
 ```json
 {
-  "version": "1.12.4",
-  "url": "https://media.luciuswayne.com/Synchronus-1.12.4.exe",
+  "version": "1.12.5",
+  "url": "https://media.luciuswayne.com/Synchronus-1.12.5.exe",
   "notes": "What changed, in plain text.",
   "sha256": "paste the 64 hex digits here",
   "size": 1234567
 }
 ```
 
-`version`, `url`, and `sha256` are required. `notes` and `size` are optional. `version` is numeric (`1.12.4` and `1.12.4.0` are the same) and must be newer than the running copy. Publish each build under its own `Synchronus-<version>.exe` name. The media host keeps files for a long time, so a new name is what makes the download a new file. `sha256` is the SHA-256 of that file:
+`version`, `url`, and `sha256` are required. `notes` and `size` are optional. `version` is numeric (`1.12.5` and `1.12.5.0` are the same) and must be newer than the running copy. Publish each build under its own `Synchronus-<version>.exe` name. The media host keeps files for a long time, so a new name is what makes the download a new file. `sha256` is the SHA-256 of that file:
 
 ```
-certutil -hashfile Synchronus-1.12.4.exe SHA256
+certutil -hashfile Synchronus-1.12.5.exe SHA256
 ```
 
 The downloaded file's `FILEVERSION` must be that same `version`. In this tree that is `Synchronus.rc` and `kVersion` in `Synchronus.cpp`. If the list is missing or the machine is offline, the window stays quiet. A rejected list is written to `%ProgramData%\Synchronus\Synchronus.log`.
@@ -137,7 +137,7 @@ After a download is verified, the app POSTs once to `https://luciuswayne.com/api
 
 ## Building
 
-Open `Synchronus/Synchronus.sln` in Visual Studio 2019 or 2022 with the
+Open `Synchronus.sln` in Visual Studio 2019 or 2022 with the
 Desktop development with C++ workload, or from this directory:
 
 ```powershell
@@ -152,16 +152,16 @@ redistributable. Release is x64 only.
 Source layout:
 
 ```
-Synchronus/Synchronus.sln    solution
-Synchronus/Synchronus.cpp    benchmark, service, and command line
-Synchronus/Gui.cpp           window
-Synchronus/GpuDriver.cpp     GPU driver tweaks
-Synchronus/Update.cpp        update check
-Synchronus/Synchronus.rc     version resource, icon, fonts
+Synchronus.sln      solution
+Synchronus.cpp      benchmark, service, and command line
+Gui.cpp             window
+GpuDriver.cpp       GPU driver tweaks
+Update.cpp          update check
+Synchronus.rc       version resource, icon, fonts
 build.ps1
 ```
 
-Build products (`Synchronus/x64/`, `dist/`) are gitignored.
+Build products (`x64/`, `dist/`) are gitignored.
 
 ## Notes
 
@@ -183,4 +183,4 @@ Build products (`Synchronus/x64/`, `dist/`) are gitignored.
 [amitxv/TimerResolution](https://github.com/amitxv/TimerResolution).
 
 Philosopher, Gruppo, and Bruno Ace SC are bundled under the
-[SIL Open Font License](Synchronus/fonts/OFL.txt).
+[SIL Open Font License](fonts/OFL.txt).

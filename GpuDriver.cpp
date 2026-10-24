@@ -9,7 +9,8 @@
 // AMD: the current Adrenalin package from drivers.amd.com (the version index
 // is the small public Chocolatey package; the bytes and the hash come from
 // that index, and the file itself is only accepted from drivers.amd.com).
-// 7-Zip unpacks it. pnputil installs the display INF only. The Adrenalin
+// 7-Zip unpacks it. If 7-Zip is not installed, the official 7-Zip installer
+// is downloaded and installed first. pnputil installs the display INF only. The Adrenalin
 // installer is never launched, because its silent switch installs the suite.
 #define NOMINMAX
 #include <windows.h>
@@ -19,6 +20,7 @@
 #include "Gui.h"
 
 #include <algorithm>
+#include <atomic>
 #include <cstdarg>
 #include <cwctype>
 #include <functional>
@@ -37,7 +39,7 @@ constexpr uint64_t kMaxPackage = (4ull << 30) - (64ull << 20);
 constexpr wchar_t kDisplayClass[] =
     L"SYSTEM\\CurrentControlSet\\Control\\Class\\{4d36e968-e325-11ce-bfc1-08002be10318}";
 
-enum class Allow { NvidiaApi, NvidiaFile, AmdFile, Index };
+enum class Allow { NvidiaApi, NvidiaFile, AmdFile, Index, SevenZip };
 
 std::wstring Format(const wchar_t* fmt, ...) {
     wchar_t buffer[2048];
@@ -173,6 +175,9 @@ bool HostAllowed(Allow allow, const std::wstring& host) {
             return h == L"drivers.amd.com";
         case Allow::Index:
             return h == L"community.chocolatey.org" || h == L"packages.chocolatey.org";
+        case Allow::SevenZip:
+            return h == L"www.7-zip.org" || h == L"7-zip.org" || h == L"github.com" ||
+                   h == L"release-assets.githubusercontent.com";
     }
     return false;
 }
@@ -666,10 +671,20 @@ void ProbeSize(GpuDriverOffer& o, Allow allow, bool browser, const std::atomic<b
 }
 
 std::wstring SevenZip() {
+    const wchar_t* roots[] = {L"ProgramW6432", L"ProgramFiles"};
+    for (const wchar_t* env : roots) {
+        wchar_t buf[MAX_PATH];
+        const DWORD n = GetEnvironmentVariableW(env, buf, _countof(buf));
+        if (!n || n >= _countof(buf)) continue;
+        const std::wstring path = std::wstring(buf) + L"\\7-Zip\\7z.exe";
+        if (GetFileAttributesW(path.c_str()) != INVALID_FILE_ATTRIBUTES) return path;
+    }
     const wchar_t* cands[] = {L"C:\\Program Files\\7-Zip\\7z.exe", L"C:\\Program Files (x86)\\7-Zip\\7z.exe"};
     for (const wchar_t* c : cands) {
         if (GetFileAttributesW(c) != INVALID_FILE_ATTRIBUTES) return c;
     }
+    wchar_t found[MAX_PATH];
+    if (SearchPathW(nullptr, L"7z.exe", nullptr, _countof(found), found, nullptr)) return found;
     return {};
 }
 
@@ -769,7 +784,8 @@ void FillNvidia(GpuDriverOffer& o, const Adapter& a, bool laptop, const std::wst
     o.gpuName = a.name;
     if (!a.installed.empty()) o.installed = L"Windows driver  " + a.installed;
     o.summary = L"Keeps the display driver and PhysX. Leaves out the NVIDIA App, telemetry, ShadowPlay, FrameView, "
-                L"and HD audio. The current NVIDIA driver is replaced. Nothing is installed until you confirm again.";
+                L"and HD audio. The current NVIDIA driver is replaced. 7-Zip is installed first if it is not already "
+                L"there. Nothing is installed until you confirm again.";
     if (!a.pci.valid()) {
         o.error = L"The adapter PCI id could not be read.";
         return;
@@ -895,13 +911,8 @@ void FillAmd(GpuDriverOffer& o, const Adapter& a, bool laptop, const std::wstrin
     if (!a.installed.empty()) o.installed = L"Windows driver  " + a.installed;
     o.channel = L"AMD Software: Adrenalin Edition";
     o.summary = L"Keeps the AMD display driver only. 7-Zip unpacks the package and Windows installs that display "
-                L"driver. Adrenalin, the overlay, Chill, and the rest of the suite are not installed. If the package "
-                L"cannot be trimmed, nothing is installed.";
-    if (SevenZip().empty()) {
-        o.error = L"AMD's package can be trimmed only with 7-Zip, which is not installed.";
-        AddContext(o, laptop, other);
-        return;
-    }
+                L"driver. Adrenalin, the overlay, Chill, and the rest of the suite are not installed. 7-Zip is "
+                L"installed first if it is not already there. If the package cannot be trimmed, nothing is installed.";
     if (feed) feed->Log(L"Asking for the current AMD display driver.");
     std::wstring err;
     if (!LookupAmdIndex(o.url, o.sha256, o.version, err, stop) || stop.load()) {
@@ -1141,6 +1152,69 @@ int DownloadGpuDriver(Feed& feed, GpuDriverOffer& offer, const std::atomic<bool>
     return 0;
 }
 
+// Official 7-Zip 26.05 x64 installer. www.7-zip.org redirects to the GitHub
+// release, which redirects to release-assets.githubusercontent.com.
+constexpr wchar_t kSevenZipUrl[] = L"https://www.7-zip.org/a/7z2605-x64.exe";
+
+std::wstring EnsureSevenZip(Feed& feed, std::wstring& err) {
+    const std::wstring have = SevenZip();
+    if (!have.empty()) return have;
+    if (feed.Cancelled()) {
+        err = L"Stopped.";
+        return {};
+    }
+    feed.Phase(L"GPU CLEAN", L"installing 7-Zip");
+    feed.Log(L"7-Zip is not installed. Downloading the official 7-Zip installer.");
+    const std::wstring dir = DriverDir();
+    EnsureDir(dir);
+    const std::wstring setup = dir + L"\\7z2605-x64.exe";
+    DeleteFileW(setup.c_str());
+    const HANDLE file = CreateFileW(setup.c_str(), GENERIC_WRITE, 0, nullptr, CREATE_ALWAYS, FILE_ATTRIBUTE_NORMAL, nullptr);
+    if (file == INVALID_HANDLE_VALUE) {
+        err = L"Could not store the 7-Zip installer.";
+        return {};
+    }
+    std::atomic<bool> stop{false};
+    HttpOut res;
+    const bool saved = Http(
+        Allow::SevenZip, L"GET", kSevenZipUrl, true, 16ull << 20,
+        [&](const BYTE* p, DWORD n, uint64_t, uint64_t) {
+            if (feed.Cancelled()) {
+                stop.store(true);
+                return false;
+            }
+            DWORD wrote = 0;
+            return WriteFile(file, p, n, &wrote, nullptr) && wrote == n;
+        },
+        res, err, stop);
+    CloseHandle(file);
+    if (!saved || !LooksLikePe(setup)) {
+        DeleteFileW(setup.c_str());
+        if (feed.Cancelled() || res.stopped) err = L"Stopped.";
+        else if (err.empty()) err = L"The 7-Zip installer could not be downloaded.";
+        return {};
+    }
+    feed.Log(L"Installing 7-Zip.");
+    const std::wstring cmd = L"\"" + setup + L"\" /S";
+    const Proc installed = RunProcess(setup, cmd, dir, 5u * 60u * 1000u, true, true);
+    DeleteFileW(setup.c_str());
+    if (!installed.started) {
+        err = L"The 7-Zip installer did not start.";
+        return {};
+    }
+    if (installed.timedOut || installed.code != 0) {
+        err = L"7-Zip did not install (" + CodeText(installed.code) + L").";
+        return {};
+    }
+    const std::wstring ready = SevenZip();
+    if (ready.empty()) {
+        err = L"7-Zip installed, but 7z.exe was not found.";
+        return {};
+    }
+    feed.Log(L"7-Zip is installed.");
+    return ready;
+}
+
 int InstallTrimmedGpuDriver(Feed& feed, GpuDriverOffer& offer) {
     if (offer.file.empty() || !IsUnder(offer.file, DriverDir()) || !LooksLikePe(offer.file)) {
         offer.error = L"There is no downloaded package to install.";
@@ -1157,9 +1231,10 @@ int InstallTrimmedGpuDriver(Feed& feed, GpuDriverOffer& offer) {
         // install with 0xE6000000. Left unnamed, setup skips it when present
         // and installs it when missing. -n is setup.cfg's IgnoreReboot option.
         const std::wstring keep = L"Display.Driver Display.PhysX";
-        const std::wstring seven = SevenZip();
+        std::wstring zipErr;
+        const std::wstring seven = EnsureSevenZip(feed, zipErr);
         if (seven.empty()) {
-            offer.error = L"7-Zip is not installed, so the NVIDIA package cannot be trimmed. Install 7-Zip and retry.";
+            offer.error = zipErr.empty() ? L"7-Zip could not be installed, so the NVIDIA package cannot be trimmed." : zipErr;
             return 1;
         }
         const std::wstring unpack = dir + L"\\nvidia-unpack";
@@ -1203,10 +1278,12 @@ int InstallTrimmedGpuDriver(Feed& feed, GpuDriverOffer& offer) {
         return 1;
     }
 
-    const std::wstring seven = SevenZip();
+    std::wstring zipErr;
+    const std::wstring seven = EnsureSevenZip(feed, zipErr);
     if (seven.empty()) {
-        offer.error = L"7-Zip is not installed, so the AMD package was not opened. It is saved at " + offer.file +
-                      L". Run it and choose Driver Only, or install 7-Zip and retry.";
+        offer.error = zipErr.empty() ? L"7-Zip could not be installed, so the AMD package was not opened. It is saved at " +
+                                       offer.file + L"."
+                                 : zipErr + L" The package is saved at " + offer.file + L".";
         return 1;
     }
     const std::wstring unpack = dir + L"\\amd-unpack";
