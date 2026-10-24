@@ -184,3 +184,7 @@ Build products (`x64/`, `dist/`) are gitignored.
 
 Philosopher, Gruppo, and Bruno Ace SC are bundled under the
 [SIL Open Font License](fonts/OFL.txt).
+
+## Changelog
+
+Version history is in [CHANGELOG.md](CHANGELOG.md). The current release is 1.12.5.
