@@ -58,10 +58,11 @@ After PPM the same style of pass applies **GPU driver optimization**:
 hardware-accelerated GPU scheduling, Game DVR/overlay off, NVIDIA global
 3D (prefer maximum performance, high-performance filtering, VSync force
 off, ultra low latency, Resizable BAR, CUDA Force P2 off, Ansel off) and
-the AMD Anti-Lag / ULPS set. The same step installs MSI Afterburner and
-RivaTuner when they are missing, runs the NVIDIA OC scanner, and applies
-that result at every logon. DDU, NVCleanstall, and BIOS ReBAR still have
+the AMD Anti-Lag / ULPS set. DDU, NVCleanstall, and BIOS ReBAR still have
 to be done by you — this process cannot wipe a driver or flash firmware.
+
+A separate step, which can be run on its own, installs MSI Afterburner and
+RivaTuner, runs the NVIDIA OC scanner, and applies that result at every logon.
 
 The app **requires administrator rights** at launch (UAC). `--uninstall`
 restores the previous power-plan and GPU values.
@@ -92,6 +93,9 @@ Synchronus.exe --apply-ppm           PPM tweaks only (locked-multiplier CPUs)
 Synchronus.exe --ppm / --no-ppm      force or skip the PPM step after install
 Synchronus.exe --apply-gpu           GPU driver / Windows graphics tweaks only
 Synchronus.exe --gpu / --no-gpu      force or skip the GPU step after install
+Synchronus.exe --apply-afterburner   Afterburner + RivaTuner, OC scan, apply at logon
+Synchronus.exe --afterburner / --no-afterburner
+                                     force or skip that step after install
 Synchronus.exe --yes --no-pause      non-interactive (scripting)
 ```
 

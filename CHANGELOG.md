@@ -4,7 +4,8 @@ Current release: **1.12.6**.
 
 ## 1.12.6 — 2026-10-24
 
-- The GPU step downloads MSI Afterburner 4.6.6 and installs RivaTuner Statistics Server with it when either is missing.
+- Afterburner is its own step, separate from the GPU driver settings. Uncheck it, or pass `--no-afterburner`, to skip it. `--apply-afterburner` runs only that step.
+- The step downloads MSI Afterburner 4.6.6 and installs RivaTuner Statistics Server with it when either is missing.
 - On an NVIDIA GPU it starts Afterburner and runs MSI's OC scanner. The scan can take about 30 minutes.
 - Afterburner and RivaTuner are set to start at every logon. Afterburner starts minimized and applies the saved overclock.
 
