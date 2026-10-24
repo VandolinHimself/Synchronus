@@ -131,6 +131,10 @@ struct GpuDriverOffer {
 GpuDriverOffer LookupGpuDriver(Feed* feed, const std::atomic<bool>& stop);
 int DownloadGpuDriver(Feed& feed, GpuDriverOffer& offer, const std::atomic<bool>& stop);
 int InstallTrimmedGpuDriver(Feed& feed, GpuDriverOffer& offer);
+// Downloads MSI Afterburner 4.6.6 when it is missing, installs RivaTuner with
+// it, runs the NVIDIA OC scanner, and applies the saved settings at every logon.
+bool InstallAfterburner(Feed* feed, std::wstring& err);
+void RemoveAfterburnerStartup();
 
 // Stable address of the update list. The file there changes when a release
 // is published; the address does not. The executable is

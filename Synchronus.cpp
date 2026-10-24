@@ -69,7 +69,7 @@ gui::MeasurePlan gui::MeasurePlanFor(int fidelity) {
 
 namespace {
 
-constexpr wchar_t kVersion[] = L"1.12.5";
+constexpr wchar_t kVersion[] = L"1.12.6";
 constexpr wchar_t kProduct[] = L"Synchronus";
 constexpr wchar_t kCompany[] = L"Lucius And Wayne Systems LLC";
 constexpr wchar_t kCompanyUrl[] = L"https://luciuswayne.com";
@@ -2029,8 +2029,9 @@ bool RestoreStorageTweaks() {
 // off, NVIDIA DRS (power, filtering, VSync, low latency, rBAR, P2), NVIDIA
 // adapter registry (DisableDynamicPstate), AMD ULPS/Anti-Lag, telemetry
 // services. GPU Clean downloads the current vendor package and installs the
-// display stack without the extra apps. Afterburner and BIOS ReBAR still
-// have to be done by hand.
+// display stack without the extra apps. MSI Afterburner and RivaTuner are
+// installed by the GPU step, which runs the NVIDIA OC scanner and applies
+// the saved curve at every logon. BIOS ReBAR still has to be done by hand.
 
 constexpr wchar_t kDisplayClass[] =
     L"SYSTEM\\CurrentControlSet\\Control\\Class\\{4d36e968-e325-11ce-bfc1-08002be10318}";
@@ -2558,11 +2559,21 @@ bool ApplyGpuTweaks() {
                    wrote, failed ? Format(L", %d did not confirm", failed).c_str() : L""));
     Out(Format(L"Applied %d GPU tweak(s)%s. Reboot for HAGS / ReBAR. Uninstall restores the previous values.",
                wrote, failed ? Format(L", %d failed", failed).c_str() : L""));
+    Narrate(L"Afterburner",
+            L"MSI Afterburner and RivaTuner are installed if they are missing. On an NVIDIA GPU the OC "
+            L"scanner runs next. That scan can take about 30 minutes. The result is applied at every logon.");
+    std::wstring abErr;
+    if (!gui::InstallAfterburner(g_feed, abErr)) {
+        Out(L"Afterburner: " + (abErr.empty() ? L"could not be installed." : abErr));
+    } else {
+        Out(L"Afterburner and RivaTuner will apply the saved overclock at every logon.");
+    }
     Dwell(1600);
     return true;
 }
 
 bool RestoreGpuTweaks() {
+    gui::RemoveAfterburnerStartup();
     DWORD applied = 0;
     if (!RegGetDword(HKEY_LOCAL_MACHINE, kAppRegKey, L"GpuApplied", applied) || !applied) return true;
     int restored = 0;

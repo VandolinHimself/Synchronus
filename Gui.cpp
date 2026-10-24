@@ -3360,7 +3360,7 @@ private:
             rd_.Text(L"NVIDIA: graphics driver only. Skip the NVIDIA App, telemetry, ShadowPlay, and HD audio.\n"
                      L"AMD: choose Driver Only. Skip Adrenalin, the overlay, Chill, and the other extras.\n"
                      L"DDU in Safe Mode is optional if an older package left leftovers.\n"
-                     L"Afterburner and BIOS Resizable BAR stay manual. 7-Zip is installed automatically when a package needs it.",
+                     L"Afterburner and RivaTuner are installed by the GPU step. BIOS Resizable BAR stays manual.",
                      D2D1::RectF(B.left + 12, B.top + 78, B.right - 12, B.bottom - 52), rd_.fBody.Get(), col::text);
             if (Button(6, btnA, L"Continue", col::cyan, true, true, dt, true, true)) StartAtOrAfter(kWantGpu);
             if (Button(7, btnB, L"Check again", col::muted, false, true, dt)) BeginGpuLookup();

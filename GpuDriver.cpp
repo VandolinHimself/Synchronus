@@ -39,7 +39,7 @@ constexpr uint64_t kMaxPackage = (4ull << 30) - (64ull << 20);
 constexpr wchar_t kDisplayClass[] =
     L"SYSTEM\\CurrentControlSet\\Control\\Class\\{4d36e968-e325-11ce-bfc1-08002be10318}";
 
-enum class Allow { NvidiaApi, NvidiaFile, AmdFile, Index, SevenZip };
+enum class Allow { NvidiaApi, NvidiaFile, AmdFile, Index, SevenZip, Afterburner };
 
 std::wstring Format(const wchar_t* fmt, ...) {
     wchar_t buffer[2048];
@@ -178,6 +178,8 @@ bool HostAllowed(Allow allow, const std::wstring& host) {
         case Allow::SevenZip:
             return h == L"www.7-zip.org" || h == L"7-zip.org" || h == L"github.com" ||
                    h == L"release-assets.githubusercontent.com";
+        case Allow::Afterburner:
+            return h == L"ftp.nluug.nl";
     }
     return false;
 }
@@ -1156,15 +1158,15 @@ int DownloadGpuDriver(Feed& feed, GpuDriverOffer& offer, const std::atomic<bool>
 // release, which redirects to release-assets.githubusercontent.com.
 constexpr wchar_t kSevenZipUrl[] = L"https://www.7-zip.org/a/7z2605-x64.exe";
 
-std::wstring EnsureSevenZip(Feed& feed, std::wstring& err) {
+std::wstring EnsureSevenZip(Feed* feed, std::wstring& err) {
     const std::wstring have = SevenZip();
     if (!have.empty()) return have;
-    if (feed.Cancelled()) {
+    if (feed && feed->Cancelled()) {
         err = L"Stopped.";
         return {};
     }
-    feed.Phase(L"GPU CLEAN", L"installing 7-Zip");
-    feed.Log(L"7-Zip is not installed. Downloading the official 7-Zip installer.");
+    if (feed) feed->Phase(L"GPU CLEAN", L"installing 7-Zip");
+    if (feed) feed->Log(L"7-Zip is not installed. Downloading the official 7-Zip installer.");
     const std::wstring dir = DriverDir();
     EnsureDir(dir);
     const std::wstring setup = dir + L"\\7z2605-x64.exe";
@@ -1179,7 +1181,7 @@ std::wstring EnsureSevenZip(Feed& feed, std::wstring& err) {
     const bool saved = Http(
         Allow::SevenZip, L"GET", kSevenZipUrl, true, 16ull << 20,
         [&](const BYTE* p, DWORD n, uint64_t, uint64_t) {
-            if (feed.Cancelled()) {
+            if (feed && feed->Cancelled()) {
                 stop.store(true);
                 return false;
             }
@@ -1190,11 +1192,11 @@ std::wstring EnsureSevenZip(Feed& feed, std::wstring& err) {
     CloseHandle(file);
     if (!saved || !LooksLikePe(setup)) {
         DeleteFileW(setup.c_str());
-        if (feed.Cancelled() || res.stopped) err = L"Stopped.";
+        if ((feed && feed->Cancelled()) || res.stopped) err = L"Stopped.";
         else if (err.empty()) err = L"The 7-Zip installer could not be downloaded.";
         return {};
     }
-    feed.Log(L"Installing 7-Zip.");
+    if (feed) feed->Log(L"Installing 7-Zip.");
     const std::wstring cmd = L"\"" + setup + L"\" /S";
     const Proc installed = RunProcess(setup, cmd, dir, 5u * 60u * 1000u, true, true);
     DeleteFileW(setup.c_str());
@@ -1211,7 +1213,7 @@ std::wstring EnsureSevenZip(Feed& feed, std::wstring& err) {
         err = L"7-Zip installed, but 7z.exe was not found.";
         return {};
     }
-    feed.Log(L"7-Zip is installed.");
+    if (feed) feed->Log(L"7-Zip is installed.");
     return ready;
 }
 
@@ -1232,7 +1234,7 @@ int InstallTrimmedGpuDriver(Feed& feed, GpuDriverOffer& offer) {
         // and installs it when missing. -n is setup.cfg's IgnoreReboot option.
         const std::wstring keep = L"Display.Driver Display.PhysX";
         std::wstring zipErr;
-        const std::wstring seven = EnsureSevenZip(feed, zipErr);
+        const std::wstring seven = EnsureSevenZip(&feed, zipErr);
         if (seven.empty()) {
             offer.error = zipErr.empty() ? L"7-Zip could not be installed, so the NVIDIA package cannot be trimmed." : zipErr;
             return 1;
@@ -1279,7 +1281,7 @@ int InstallTrimmedGpuDriver(Feed& feed, GpuDriverOffer& offer) {
     }
 
     std::wstring zipErr;
-    const std::wstring seven = EnsureSevenZip(feed, zipErr);
+    const std::wstring seven = EnsureSevenZip(&feed, zipErr);
     if (seven.empty()) {
         offer.error = zipErr.empty() ? L"7-Zip could not be installed, so the AMD package was not opened. It is saved at " +
                                        offer.file + L"."
@@ -1350,6 +1352,321 @@ int InstallTrimmedGpuDriver(Feed& feed, GpuDriverOffer& offer) {
     feed.Log(L"AMD display driver installed. Restart to finish it. Adrenalin was not installed.");
     offer.error.clear();
     return 0;
+}
+
+std::wstring ProgramFilesX86() {
+    wchar_t buf[MAX_PATH];
+    const DWORD n = GetEnvironmentVariableW(L"ProgramFiles(x86)", buf, _countof(buf));
+    if (n > 0 && n < _countof(buf)) return buf;
+    return L"C:\\Program Files (x86)";
+}
+
+std::wstring AfterburnerExe() {
+    const std::wstring path = ProgramFilesX86() + L"\\MSI Afterburner\\MSIAfterburner.exe";
+    return GetFileAttributesW(path.c_str()) != INVALID_FILE_ATTRIBUTES ? path : L"";
+}
+
+std::wstring RtssExe() {
+    const std::wstring path = ProgramFilesX86() + L"\\RivaTuner Statistics Server\\RTSS.exe";
+    return GetFileAttributesW(path.c_str()) != INVALID_FILE_ATTRIBUTES ? path : L"";
+}
+
+bool WriteTextFile(const std::wstring& path, const std::string& text) {
+    const HANDLE h = CreateFileW(path.c_str(), GENERIC_WRITE, 0, nullptr, CREATE_ALWAYS, FILE_ATTRIBUTE_NORMAL, nullptr);
+    if (h == INVALID_HANDLE_VALUE) return false;
+    DWORD wrote = 0;
+    const BOOL ok = WriteFile(h, text.data(), static_cast<DWORD>(text.size()), &wrote, nullptr);
+    CloseHandle(h);
+    return ok && wrote == text.size();
+}
+
+// Replaces the first line in [Settings] that begins with key. Afterburner's
+// shipped file uses "Key = value".
+bool SetCfgKey(std::string& text, const char* key, const char* value) {
+    const std::string name = key;
+    size_t at = text.find(std::string("\n") + name);
+    if (at == std::string::npos && text.compare(0, name.size(), name) == 0) at = 0;
+    else if (at != std::string::npos) ++at;
+    else return false;
+    const size_t end = text.find('\n', at);
+    const size_t count = (end == std::string::npos ? text.size() : end) - at;
+    text.replace(at, count, name + " = " + value);
+    return true;
+}
+
+void ConfigureAfterburner(const std::wstring& exe) {
+    const size_t slash = exe.find_last_of(L"\\/");
+    if (slash == std::wstring::npos) return;
+    const std::wstring cfg = exe.substr(0, slash) + L"\\MSIAfterburner.cfg";
+    std::string text;
+    if (!ReadFileText(cfg, text)) return;
+    SetCfgKey(text, "StartWithWindows", "1");
+    SetCfgKey(text, "StartMinimized", "1");
+    SetCfgKey(text, "RememberSettings", "1");
+    SetCfgKey(text, "StartupViaTaskScheduler", "1");
+    SetCfgKey(text, "StartupDelay", "0");
+    SetCfgKey(text, "UnlockVoltageControl", "1");
+    SetCfgKey(text, "UnlockVoltageMonitoring", "1");
+    SetCfgKey(text, "FirstRun", "0");
+    WriteTextFile(cfg, text);
+}
+
+bool ScheduleLogon(const wchar_t* task, const std::wstring& command) {
+    const std::wstring sch = L"C:\\Windows\\System32\\schtasks.exe";
+    const std::wstring args = L"\"" + sch + L"\" /Create /F /SC ONLOGON /TN \"" + std::wstring(task) +
+                              L"\" /TR \"" + command + L"\"";
+    const Proc p = RunProcess(sch, args, L"", 20000, true, true);
+    return p.started && !p.timedOut && p.code == 0;
+}
+
+void DeleteLogonTask(const wchar_t* task) {
+    const std::wstring sch = L"C:\\Windows\\System32\\schtasks.exe";
+    const std::wstring args = L"\"" + sch + L"\" /Delete /F /TN \"" + std::wstring(task) + L"\"";
+    RunProcess(sch, args, L"", 15000, true, true);
+}
+
+struct Started {
+    HANDLE process = nullptr;
+    HANDLE thread = nullptr;
+    DWORD pid = 0;
+    bool ok = false;
+};
+
+Started StartShown(const std::wstring& exe, const std::wstring& args) {
+    Started s;
+    std::wstring cmd = L"\"" + exe + L"\"";
+    if (!args.empty()) cmd += L" " + args;
+    std::vector<wchar_t> buf(cmd.begin(), cmd.end());
+    buf.push_back(0);
+    STARTUPINFOW si{};
+    si.cb = sizeof(si);
+    si.dwFlags = STARTF_USESHOWWINDOW;
+    si.wShowWindow = SW_SHOWNORMAL;
+    PROCESS_INFORMATION pi{};
+    const size_t slash = exe.find_last_of(L"\\/");
+    const std::wstring dir = slash == std::wstring::npos ? L"" : exe.substr(0, slash);
+    if (!CreateProcessW(exe.c_str(), buf.data(), nullptr, nullptr, FALSE, 0, nullptr,
+                        dir.empty() ? nullptr : dir.c_str(), &si, &pi)) {
+        return s;
+    }
+    s.process = pi.hProcess;
+    s.thread = pi.hThread;
+    s.pid = pi.dwProcessId;
+    s.ok = true;
+    return s;
+}
+
+void CloseStarted(Started& s) {
+    if (s.thread) CloseHandle(s.thread);
+    if (s.process) CloseHandle(s.process);
+    s = {};
+}
+
+BOOL CALLBACK ClosePidWindow(HWND hwnd, LPARAM lp) {
+    DWORD pid = 0;
+    GetWindowThreadProcessId(hwnd, &pid);
+    if (pid == static_cast<DWORD>(lp)) PostMessageW(hwnd, WM_CLOSE, 0, 0);
+    return TRUE;
+}
+
+bool InstallAfterburner(Feed* feed, std::wstring& err) {
+    auto stopped = [&] { return feed && feed->Cancelled(); };
+    auto log = [&](const std::wstring& s) { if (feed) feed->Log(s); };
+    auto phase = [&](const wchar_t* d) { if (feed) feed->Phase(L"AFTERBURNER", d); };
+    if (stopped()) {
+        err = L"Stopped.";
+        return false;
+    }
+
+    std::wstring ab = AfterburnerExe();
+    if (ab.empty()) {
+        phase(L"downloading MSI Afterburner");
+        log(L"Downloading MSI Afterburner 4.6.6 from the Guru3D archive.");
+        std::wstring zipErr;
+        const std::wstring seven = EnsureSevenZip(feed, zipErr);
+        if (seven.empty()) {
+            err = zipErr.empty() ? L"7-Zip is required to open the Afterburner package." : zipErr;
+            return false;
+        }
+        const std::wstring dir = DriverDir();
+        EnsureDir(dir);
+        const std::wstring zip = dir + L"\\MSIAfterburnerSetup466.zip";
+        DeleteFileW(zip.c_str());
+        const HANDLE file = CreateFileW(zip.c_str(), GENERIC_WRITE, 0, nullptr, CREATE_ALWAYS, FILE_ATTRIBUTE_NORMAL, nullptr);
+        if (file == INVALID_HANDLE_VALUE) {
+            err = L"Could not store the Afterburner download.";
+            return false;
+        }
+        std::atomic<bool> stop{false};
+        Sha256 sha;
+        HttpOut res;
+        const wchar_t* url =
+            L"https://ftp.nluug.nl/pub/games/PC/guru3d/afterburner/%5BGuru3D%5D-MSIAfterburnerSetup466Build16757.zip";
+        const bool saved = Http(
+            Allow::Afterburner, L"GET", url, true, 64ull << 20,
+            [&](const BYTE* p, DWORD n, uint64_t got, uint64_t total) {
+                if (stopped()) {
+                    stop.store(true);
+                    return false;
+                }
+                DWORD wrote = 0;
+                if (!WriteFile(file, p, n, &wrote, nullptr) || wrote != n) return false;
+                sha.Add(p, n);
+                if (feed && total) feed->Progress(std::min(0.25, 0.25 * static_cast<double>(got) / static_cast<double>(total)), 0, 0);
+                return true;
+            },
+            res, err, stop);
+        CloseHandle(file);
+        const std::wstring digest = sha.Hex();
+        constexpr wchar_t kHash[] = L"348e9690a638d84e30e32e9c7c2dd7aad9fd82d71eced1942c04c4c5620b0e1e";
+        if (!saved || !HexEq(digest, kHash)) {
+            DeleteFileW(zip.c_str());
+            if (stopped() || res.stopped) err = L"Stopped.";
+            else if (!saved && err.empty()) err = L"The Afterburner download failed.";
+            else err = L"The Afterburner download did not match the published checksum.";
+            return false;
+        }
+        const std::wstring unpack = dir + L"\\afterburner-setup";
+        RemoveTree(unpack);
+        EnsureDir(unpack);
+        log(L"Unpacking the Afterburner installer.");
+        const std::wstring xcmd = L"\"" + seven + L"\" x -y -o\"" + unpack + L"\" \"" + zip + L"\"";
+        const Proc unzip = RunProcess(seven, xcmd, dir, 5u * 60u * 1000u, true, true);
+        const std::wstring setup = unpack + L"\\MSIAfterburnerSetup466.exe";
+        if (!unzip.started || unzip.timedOut || unzip.code != 0 || !LooksLikePe(setup)) {
+            RemoveTree(unpack);
+            DeleteFileW(zip.c_str());
+            err = L"The Afterburner package could not be unpacked.";
+            return false;
+        }
+        phase(L"installing MSI Afterburner and RivaTuner");
+        log(L"Installing MSI Afterburner.");
+        const std::wstring scmd = L"\"" + setup + L"\" /S";
+        const Proc inst = RunProcess(setup, scmd, unpack, 10u * 60u * 1000u, true, true);
+        if (!inst.started || inst.timedOut || inst.code != 0) {
+            RemoveTree(unpack);
+            DeleteFileW(zip.c_str());
+            err = L"MSI Afterburner did not install (" + CodeText(inst.code) + L").";
+            return false;
+        }
+        if (RtssExe().empty()) {
+            log(L"Installing RivaTuner Statistics Server.");
+            const std::wstring rtssSetup = unpack + L"\\RTSSSetup.exe";
+            const std::wstring ecmd = L"\"" + seven + L"\" e \"" + setup + L"\" -o\"" + unpack + L"\" \"Redist\\RTSSSetup.exe\" -y";
+            RunProcess(seven, ecmd, unpack, 2u * 60u * 1000u, true, true);
+            if (LooksLikePe(rtssSetup)) {
+                const std::wstring rcmd = L"\"" + rtssSetup + L"\" /S";
+                RunProcess(rtssSetup, rcmd, unpack, 10u * 60u * 1000u, true, true);
+            }
+        }
+        RemoveTree(unpack);
+        DeleteFileW(zip.c_str());
+        ab = AfterburnerExe();
+        if (ab.empty()) {
+            err = L"MSI Afterburner installed, but MSIAfterburner.exe was not found.";
+            return false;
+        }
+        log(L"MSI Afterburner is installed.");
+    } else {
+        log(L"MSI Afterburner is already installed.");
+    }
+
+    ConfigureAfterburner(ab);
+    const std::wstring rtss = RtssExe();
+    if (!rtss.empty()) log(L"RivaTuner Statistics Server is installed.");
+    else log(L"RivaTuner Statistics Server was not found next to Afterburner.");
+
+    const bool nvidia = GetFileAttributesW(L"C:\\Windows\\System32\\nvapi64.dll") != INVALID_FILE_ATTRIBUTES;
+    const size_t slash = ab.find_last_of(L"\\/");
+    const std::wstring scanner = slash == std::wstring::npos
+                                     ? L""
+                                     : ab.substr(0, slash) + L"\\Bundle\\OCScanner\\MSIOCScanner_x64.exe";
+    bool scanned = false;
+    if (!nvidia) {
+        log(L"The OC scanner targets NVIDIA. Afterburner will still apply its saved settings at logon.");
+    } else if (GetFileAttributesW(scanner.c_str()) == INVALID_FILE_ATTRIBUTES) {
+        log(L"The OC scanner was not in this Afterburner install. Startup apply is still configured.");
+    } else if (!stopped()) {
+        phase(L"scanning a stable overclock");
+        if (feed) {
+            feed->Narrate(L"OC scanner",
+                          L"MSI's scanner is testing this NVIDIA GPU. It usually takes about 30 minutes. "
+                          L"Leave the scanner window open. The result is applied at every logon.");
+        }
+        log(L"Starting MSI Afterburner, then the OC scanner.");
+        Started burner = StartShown(ab, L"");
+        if (!burner.ok) {
+            log(L"MSI Afterburner did not start, so the OC scanner did not run.");
+        } else {
+            for (int i = 0; i < 16 && !stopped(); ++i) Sleep(500);
+            Started scan = StartShown(scanner, L"");
+            if (!scan.ok) {
+            CloseStarted(burner);
+            log(L"The OC scanner did not start. Afterburner will still apply its saved settings at logon.");
+        } else {
+            const ULONGLONG t0 = GetTickCount64();
+            constexpr DWORD kScanMs = 45u * 60u * 1000u;
+            bool done = false;
+            while (!stopped()) {
+                const DWORD w = WaitForSingleObject(scan.process, 1000);
+                const DWORD elapsed = static_cast<DWORD>(GetTickCount64() - t0);
+                if (feed) {
+                    feed->Progress(0.30 + 0.65 * std::min(1.0, static_cast<double>(elapsed) / (30.0 * 60.0 * 1000.0)),
+                                   elapsed / 1000.0, 0);
+                }
+                if (w == WAIT_OBJECT_0) {
+                    done = true;
+                    break;
+                }
+                if (elapsed >= kScanMs) break;
+            }
+            DWORD code = 1;
+            if (done) GetExitCodeProcess(scan.process, &code);
+            if (stopped()) {
+                TerminateProcess(scan.process, 1);
+                err = L"Stopped.";
+                CloseStarted(scan);
+                EnumWindows(ClosePidWindow, static_cast<LPARAM>(burner.pid));
+                WaitForSingleObject(burner.process, 5000);
+                TerminateProcess(burner.process, 1);
+                CloseStarted(burner);
+                return false;
+            }
+            if (!done) {
+                log(L"The OC scanner is still running after 45 minutes. It was left open.");
+            } else if (code == 0) {
+                scanned = true;
+                log(L"The OC scanner finished and sent the curve to Afterburner.");
+            } else {
+                log(L"The OC scanner finished with code " + CodeText(code) +
+                    L". Afterburner will still apply its saved settings at logon.");
+            }
+            CloseStarted(scan);
+            EnumWindows(ClosePidWindow, static_cast<LPARAM>(burner.pid));
+            if (WaitForSingleObject(burner.process, 15000) != WAIT_OBJECT_0) TerminateProcess(burner.process, 0);
+            CloseStarted(burner);
+            }
+        }
+    }
+
+    const std::wstring abTr = L"\\\"" + ab + L"\\\" /s";
+    if (!ScheduleLogon(L"Synchronus Afterburner", abTr)) {
+        log(L"Could not create the Afterburner logon task. Start with Windows is still set in its config.");
+    } else {
+        log(L"Afterburner will start at logon and apply the saved overclock.");
+    }
+    if (!rtss.empty()) {
+        const std::wstring rtTr = L"\\\"" + rtss + L"\\\"";
+        if (ScheduleLogon(L"Synchronus RivaTuner", rtTr)) log(L"RivaTuner will start at logon.");
+    }
+    if (feed) feed->Progress(1, 0, 0);
+    err.clear();
+    return true;
+}
+
+void RemoveAfterburnerStartup() {
+    DeleteLogonTask(L"Synchronus Afterburner");
+    DeleteLogonTask(L"Synchronus RivaTuner");
 }
 
 }  // namespace gui
