@@ -1,6 +1,11 @@
 # Changelog
 
-Current release: **1.12.6**.
+Current release: **1.12.7**.
+
+## 1.12.7 — 2026-10-24
+
+- The OC scanner opens on its own and then sits on its Scan button. That button is pressed once the scanner is connected to Afterburner, so the test starts without a click.
+- The step watches the scanner's report and finishes when the curve is exported.
 
 ## 1.12.6 — 2026-10-24
 

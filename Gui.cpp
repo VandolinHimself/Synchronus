@@ -3140,7 +3140,7 @@ private:
             case Stage::AfterburnerPrompt:
                 DrawPackPrompt(B, dt, L"Afterburner and RivaTuner",
                                L"Downloads MSI Afterburner 4.6.6 and RivaTuner if they are not installed. "
-                               L"On an NVIDIA GPU the OC scanner runs (about 30 minutes). The saved overclock "
+                               L"On an NVIDIA GPU the OC scanner starts on its own (about 30 minutes). The saved overclock "
                                L"is applied every time you log on. This step does not change the GPU driver.",
                                L"Continue  \u2014  install and scan", col::green,
                                [this] { StartAfterburner(); },

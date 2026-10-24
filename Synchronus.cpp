@@ -69,7 +69,7 @@ gui::MeasurePlan gui::MeasurePlanFor(int fidelity) {
 
 namespace {
 
-constexpr wchar_t kVersion[] = L"1.12.6";
+constexpr wchar_t kVersion[] = L"1.12.7";
 constexpr wchar_t kProduct[] = L"Synchronus";
 constexpr wchar_t kCompany[] = L"Lucius And Wayne Systems LLC";
 constexpr wchar_t kCompanyUrl[] = L"https://luciuswayne.com";
@@ -2566,7 +2566,7 @@ bool ApplyGpuTweaks() {
 bool ApplyAfterburner() {
     Narrate(L"Afterburner",
             L"MSI Afterburner and RivaTuner are installed if they are missing. On an NVIDIA GPU the OC "
-            L"scanner runs next. That scan can take about 30 minutes. The result is applied at every logon.");
+            L"scanner starts on its own. That scan can take about 30 minutes. The result is applied at every logon.");
     ReportPhase(L"AFTERBURNER", L"installing Afterburner and RivaTuner");
     Out(L"Installing MSI Afterburner and RivaTuner, then scanning a startup overclock.");
     std::wstring err;

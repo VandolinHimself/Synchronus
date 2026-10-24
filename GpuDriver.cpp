@@ -16,6 +16,7 @@
 #include <windows.h>
 #include <winhttp.h>
 #include <bcrypt.h>
+#include <UIAutomation.h>
 
 #include "Gui.h"
 
@@ -30,6 +31,9 @@
 
 #pragma comment(lib, "winhttp.lib")
 #pragma comment(lib, "bcrypt.lib")
+#pragma comment(lib, "ole32.lib")
+#pragma comment(lib, "oleaut32.lib")
+#pragma comment(lib, "UIAutomationCore.lib")
 
 namespace gui {
 namespace {
@@ -1469,6 +1473,138 @@ BOOL CALLBACK ClosePidWindow(HWND hwnd, LPARAM lp) {
     return TRUE;
 }
 
+// The scanner is a dialog. Opening it does not start the test. Scan is
+// button 1001, and the live log is the rich-edit control 1007.
+namespace {
+
+HWND FindScannerWindow(DWORD pid) {
+    struct Hit {
+        DWORD pid;
+        HWND hwnd;
+    } hit{pid, nullptr};
+    EnumWindows(
+        [](HWND hwnd, LPARAM lp) -> BOOL {
+            auto* hit = reinterpret_cast<Hit*>(lp);
+            DWORD pid = 0;
+            GetWindowThreadProcessId(hwnd, &pid);
+            if (pid != hit->pid || !IsWindowVisible(hwnd)) return TRUE;
+            wchar_t title[256]{};
+            GetWindowTextW(hwnd, title, 256);
+            if (wcsncmp(title, L"MSI Overclocking Scanner", 24) == 0) {
+                hit->hwnd = hwnd;
+                return FALSE;
+            }
+            return TRUE;
+        },
+        reinterpret_cast<LPARAM>(&hit));
+    return hit.hwnd;
+}
+
+std::wstring ButtonLabel(HWND dlg, int id) {
+    const HWND btn = dlg ? GetDlgItem(dlg, id) : nullptr;
+    if (!btn) return {};
+    wchar_t buf[64]{};
+    GetWindowTextW(btn, buf, 64);
+    return buf;
+}
+
+struct UiAuto {
+    IUIAutomation* uia = nullptr;
+    HRESULT com = E_FAIL;
+    UiAuto() {
+        com = CoInitializeEx(nullptr, COINIT_APARTMENTTHREADED);
+        if (FAILED(CoCreateInstance(CLSID_CUIAutomation, nullptr, CLSCTX_INPROC_SERVER, IID_PPV_ARGS(&uia))))
+            uia = nullptr;
+    }
+    ~UiAuto() {
+        if (uia) uia->Release();
+        if (com == S_OK || com == S_FALSE) CoUninitialize();
+    }
+    UiAuto(const UiAuto&) = delete;
+    UiAuto& operator=(const UiAuto&) = delete;
+
+    std::wstring Name(HWND hwnd, const wchar_t* autoId) const {
+        if (!uia || !hwnd || !autoId) return {};
+        IUIAutomationElement* root = nullptr;
+        if (FAILED(uia->ElementFromHandle(hwnd, &root)) || !root) return {};
+        VARIANT id;
+        VariantInit(&id);
+        id.vt = VT_BSTR;
+        id.bstrVal = SysAllocString(autoId);
+        IUIAutomationCondition* cond = nullptr;
+        std::wstring text;
+        if (id.bstrVal && SUCCEEDED(uia->CreatePropertyCondition(UIA_AutomationIdPropertyId, id, &cond)) && cond) {
+            IUIAutomationElement* el = nullptr;
+            if (SUCCEEDED(root->FindFirst(TreeScope_Descendants, cond, &el)) && el) {
+                BSTR name = nullptr;
+                if (SUCCEEDED(el->get_CurrentName(&name)) && name) {
+                    text.assign(name, SysStringLen(name));
+                    SysFreeString(name);
+                }
+                el->Release();
+            }
+            cond->Release();
+        }
+        VariantClear(&id);
+        root->Release();
+        return text;
+    }
+};
+
+size_t LastAt(const std::wstring& text, const wchar_t* needle) {
+    return needle ? text.rfind(needle) : std::wstring::npos;
+}
+
+void KeepLater(size_t& slot, size_t at) {
+    if (at != std::wstring::npos && (slot == std::wstring::npos || at > slot)) slot = at;
+}
+
+// 1 exported or succeeded, -1 failed or cancelled, 0 still going.
+// A later line wins, so a failed start that is followed by a real scan is not a failure.
+int ScanOutcome(const std::wstring& report) {
+    size_t good = std::wstring::npos;
+    size_t bad = std::wstring::npos;
+    size_t started = std::wstring::npos;
+    KeepLater(good, LastAt(report, L"Overclocked curve exported"));
+    KeepLater(good, LastAt(report, L"Scan succeeded"));
+    KeepLater(bad, LastAt(report, L"Scan failed"));
+    KeepLater(bad, LastAt(report, L"Scan cancelled"));
+    KeepLater(bad, LastAt(report, L"Failed to start scanning"));
+    KeepLater(started, LastAt(report, L"Start scanning"));
+    KeepLater(started, LastAt(report, L"Resume scanning"));
+    KeepLater(started, LastAt(report, L"Scanning point"));
+    if (bad != std::wstring::npos && (started == std::wstring::npos || bad > started) &&
+        (good == std::wstring::npos || bad > good))
+        return -1;
+    if (good != std::wstring::npos && (bad == std::wstring::npos || good > bad)) return 1;
+    return 0;
+}
+
+double ScanPointFrac(const std::wstring& report) {
+    const wchar_t* key = L"Scanning point ";
+    const size_t at = report.rfind(key);
+    if (at == std::wstring::npos) return -1;
+    const wchar_t* p = report.c_str() + at + wcslen(key);
+    int cur = 0;
+    if (*p < L'0' || *p > L'9') return -1;
+    while (*p >= L'0' && *p <= L'9') {
+        cur = cur * 10 + (*p - L'0');
+        ++p;
+    }
+    if (wcsncmp(p, L" of ", 4) != 0) return -1;
+    p += 4;
+    int total = 0;
+    if (*p < L'0' || *p > L'9') return -1;
+    while (*p >= L'0' && *p <= L'9') {
+        total = total * 10 + (*p - L'0');
+        ++p;
+    }
+    if (total <= 0) return -1;
+    return static_cast<double>(cur) / static_cast<double>(total);
+}
+
+}  // namespace
+
 bool InstallAfterburner(Feed* feed, std::wstring& err) {
     auto stopped = [&] { return feed && feed->Cancelled(); };
     auto log = [&](const std::wstring& s) { if (feed) feed->Log(s); };
@@ -1598,53 +1734,142 @@ bool InstallAfterburner(Feed* feed, std::wstring& err) {
         if (!burner.ok) {
             log(L"MSI Afterburner did not start, so the OC scanner did not run.");
         } else {
-            for (int i = 0; i < 16 && !stopped(); ++i) Sleep(500);
+            for (int i = 0; i < 8 && !stopped(); ++i) Sleep(500);
             Started scan = StartShown(scanner, L"");
             if (!scan.ok) {
-            CloseStarted(burner);
-            log(L"The OC scanner did not start. Afterburner will still apply its saved settings at logon.");
-        } else {
-            const ULONGLONG t0 = GetTickCount64();
-            constexpr DWORD kScanMs = 45u * 60u * 1000u;
-            bool done = false;
-            while (!stopped()) {
-                const DWORD w = WaitForSingleObject(scan.process, 1000);
-                const DWORD elapsed = static_cast<DWORD>(GetTickCount64() - t0);
-                if (feed) {
-                    feed->Progress(0.30 + 0.65 * std::min(1.0, static_cast<double>(elapsed) / (30.0 * 60.0 * 1000.0)),
-                                   elapsed / 1000.0, 0);
-                }
-                if (w == WAIT_OBJECT_0) {
-                    done = true;
-                    break;
-                }
-                if (elapsed >= kScanMs) break;
-            }
-            DWORD code = 1;
-            if (done) GetExitCodeProcess(scan.process, &code);
-            if (stopped()) {
-                TerminateProcess(scan.process, 1);
-                err = L"Stopped.";
-                CloseStarted(scan);
-                EnumWindows(ClosePidWindow, static_cast<LPARAM>(burner.pid));
-                WaitForSingleObject(burner.process, 5000);
-                TerminateProcess(burner.process, 1);
                 CloseStarted(burner);
-                return false;
-            }
-            if (!done) {
-                log(L"The OC scanner is still running after 45 minutes. It was left open.");
-            } else if (code == 0) {
-                scanned = true;
-                log(L"The OC scanner finished and sent the curve to Afterburner.");
+                log(L"The OC scanner did not start. Afterburner will still apply its saved settings at logon.");
             } else {
-                log(L"The OC scanner finished with code " + CodeText(code) +
-                    L". Afterburner will still apply its saved settings at logon.");
-            }
-            CloseStarted(scan);
-            EnumWindows(ClosePidWindow, static_cast<LPARAM>(burner.pid));
-            if (WaitForSingleObject(burner.process, 15000) != WAIT_OBJECT_0) TerminateProcess(burner.process, 0);
-            CloseStarted(burner);
+                UiAuto uia;
+                HWND dlg = nullptr;
+                bool running = false;
+                int presses = 0;
+                ULONGLONG pressedAt = 0;
+                const ULONGLONG ready0 = GetTickCount64();
+                while (!stopped() && GetTickCount64() - ready0 < 30000) {
+                    dlg = FindScannerWindow(scan.pid);
+                    if (!dlg) {
+                        Sleep(250);
+                        continue;
+                    }
+                    const std::wstring report = uia.Name(dlg, L"1007");
+                    const std::wstring label = ButtonLabel(dlg, 1001);
+                    if (label == L"Stop" || report.find(L"Scanning point") != std::wstring::npos ||
+                        report.find(L"Start scanning") != std::wstring::npos ||
+                        report.find(L"Resume scanning") != std::wstring::npos) {
+                        running = true;
+                        break;
+                    }
+                    const bool connected = report.find(L"Connected to MSI Afterburner") != std::wstring::npos ||
+                                            (report.empty() && GetTickCount64() - ready0 > 4000);
+                    const HWND btn = GetDlgItem(dlg, 1001);
+                    const bool retry = presses > 0 && label == L"Scan" &&
+                                        report.find(L"Failed to start scanning") != std::wstring::npos &&
+                                        GetTickCount64() - pressedAt > 4000 && presses < 3;
+                    if (btn && IsWindowEnabled(btn) && label == L"Scan" && connected && (presses == 0 || retry)) {
+                        SendMessageW(dlg, WM_COMMAND, MAKEWPARAM(1001, BN_CLICKED), reinterpret_cast<LPARAM>(btn));
+                        ++presses;
+                        pressedAt = GetTickCount64();
+                        log(L"Pressed Scan.");
+                    }
+                    Sleep(400);
+                }
+                if (stopped()) {
+                    TerminateProcess(scan.process, 1);
+                    err = L"Stopped.";
+                    CloseStarted(scan);
+                    EnumWindows(ClosePidWindow, static_cast<LPARAM>(burner.pid));
+                    WaitForSingleObject(burner.process, 5000);
+                    TerminateProcess(burner.process, 1);
+                    CloseStarted(burner);
+                    return false;
+                }
+                if (!running) {
+                    log(L"The OC scanner opened, but the scan did not start. The window was left open.");
+                    CloseStarted(scan);
+                    CloseStarted(burner);
+                } else {
+                    log(L"The OC scan is running.");
+                    const ULONGLONG t0 = GetTickCount64();
+                    constexpr DWORD kScanMs = 45u * 60u * 1000u;
+                    bool done = false;
+                    bool failed = false;
+                    while (!stopped()) {
+                        const DWORD w = WaitForSingleObject(scan.process, 1000);
+                        const DWORD elapsed = static_cast<DWORD>(GetTickCount64() - t0);
+                        if (!dlg || !IsWindow(dlg)) dlg = FindScannerWindow(scan.pid);
+                        const std::wstring report = dlg ? uia.Name(dlg, L"1007") : L"";
+                        const std::wstring label = ButtonLabel(dlg, 1001);
+                        double frac = std::min(1.0, static_cast<double>(elapsed) / (30.0 * 60.0 * 1000.0));
+                        const double points = ScanPointFrac(report);
+                        if (points >= 0) frac = std::min(1.0, points);
+                        if (feed) feed->Progress(0.30 + 0.65 * frac, elapsed / 1000.0, 0);
+                        const int outcome = ScanOutcome(report);
+                        if (outcome == 1) {
+                            const ULONGLONG exportWait = GetTickCount64();
+                            while (!stopped() && report.find(L"Overclocked curve exported") == std::wstring::npos &&
+                                   GetTickCount64() - exportWait < 15000) {
+                                Sleep(500);
+                                const std::wstring again = dlg ? uia.Name(dlg, L"1007") : report;
+                                if (again.find(L"Overclocked curve exported") != std::wstring::npos ||
+                                    ScanOutcome(again) < 0) {
+                                    if (ScanOutcome(again) < 0) failed = true;
+                                    break;
+                                }
+                            }
+                            scanned = !failed;
+                            done = true;
+                            break;
+                        }
+                        if (outcome < 0 || (label == L"Scan" && elapsed > 8000 && outcome == 0 &&
+                                            report.find(L"Start scanning") == std::wstring::npos &&
+                                            report.find(L"Resume scanning") == std::wstring::npos &&
+                                            report.find(L"Scanning point") == std::wstring::npos)) {
+                            failed = true;
+                            done = true;
+                            break;
+                        }
+                        if (w == WAIT_OBJECT_0) {
+                            done = true;
+                            scanned = outcome > 0;
+                            failed = outcome < 0;
+                            break;
+                        }
+                        if (elapsed >= kScanMs) break;
+                    }
+                    if (stopped()) {
+                        TerminateProcess(scan.process, 1);
+                        err = L"Stopped.";
+                        CloseStarted(scan);
+                        EnumWindows(ClosePidWindow, static_cast<LPARAM>(burner.pid));
+                        WaitForSingleObject(burner.process, 5000);
+                        TerminateProcess(burner.process, 1);
+                        CloseStarted(burner);
+                        return false;
+                    }
+                    if (scanned) {
+                        log(L"The OC scanner finished and sent the curve to Afterburner.");
+                        Sleep(2000);
+                        if (dlg && IsWindow(dlg)) PostMessageW(dlg, WM_CLOSE, 0, 0);
+                        if (WaitForSingleObject(scan.process, 15000) != WAIT_OBJECT_0) TerminateProcess(scan.process, 0);
+                        CloseStarted(scan);
+                        EnumWindows(ClosePidWindow, static_cast<LPARAM>(burner.pid));
+                        if (WaitForSingleObject(burner.process, 15000) != WAIT_OBJECT_0) TerminateProcess(burner.process, 0);
+                        CloseStarted(burner);
+                    } else if (!done) {
+                        log(L"The OC scanner is still running after 45 minutes. It was left open.");
+                        CloseStarted(scan);
+                        CloseStarted(burner);
+                    } else {
+                        log(L"The OC scanner finished without a new curve. Afterburner will still apply its saved settings at logon.");
+                        if (dlg && IsWindow(dlg)) PostMessageW(dlg, WM_CLOSE, 0, 0);
+                        if (WaitForSingleObject(scan.process, 15000) != WAIT_OBJECT_0) TerminateProcess(scan.process, 0);
+                        CloseStarted(scan);
+                        EnumWindows(ClosePidWindow, static_cast<LPARAM>(burner.pid));
+                        if (WaitForSingleObject(burner.process, 15000) != WAIT_OBJECT_0) TerminateProcess(burner.process, 0);
+                        CloseStarted(burner);
+                    }
+                }
             }
         }
     }
