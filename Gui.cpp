@@ -1321,7 +1321,6 @@ float4 ps(VSOut i) : SV_TARGET {
 enum class Stage {
     Welcome,
     PreparePrompt, PrepareApplying, PrepareDone, PrepareFailed,
-    Bios,
     Running, Result, Failed, Cancelled, Installing, Installed, InstallFailed,
     PpmPrompt, PpmApplying, PpmDone, PpmFailed,
     GpuClean,
@@ -1332,7 +1331,7 @@ enum class Stage {
     Review
 };
 
-constexpr int kStepCount = 11;
+constexpr int kStepCount = 10;
 
 struct StepMeta {
     int number;
@@ -1349,47 +1348,45 @@ StepMeta Meta(Stage s) {
         case Stage::PrepareDone:
         case Stage::PrepareFailed:
             return {1, L"Prepare", L"Backup / restore point"};
-        case Stage::Bios:
-            return {2, L"BIOS", L"Lock the CPU and enable XMP"};
         case Stage::Running:
         case Stage::Failed:
         case Stage::Cancelled:
-            return {3, L"Measure", L"Find this PC's fastest Sleep(1)"};
+            return {2, L"Measure", L"Find this PC's fastest Sleep(1)"};
         case Stage::Result:
         case Stage::Installing:
         case Stage::Installed:
         case Stage::InstallFailed:
-            return {4, L"Hold", L"Install the boot service"};
+            return {3, L"Hold", L"Install the boot service"};
         case Stage::PpmPrompt:
         case Stage::PpmApplying:
         case Stage::PpmDone:
         case Stage::PpmFailed:
-            return {5, L"CPU Tune", L"Ultimate Performance and PPM"};
+            return {4, L"CPU Tune", L"Ultimate Performance and PPM"};
         case Stage::GpuClean:
-            return {6, L"GPU Clean", L"Latest driver, graphics only"};
+            return {5, L"GPU Clean", L"Latest driver, graphics only"};
         case Stage::GpuPrompt:
         case Stage::GpuApplying:
         case Stage::GpuDone:
         case Stage::GpuFailed:
-            return {7, L"GPU Config", L"Power, latency, overlays"};
+            return {6, L"GPU Config", L"Power, latency, overlays"};
         case Stage::AfterburnerPrompt:
         case Stage::AfterburnerApplying:
         case Stage::AfterburnerDone:
         case Stage::AfterburnerFailed:
-            return {8, L"Afterburner", L"download and scan, ~30 min"};
+            return {7, L"Afterburner", L"download and scan, ~30 min"};
         case Stage::MemoryPrompt:
         case Stage::MemoryApplying:
         case Stage::MemoryDone:
         case Stage::MemoryFailed:
-            return {9, L"Memory", L"Pagefile and compression"};
+            return {8, L"Memory", L"Pagefile and compression"};
         case Stage::StoragePrompt:
         case Stage::StorageApplying:
         case Stage::StorageDone:
         case Stage::StorageFailed:
-            return {10, L"Storage", L"SSD, PCIe, USB, TRIM"};
+            return {9, L"Storage", L"SSD, PCIe, USB, TRIM"};
         case Stage::Review:
         default:
-            return {11, L"Review", L"Validate, then restart"};
+            return {10, L"Review", L"BIOS, then restart"};
     }
 }
 
@@ -1399,7 +1396,6 @@ bool IsTuneStage(Stage s) {
         case Stage::PrepareApplying:
         case Stage::PrepareDone:
         case Stage::PrepareFailed:
-        case Stage::Bios:
         case Stage::PpmPrompt:
         case Stage::PpmApplying:
         case Stage::PpmDone:
@@ -1430,7 +1426,6 @@ bool IsTuneStage(Stage s) {
 
 enum {
     kWantPrepare = 0,
-    kWantBios,
     kWantMeasure,
     kWantHold,
     kWantCpu,
@@ -1851,7 +1846,7 @@ private:
     void StartAtOrAfter(int index) {
         for (int i = index; i < kWantCount; ++i) {
             if (!want_[i]) continue;
-            if (host_.autoInstall && (i == kWantBios || i == kWantGpuClean)) continue;
+            if (host_.autoInstall && i == kWantGpuClean) continue;
             switch (i) {
                 case kWantPrepare:
                     if (!host_.applyPrepare) continue;
@@ -1861,10 +1856,6 @@ private:
                     }
                     stage_ = Stage::PreparePrompt;
                     state_.Phase(L"PREPARE", L"create a System Restore point");
-                    return;
-                case kWantBios:
-                    stage_ = Stage::Bios;
-                    state_.Phase(L"BIOS", L"lock the multiplier and enable XMP/DOCP");
                     return;
                 case kWantMeasure:
                     StartBenchmark();
@@ -1946,7 +1937,7 @@ private:
             }
         }
         stage_ = Stage::Review;
-        state_.Phase(L"REVIEW", L"validate, then restart");
+        state_.Phase(L"REVIEW", L"set BIOS, then restart");
     }
 
     void MaybeStartPpm() { StartAtOrAfter(kWantCpu); }
@@ -2053,14 +2044,14 @@ private:
                 installT_ = 0.0001f;
                 StartAtOrAfter(kWantCpu);
             }
-            if (entered == Stage::PrepareDone) StartAtOrAfter(kWantBios);
+            if (entered == Stage::PrepareDone) StartAtOrAfter(kWantMeasure);
             if (entered == Stage::PpmDone) StartAtOrAfter(kWantGpuClean);
             if (entered == Stage::GpuDone) StartAtOrAfter(kWantAfterburner);
             if (entered == Stage::AfterburnerDone) StartAtOrAfter(kWantMemory);
             if (entered == Stage::MemoryDone) StartAtOrAfter(kWantStorage);
             if (entered == Stage::StorageDone) {
                 stage_ = Stage::Review;
-                state_.Phase(L"REVIEW", L"validate, then restart");
+                state_.Phase(L"REVIEW", L"set BIOS, then restart");
             }
             lastStage_ = stage_.load();
         }
@@ -2179,7 +2170,7 @@ private:
             phaseColor = col::amber;
         if (stage == Stage::PpmPrompt || stage == Stage::GpuPrompt || stage == Stage::AfterburnerPrompt ||
             stage == Stage::Welcome ||
-            stage == Stage::PreparePrompt || stage == Stage::Bios || stage == Stage::GpuClean ||
+            stage == Stage::PreparePrompt || stage == Stage::GpuClean ||
             stage == Stage::MemoryPrompt || stage == Stage::StoragePrompt)
             phaseColor = col::violet;
         const float pulse = 0.75f + 0.25f * std::sin(time_ * 3.0f);
@@ -2789,7 +2780,7 @@ private:
         }
         InitiateSystemShutdownExW(
             nullptr,
-            const_cast<LPWSTR>(L"Synchronus: restarting so kernel, HAGS, and Resizable BAR settings take effect."),
+            const_cast<LPWSTR>(L"Synchronus: restarting. In BIOS, lock the CPU multiplier, disable deep C-states, enable XMP or DOCP, and turn on Above 4G if you want Resizable BAR."),
             0, TRUE, TRUE,
             SHTDN_REASON_MAJOR_APPLICATION | SHTDN_REASON_MINOR_MAINTENANCE | SHTDN_REASON_FLAG_PLANNED);
     }
@@ -2801,7 +2792,7 @@ private:
         const D2D1_RECT_F btnB = D2D1::RectF(cx + 6, B.bottom - 38, cx + 6 + bw, B.bottom - 4);
         bool acted = false;
         if (restartConfirm_) {
-            rd_.Text(L"Windows will restart immediately. Save anything you still need, then confirm.",
+            rd_.Text(L"Windows will restart immediately. Set the BIOS items above on the next boot if they are not set yet.",
                      D2D1::RectF(B.left + 8, B.bottom - 62, B.right - 8, B.bottom - 42), rd_.fSmall.Get(), col::amber,
                      DWRITE_TEXT_ALIGNMENT_CENTER);
             if (Button(12, btnA, L"Restart now", col::green, true, true, dt, true, true)) {
@@ -2887,7 +2878,6 @@ private:
 
         static const wchar_t* kLabels[kWantCount + 1] = {
             L"Prepare \u2014 restore point",
-            L"BIOS \u2014 lock clocks, XMP/DOCP",
             L"Measure \u2014 Sleep(1) sweep",
             L"Hold \u2014 boot service",
             L"CPU Tune \u2014 Ultimate + PPM",
@@ -2896,10 +2886,10 @@ private:
             L"Afterburner \u2014 download and scan, ~30 min",
             L"Memory \u2014 pagefile, compression",
             L"Storage \u2014 ASPM, TRIM, USB",
-            L"Review \u2014 always last",
+            L"Review \u2014 BIOS, then restart",
         };
         const float colW = (W(card) - 88) / 2;
-        const int rows = 6;
+        const int rows = 5;
         const float rowH = 28.0f;
         for (int i = 0; i < kWantCount + 1; ++i) {
             const float colN = i < rows ? 0.0f : 1.0f;
@@ -2950,7 +2940,7 @@ private:
         }
 
         const bool canBegin = AnyWanted() && !updateBusy_.load();
-        std::wstring hint = canBegin ? L"Restart at the end so HAGS and Resizable BAR take effect. Press Enter to begin."
+        std::wstring hint = canBegin ? L"The restart screen lists the BIOS settings to set by hand. Press Enter to begin."
                                      : L"Select at least one step to tune";
         D2D1_COLOR_F hintCol = canBegin ? col::dim : col::red;
         if (updateBusy_.load()) {
@@ -3086,7 +3076,7 @@ private:
                                L"back if a later change is unstable. This can take a minute.",
                                L"Continue  \u2014  create restore point", col::cyan,
                                [this] { StartPrepare(); },
-                               [this] { StartAtOrAfter(kWantBios); });
+                               [this] { StartAtOrAfter(kWantMeasure); });
                 break;
             case Stage::PrepareApplying:
             case Stage::PrepareDone:
@@ -3095,10 +3085,7 @@ private:
             case Stage::PrepareFailed:
                 DrawPackFail(B, dt, L"Restore point could not be created. System Protection may be off.",
                              [this] { StartPrepare(); },
-                             [this] { StartAtOrAfter(kWantBios); });
-                break;
-            case Stage::Bios:
-                DrawBios(B, dt);
+                             [this] { StartAtOrAfter(kWantMeasure); });
                 break;
             case Stage::PpmPrompt:
                 DrawPpmPrompt(B, dt);
@@ -3237,43 +3224,6 @@ private:
         const D2D1_RECT_F btnB = D2D1::RectF(cx + 6, B.bottom - 38, cx + 6 + bw, B.bottom - 4);
         if (Button(6, btnA, L"Retry", col::violet, true, true, dt, true, true)) retry();
         if (Button(7, btnB, L"Skip", col::muted, false, true, dt)) skip();
-    }
-
-    void DrawChecklist(const D2D1_RECT_F& B, float dt, const wchar_t* name, const wchar_t* headline,
-                       std::initializer_list<const wchar_t*> items, const wchar_t* goLabel,
-                       const std::function<void()>& go, const std::function<void()>& skip) {
-        rd_.Text(name, D2D1::RectF(B.left, B.top + 6, B.right, B.top + 28), rd_.fPhase.Get(), col::violet,
-                 DWRITE_TEXT_ALIGNMENT_CENTER);
-        rd_.Text(headline, D2D1::RectF(B.left + 8, B.top + 28, B.right - 8, B.top + 52), rd_.fSmall.Get(), col::muted,
-                 DWRITE_TEXT_ALIGNMENT_CENTER);
-        float y = B.top + 56;
-        const float rowH = std::min(28.0f, (B.bottom - 52 - y) / std::max(1.0f, static_cast<float>(items.size())));
-        int n = 1;
-        for (const wchar_t* item : items) {
-            rd_.Text(Fmt(L"%d.", n++), D2D1::RectF(B.left + 10, y, B.left + 36, y + rowH), rd_.fMono.Get(), col::cyan,
-                     DWRITE_TEXT_ALIGNMENT_LEADING, DWRITE_PARAGRAPH_ALIGNMENT_CENTER);
-            rd_.Text(item, D2D1::RectF(B.left + 38, y, B.right - 10, y + rowH), rd_.fSmall.Get(), col::text,
-                     DWRITE_TEXT_ALIGNMENT_LEADING, DWRITE_PARAGRAPH_ALIGNMENT_CENTER);
-            y += rowH;
-        }
-        const float cx = (B.left + B.right) / 2;
-        const float bw = std::min(270.0f, (W(B) - 16) / 2);
-        const D2D1_RECT_F btnA = D2D1::RectF(cx - bw - 6, B.bottom - 38, cx - 6, B.bottom - 4);
-        const D2D1_RECT_F btnB = D2D1::RectF(cx + 6, B.bottom - 38, cx + 6 + bw, B.bottom - 4);
-        if (Button(6, btnA, goLabel, col::cyan, true, true, dt, true, true)) go();
-        if (Button(7, btnB, L"Skip this step", col::muted, false, true, dt)) skip();
-    }
-
-    void DrawBios(const D2D1_RECT_F& B, float dt) {
-        DrawChecklist(B, dt, L"BIOS",
-                      L"Reboot into BIOS/UEFI and set:",
-                      {L"Lock the CPU multiplier. Disable Intel Turbo / EIST / Speed Shift, or AMD PBO / Precision Boost.",
-                       L"Disable deep C-states. Leave C1 if the machine will not POST without it.",
-                       L"Enable XMP (Intel) or DOCP (AMD) at the RAM's rated frequency. Set DRAM voltage if the profile needs it.",
-                       L"SATA/NVMe in AHCI (not IDE). Enable Above 4G / Resizable BAR if you want ReBAR later.",
-                       L"Save, boot into Windows, then Continue. If this is already done, Continue anyway."},
-                      L"Continue  \u2014  BIOS is set", [this] { StartAtOrAfter(kWantMeasure); },
-                      [this] { StartAtOrAfter(kWantMeasure); });
     }
 
     void BeginGpuLookup() {
@@ -3532,18 +3482,18 @@ private:
     }
 
     void DrawReview(const D2D1_RECT_F& B, float dt) {
-        rd_.Text(L"Review", D2D1::RectF(B.left, B.top + 8, B.right, B.top + 32), rd_.fPhase.Get(), col::green,
+        rd_.Text(L"Before you restart", D2D1::RectF(B.left, B.top + 8, B.right, B.top + 32), rd_.fPhase.Get(), col::green,
                  DWRITE_TEXT_ALIGNMENT_CENTER);
-        rd_.Text(L"Confirm the results, then restart so kernel and driver flags take effect.",
+        rd_.Text(L"Windows cannot change BIOS. Set these, then restart so they and the kernel flags take effect.",
                  D2D1::RectF(B.left + 8, B.top + 32, B.right - 8, B.top + 52), rd_.fSmall.Get(), col::muted,
                  DWRITE_TEXT_ALIGNMENT_CENTER);
-        rd_.Text(L"LatencyMon or WPR \u2014 DPC/ISR should be quieter after PERFCHECK 5000 and ThreadDpcEnable=0.\n"
-                 L"HWiNFO \u2014 CPU parked cores at 0, clocks held if you locked the multiplier in BIOS.\n"
-                 L"GPU-Z \u2014 P0 / max performance; ReBAR only if BIOS Above 4G is on.\n"
-                 L"MemTest86 (USB) and y-cruncher \u2014 RAM at the XMP/DOCP frequency with no errors. Hot DIMMs error.\n"
-                 L"CrystalDiskMark \u2014 sequential/random near the SSD's spec after TRIM and write cache.\n"
+        const float bodyBottom = B.bottom - (restartConfirm_ ? 72.0f : 48.0f);
+        rd_.Text(L"Lock the CPU multiplier. Disable Intel Turbo / EIST / Speed Shift, or AMD PBO / Precision Boost.\n"
+                 L"Disable deep C-states. Leave C1 if the machine will not POST without it.\n"
+                 L"Enable XMP (Intel) or DOCP (AMD) at the RAM's rated frequency, and DRAM voltage if the profile needs it.\n"
+                 L"SATA/NVMe in AHCI. Enable Above 4G / Resizable BAR if you want ReBAR.\n"
                  L"If anything is unstable: Settings \u2192 System Restore \u2192 'Synchronus pre-tune', or Synchronus.exe --uninstall.",
-                 D2D1::RectF(B.left + 12, B.top + 56, B.right - 12, B.bottom - 48), rd_.fBody.Get(), col::text);
+                 D2D1::RectF(B.left + 12, B.top + 56, B.right - 12, bodyBottom), rd_.fBody.Get(), col::text);
         DrawFinishButtons(B, dt);
     }
 

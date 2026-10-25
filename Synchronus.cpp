@@ -69,7 +69,7 @@ gui::MeasurePlan gui::MeasurePlanFor(int fidelity) {
 
 namespace {
 
-constexpr wchar_t kVersion[] = L"1.12.7";
+constexpr wchar_t kVersion[] = L"1.12.8";
 constexpr wchar_t kProduct[] = L"Synchronus";
 constexpr wchar_t kCompany[] = L"Lucius And Wayne Systems LLC";
 constexpr wchar_t kCompanyUrl[] = L"https://luciuswayne.com";
@@ -1790,7 +1790,7 @@ bool ApplyPrepareTweaks() {
 
 bool ApplyMemoryTweaks() {
     Narrate(L"Memory",
-            L"XMP/DOCP and timings live in BIOS (the previous BIOS step). In Windows we make sure a "
+            L"XMP/DOCP and timings live in BIOS, listed on the restart screen. In Windows we make sure a "
             L"pagefile exists so the kernel is not forced into a zero-pagefile panic under load, and we "
             L"turn off memory compression which trades CPU for RAM and adds jitter.");
     ReportPhase(L"MEMORY", L"pagefile and memory compression");
@@ -3859,6 +3859,11 @@ int CmdInstall(const Options& opts, bool interactiveDefault) {
             ApplyStorageTweaks();
         }
     }
+    Out(L"Restart when you are ready. Windows cannot change BIOS, so set these by hand:");
+    Out(L"  Lock the CPU multiplier. Disable Intel Turbo / EIST / Speed Shift, or AMD PBO / Precision Boost.");
+    Out(L"  Disable deep C-states. Leave C1 if the machine will not POST without it.");
+    Out(L"  Enable XMP (Intel) or DOCP (AMD) at the RAM's rated frequency, and DRAM voltage if the profile needs it.");
+    Out(L"  SATA/NVMe in AHCI. Enable Above 4G / Resizable BAR if you want ReBAR.");
     return 0;
 }
 

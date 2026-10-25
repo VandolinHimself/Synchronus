@@ -58,8 +58,9 @@ After PPM the same style of pass applies **GPU driver optimization**:
 hardware-accelerated GPU scheduling, Game DVR/overlay off, NVIDIA global
 3D (prefer maximum performance, high-performance filtering, VSync force
 off, ultra low latency, Resizable BAR, CUDA Force P2 off, Ansel off) and
-the AMD Anti-Lag / ULPS set. DDU, NVCleanstall, and BIOS ReBAR still have
-to be done by you — this process cannot wipe a driver or flash firmware.
+the AMD Anti-Lag / ULPS set. DDU, NVCleanstall, and the firmware menu still
+have to be done by you. The restart screen lists the BIOS items: a locked
+multiplier, deep C-states off, XMP or DOCP, and Above 4G if you want ReBAR.
 
 A separate step, which can be run on its own, installs MSI Afterburner and
 RivaTuner. The download and the NVIDIA OC scan take about 30 minutes. The
@@ -113,28 +114,28 @@ Opening the window checks one address for a newer build:
 https://luciuswayne.com/synchronus/latest.json
 ```
 
-That address does not change. The request is a GET, and the query `?current=1.12.7` (the running version) can be ignored. Serve the file over HTTPS with `Cache-Control: no-store`. Plain HTTP is refused. The list may be read from `luciuswayne.com`, `www.luciuswayne.com`, or `media.luciuswayne.com`.
+That address does not change. The request is a GET, and the query `?current=1.12.8` (the running version) can be ignored. Serve the file over HTTPS with `Cache-Control: no-store`. Plain HTTP is refused. The list may be read from `luciuswayne.com`, `www.luciuswayne.com`, or `media.luciuswayne.com`.
 
 The executable must be `https://media.luciuswayne.com/Synchronus.exe` or `https://media.luciuswayne.com/Synchronus-<release>.exe`, including after a redirect. The release token is 1–64 characters of letters, numbers, `.`, `_`, and `-`, and it cannot contain `..`. This release is published as:
 
 ```
-https://media.luciuswayne.com/Synchronus-1.12.7.exe
+https://media.luciuswayne.com/Synchronus-1.12.8.exe
 ```
 
 ```json
 {
-  "version": "1.12.7",
-  "url": "https://media.luciuswayne.com/Synchronus-1.12.7.exe",
+  "version": "1.12.8",
+  "url": "https://media.luciuswayne.com/Synchronus-1.12.8.exe",
   "notes": "What changed, in plain text.",
   "sha256": "paste the 64 hex digits here",
   "size": 1234567
 }
 ```
 
-`version`, `url`, and `sha256` are required. `notes` and `size` are optional. `version` is numeric (`1.12.7` and `1.12.7.0` are the same) and must be newer than the running copy. Publish each build under its own `Synchronus-<version>.exe` name. The media host keeps files for a long time, so a new name is what makes the download a new file. `sha256` is the SHA-256 of that file:
+`version`, `url`, and `sha256` are required. `notes` and `size` are optional. `version` is numeric (`1.12.8` and `1.12.8.0` are the same) and must be newer than the running copy. Publish each build under its own `Synchronus-<version>.exe` name. The media host keeps files for a long time, so a new name is what makes the download a new file. `sha256` is the SHA-256 of that file:
 
 ```
-certutil -hashfile Synchronus-1.12.7.exe SHA256
+certutil -hashfile Synchronus-1.12.8.exe SHA256
 ```
 
 The downloaded file's `FILEVERSION` must be that same `version`. In this tree that is `Synchronus.rc` and `kVersion` in `Synchronus.cpp`. If the list is missing or the machine is offline, the window stays quiet. A rejected list is written to `%ProgramData%\Synchronus\Synchronus.log`.
@@ -193,4 +194,4 @@ Philosopher, Gruppo, and Bruno Ace SC are bundled under the
 
 ## Changelog
 
-Version history is in [CHANGELOG.md](CHANGELOG.md). The current release is 1.12.7.
+Version history is in [CHANGELOG.md](CHANGELOG.md). The current release is 1.12.8.

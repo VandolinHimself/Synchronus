@@ -1,6 +1,11 @@
 # Changelog
 
-Current release: **1.12.7**.
+Current release: **1.12.8**.
+
+## 1.12.8 — 2026-10-25
+
+- The BIOS checklist is no longer its own step. Windows cannot change those settings.
+- The restart screen, and the console finish, list what to set by hand: a locked multiplier, deep C-states off, XMP or DOCP, and Above 4G if you want Resizable BAR.
 
 ## 1.12.7 — 2026-10-24
 
