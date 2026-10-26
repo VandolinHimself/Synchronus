@@ -1682,7 +1682,7 @@ private:
                 }
                 return 0;
             case WM_MOUSEWHEEL:
-                if (stage_.load() == Stage::Monitor) {
+                if (stage_.load() == Stage::Monitor || stage_.load() == Stage::Home) {
                     const int delta = GET_WHEEL_DELTA_WPARAM(wp);
                     healthScroll_ = std::max(0, healthScroll_ - delta / 120);
                 }
@@ -2234,11 +2234,11 @@ private:
         if (stage == Stage::Welcome) {
             DrawWelcome(D2D1::RectF(pad, pad, w - pad, footer.top - 10), dt);
         } else if (stage == Stage::Home || stage == Stage::Monitor) {
-            DrawHeader(header, bar, stage);
+            DrawHeader(header, bar, stage, dt);
             if (stage == Stage::Home) DrawHome(body, dt);
             else DrawMonitor(body, dt);
         } else {
-            DrawHeader(header, bar, stage);
+            DrawHeader(header, bar, stage, dt);
             const float gap = 12;
             const float leftW = std::floor((W(body) - gap) * 0.62f);
             const float finalH = IsTuneStage(stage) ? 360.0f : 236.0f;
@@ -2284,7 +2284,7 @@ private:
     }
 
     // ---- header + progress ----
-    void DrawHeader(const D2D1_RECT_F& r, const D2D1_RECT_F& bar, Stage stage) {
+    void DrawHeader(const D2D1_RECT_F& r, const D2D1_RECT_F& bar, Stage stage, float dt) {
         float textLeft = r.left;
         if (rd_.Mark()) {
             const D2D1_SIZE_F sz = rd_.Mark()->GetSize();
@@ -2331,7 +2331,12 @@ private:
             stage == Stage::MemoryPrompt || stage == Stage::StoragePrompt)
             phaseColor = col::violet;
         const float pulse = 0.75f + 0.25f * std::sin(time_ * 3.0f);
-        const D2D1_RECT_F pr = D2D1::RectF(r.left + 520, r.top + 2, r.right, r.top + 26);
+        const float hcx = (r.left + r.right) * 0.5f;
+        const D2D1_RECT_F homeBtn = D2D1::RectF(hcx - 20, r.top + 2, hcx + 20, r.top + 42);
+        if (Button(250, homeBtn, L"", col::cyan, stage == Stage::Home, true, dt) && stage != Stage::Home) OpenHome();
+        DrawHouse(D2D1::RectF(homeBtn.left + 6, homeBtn.top + 4, homeBtn.right - 6, homeBtn.bottom - 4),
+                  stage == Stage::Home ? col::white : col::cyan);
+        const D2D1_RECT_F pr = D2D1::RectF(r.left + 420, r.top + 2, r.right, r.top + 26);
         rd_.Text(meta.number ? Fmt(L"STEP %d OF %d  |  %s", meta.number, kStepCount, Upper(phase).c_str())
                              : Upper(phase),
                  pr, rd_.fPhase.Get(), Alpha(phaseColor, stage == Stage::Running ? pulse : 1.0f),
@@ -2341,7 +2346,7 @@ private:
             detail += Fmt(L"   elapsed %s", Duration(snap_.elapsed).c_str());
             if (snap_.remaining > 0) detail += Fmt(L"  |  remaining ~%s", Duration(snap_.remaining).c_str());
         }
-        rd_.Text(detail, D2D1::RectF(r.left + 520, r.top + 28, r.right, r.top + 48), rd_.fSmall.Get(), col::muted,
+        rd_.Text(detail, D2D1::RectF(r.left + 420, r.top + 28, r.right, r.top + 48), rd_.fSmall.Get(), col::muted,
                  DWRITE_TEXT_ALIGNMENT_TRAILING);
 
         // progress bar
@@ -3408,27 +3413,69 @@ private:
                  D2D1::RectF(rx, B.top, B.right, B.top + 28), rd_.fPhase.Get(), col::cyan);
         rd_.Text(Fmt(L"%d live    %d need attention    %d other", sum.pass, sum.attention, sum.info + sum.other),
                  D2D1::RectF(rx, B.top + 30, B.right, B.top + 48), rd_.fMonoSmall.Get(), col::dim);
+        const wchar_t* groupNames[] = {L"Hold timer", L"CPU power", L"GPU driver", L"GPU settings",
+                                       L"Afterburner", L"Memory", L"Storage"};
+        const wchar_t* groupCats[] = {L"Timer Resolution", L"Power and Performance", L"Graphics Drivers",
+                                      L"Windows Configuration", L"Supporting Utilities", L"Memory and CPU", L"Storage"};
+        struct Line {
+            bool heading;
+            std::wstring text;
+            int check = -1;
+        };
+        std::vector<Line> lines;
+        std::vector<char> used(rows.size(), 0);
+        for (int g = 0; g < 7; ++g) {
+            bool any = false;
+            for (int i = 0; i < static_cast<int>(rows.size()); ++i) {
+                if (rows[static_cast<size_t>(i)].category == groupCats[g]) any = true;
+            }
+            if (!any) continue;
+            lines.push_back({true, groupNames[g], -1});
+            for (int i = 0; i < static_cast<int>(rows.size()); ++i) {
+                if (rows[static_cast<size_t>(i)].category != groupCats[g]) continue;
+                used[static_cast<size_t>(i)] = 1;
+                lines.push_back({false, rows[static_cast<size_t>(i)].name, i});
+            }
+        }
+        bool other = false;
+        for (char flag : used) {
+            if (!flag) other = true;
+        }
+        if (other) {
+            lines.push_back({true, L"Other", -1});
+            for (int i = 0; i < static_cast<int>(rows.size()); ++i) {
+                if (!used[static_cast<size_t>(i)]) lines.push_back({false, rows[static_cast<size_t>(i)].name, i});
+            }
+        }
         const float listTop = B.top + 56;
         const float rowH = 22;
         const int visible = std::max(1, static_cast<int>((B.bottom - listTop) / rowH));
-        if (healthScroll_ > std::max(0, static_cast<int>(rows.size()) - visible))
-            healthScroll_ = std::max(0, static_cast<int>(rows.size()) - visible);
+        if (healthScroll_ > std::max(0, static_cast<int>(lines.size()) - visible))
+            healthScroll_ = std::max(0, static_cast<int>(lines.size()) - visible);
         for (int i = 0; i < visible; ++i) {
             const int idx = healthScroll_ + i;
-            if (idx < 0 || idx >= static_cast<int>(rows.size())) break;
-            const auto& c = rows[static_cast<size_t>(idx)];
+            if (idx < 0 || idx >= static_cast<int>(lines.size())) break;
+            const Line& line = lines[static_cast<size_t>(idx)];
             const float y = listTop + i * rowH;
-            D2D1_COLOR_F mark = col::dim;
-            if (c.status == HealthStatus::Pass) mark = col::green;
-            else if (HealthNeedsAttention(c.status)) mark = col::amber;
-            else if (c.status == HealthStatus::Error || c.status == HealthStatus::Inaccessible) mark = col::red;
-            rd_.FillRound(D2D1::RectF(rx, y + 6, rx + 10, y + 16), 5, mark);
-            rd_.Text(c.name + L"  " + HealthStatusText(c.status), D2D1::RectF(rx + 16, y, B.right, y + rowH),
-                     rd_.fSmall.Get(), col::text, DWRITE_TEXT_ALIGNMENT_LEADING, DWRITE_PARAGRAPH_ALIGNMENT_CENTER);
+            if (line.heading) {
+                rd_.Text(line.text, D2D1::RectF(rx, y, B.right, y + rowH), rd_.fSmall.Get(), col::cyan,
+                         DWRITE_TEXT_ALIGNMENT_LEADING, DWRITE_PARAGRAPH_ALIGNMENT_CENTER);
+                continue;
+            }
+            const auto& c = rows[static_cast<size_t>(line.check)];
+            const bool applied = c.status == HealthStatus::Pass;
+            const D2D1_COLOR_F mark = applied ? col::green : col::red;
+            const D2D1_POINT_2F center = D2D1::Point2F(rx + 7, y + rowH * 0.5f);
+            rd_.Glow(center, 9, mark, applied ? 0.45f : 0.35f);
+            rd_.FillRound(D2D1::RectF(rx, y + 4, rx + 14, y + 18), 2, mark);
+            rd_.Text(c.name, D2D1::RectF(rx + 20, y, B.right, y + rowH), rd_.fSmall.Get(), col::text,
+                     DWRITE_TEXT_ALIGNMENT_LEADING, DWRITE_PARAGRAPH_ALIGNMENT_CENTER);
         }
     }
 
     void DrawWelcome(const D2D1_RECT_F& R, float dt) {
+        if (Button(250, D2D1::RectF(R.right - 112, R.top + 8, R.right - 8, R.top + 36), L"Home", col::cyan, false, true, dt))
+            OpenHome();
         const float cx = (R.left + R.right) / 2;
         const float cardW = std::min(780.0f, W(R) - 40);
         const D2D1_RECT_F card = D2D1::RectF(cx - cardW / 2, R.top + 8, cx + cardW / 2, R.bottom);

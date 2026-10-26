@@ -1,6 +1,11 @@
 # Changelog
 
-Current release: **2.1.0**.
+Current release: **2.2.0**.
+
+## 2.2.0 — 2026-10-26
+
+- A Home button sits at the top of every screen, including the first-run tune flow.
+- The home list groups each tweak under the step it belongs to. A box lights green when that tweak is applied and red when it is not.
 
 ## 2.1.0 — 2026-10-26
 
