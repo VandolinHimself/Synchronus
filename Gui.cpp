@@ -2084,6 +2084,7 @@ private:
 
     void OpenHome() {
         ApplySavedChoices();
+        homeLoaded_ = false;
         stage_ = Stage::Home;
         state_.Phase(L"HOME", L"choose a function");
         if (checks_.empty() && !healthBusy_.load()) StartHealthScan();
@@ -3508,9 +3509,28 @@ private:
                 state_.Phase(L"REVIEW", L"set BIOS, then restart");
             }
         }
-        if (updatePulse_ && Button(220, D2D1::RectF(B.left, B.bottom - 40, B.left + W(B) * 0.42f, B.bottom - 6),
+        const float buttonsBottom = B.top + 88 + 5 * (btnH + 6);
+        if (updatePulse_ && Button(220, D2D1::RectF(B.left, buttonsBottom, B.left + W(B) * 0.42f, buttonsBottom + 28),
                                    L"Install update", col::green, true, true, dt)) {
             showUpdatePrompt_ = true;
+        }
+        if (!homeLoaded_) LoadHomeLattice();
+        const float heatTop = buttonsBottom + (updatePulse_ ? 36.0f : 8.0f);
+        const D2D1_RECT_F heat = D2D1::RectF(B.left, heatTop, B.left + W(B) * 0.44f, B.bottom);
+        rd_.FillRound(heat, 12, Alpha(col::panel, 0.88f));
+        rd_.StrokeRound(heat, 12, Alpha(col::cyan, 0.28f), 1.2f);
+        rd_.Text(homeHas_ ? (L"Last timer scan  " + homeScanLabel_) : L"No timer scan saved yet",
+                 D2D1::RectF(heat.left + 8, heat.top + 6, heat.right - 8, heat.top + 22), rd_.fMonoSmall.Get(), col::cyan);
+        if (homeHas_ && rd_.LatticeReady()) {
+            rd_.RenderLattice(time_, homeLat_.data(), homeCol_.data());
+            const D2D1_RECT_F plot = D2D1::RectF(heat.left + 8, heat.top + 24, heat.right - 8, heat.bottom - 8);
+            const float side = std::min(W(plot), H(plot));
+            const float pcx = (plot.left + plot.right) * 0.5f;
+            const float pcy = (plot.top + plot.bottom) * 0.5f;
+            rd_.DrawBitmap(rd_.Lattice(), D2D1::RectF(pcx - side * 0.5f, pcy - side * 0.5f, pcx + side * 0.5f, pcy + side * 0.5f), 1.0f);
+        } else if (!homeHas_) {
+            rd_.Text(L"Run Measure timing to draw this.",
+                     D2D1::RectF(heat.left + 8, heat.top + 28, heat.right - 8, heat.bottom - 8), rd_.fSmall.Get(), col::dim);
         }
         std::vector<HealthCheck> rows;
         HealthSummary sum;
@@ -3521,66 +3541,88 @@ private:
         }
         const float rx = B.left + W(B) * 0.46f;
         rd_.Text(healthBusy_.load() ? L"Checking live settings" : sum.headline,
-                 D2D1::RectF(rx, B.top, B.right, B.top + 28), rd_.fPhase.Get(), col::cyan);
+                 D2D1::RectF(rx, B.top, B.right, B.top + 28), rd_.fPhase.Get(), col::cyan, DWRITE_TEXT_ALIGNMENT_TRAILING);
         rd_.Text(Fmt(L"%d live    %d need attention    %d other", sum.pass, sum.attention, sum.info + sum.other),
-                 D2D1::RectF(rx, B.top + 30, B.right, B.top + 48), rd_.fMonoSmall.Get(), col::dim);
+                 D2D1::RectF(rx, B.top + 30, B.right, B.top + 48), rd_.fMonoSmall.Get(), col::dim,
+                 DWRITE_TEXT_ALIGNMENT_TRAILING);
         const wchar_t* groupNames[] = {L"Hold timer", L"CPU power", L"GPU driver", L"GPU settings",
                                        L"Afterburner", L"Memory", L"Storage"};
         const wchar_t* groupCats[] = {L"Timer Resolution", L"Power and Performance", L"Graphics Drivers",
                                       L"Windows Configuration", L"Supporting Utilities", L"Memory and CPU", L"Storage"};
-        struct Line {
-            bool heading;
-            std::wstring text;
-            int check = -1;
+        struct Group {
+            const wchar_t* title;
+            std::vector<int> items;
         };
-        std::vector<Line> lines;
-        std::vector<char> used(rows.size(), 0);
-        for (int g = 0; g < 7; ++g) {
-            bool any = false;
-            for (int i = 0; i < static_cast<int>(rows.size()); ++i) {
-                if (rows[static_cast<size_t>(i)].category == groupCats[g]) any = true;
+        Group groups[8]{};
+        for (int g = 0; g < 7; ++g) groups[g].title = groupNames[g];
+        groups[7].title = L"Other";
+        for (int i = 0; i < static_cast<int>(rows.size()); ++i) {
+            int g = 7;
+            for (int k = 0; k < 7; ++k) {
+                if (rows[static_cast<size_t>(i)].category == groupCats[k]) g = k;
             }
-            if (!any) continue;
-            lines.push_back({true, groupNames[g], -1});
-            for (int i = 0; i < static_cast<int>(rows.size()); ++i) {
-                if (rows[static_cast<size_t>(i)].category != groupCats[g]) continue;
-                used[static_cast<size_t>(i)] = 1;
-                lines.push_back({false, rows[static_cast<size_t>(i)].name, i});
+            groups[g].items.push_back(i);
+        }
+        const float listTop = B.top + 52;
+        const float availH = std::max(40.0f, B.bottom - listTop);
+        float itemH = 12.0f;
+        const float headH = 14.0f;
+        auto groupHeight = [&](size_t n) { return 8.0f + headH + n * itemH + 6.0f; };
+        float tallest = 0;
+        for (const auto& g : groups) {
+            if (!g.items.empty()) tallest = std::max(tallest, groupHeight(g.items.size()));
+        }
+        while (tallest > availH - 4.0f && itemH > 9.0f) {
+            itemH -= 1.0f;
+            tallest = 0;
+            for (const auto& g : groups) {
+                if (!g.items.empty()) tallest = std::max(tallest, groupHeight(g.items.size()));
             }
         }
-        bool other = false;
-        for (char flag : used) {
-            if (!flag) other = true;
-        }
-        if (other) {
-            lines.push_back({true, L"Other", -1});
-            for (int i = 0; i < static_cast<int>(rows.size()); ++i) {
-                if (!used[static_cast<size_t>(i)]) lines.push_back({false, rows[static_cast<size_t>(i)].name, i});
+        const float gap = 6.0f;
+        const float paneW = std::max(80.0f, B.right - rx);
+        int columns = 1;
+        float used = 0;
+        for (const auto& g : groups) {
+            if (g.items.empty()) continue;
+            const float h = groupHeight(g.items.size()) + gap;
+            if (used > 0 && used + h > availH) {
+                ++columns;
+                used = 0;
             }
+            used += h;
         }
-        const float listTop = B.top + 56;
-        const float rowH = 22;
-        const int visible = std::max(1, static_cast<int>((B.bottom - listTop) / rowH));
-        if (healthScroll_ > std::max(0, static_cast<int>(lines.size()) - visible))
-            healthScroll_ = std::max(0, static_cast<int>(lines.size()) - visible);
-        for (int i = 0; i < visible; ++i) {
-            const int idx = healthScroll_ + i;
-            if (idx < 0 || idx >= static_cast<int>(lines.size())) break;
-            const Line& line = lines[static_cast<size_t>(idx)];
-            const float y = listTop + i * rowH;
-            if (line.heading) {
-                rd_.Text(line.text, D2D1::RectF(rx, y, B.right, y + rowH), rd_.fSmall.Get(), col::cyan,
-                         DWRITE_TEXT_ALIGNMENT_LEADING, DWRITE_PARAGRAPH_ALIGNMENT_CENTER);
-                continue;
+        float groupW = 196.0f;
+        if (columns * (groupW + gap) > paneW) groupW = std::max(108.0f, (paneW - gap * columns) / columns);
+        float xRight = B.right;
+        float y = listTop;
+        bool placed = false;
+        for (const auto& g : groups) {
+            if (g.items.empty()) continue;
+            const float h = groupHeight(g.items.size());
+            if (placed && y + h > B.bottom - 2) {
+                xRight -= groupW + gap;
+                y = listTop;
             }
-            const auto& c = rows[static_cast<size_t>(line.check)];
-            const bool applied = c.status == HealthStatus::Pass;
-            const D2D1_COLOR_F mark = applied ? col::green : col::red;
-            const D2D1_POINT_2F center = D2D1::Point2F(rx + 7, y + rowH * 0.5f);
-            rd_.Glow(center, 9, mark, applied ? 0.45f : 0.35f);
-            rd_.FillRound(D2D1::RectF(rx, y + 4, rx + 14, y + 18), 2, mark);
-            rd_.Text(c.name, D2D1::RectF(rx + 20, y, B.right, y + rowH), rd_.fSmall.Get(), col::text,
-                     DWRITE_TEXT_ALIGNMENT_LEADING, DWRITE_PARAGRAPH_ALIGNMENT_CENTER);
+            placed = true;
+            const D2D1_RECT_F card = D2D1::RectF(xRight - groupW, y, xRight, y + h);
+            rd_.FillRound(card, 8, Alpha(col::panel, 0.92f));
+            rd_.StrokeRound(card, 8, Alpha(col::cyan, 0.35f), 1.1f);
+            rd_.Text(g.title, D2D1::RectF(card.left + 6, card.top + 3, card.right - 6, card.top + 3 + headH),
+                     rd_.fMonoSmall.Get(), col::cyan, DWRITE_TEXT_ALIGNMENT_TRAILING, DWRITE_PARAGRAPH_ALIGNMENT_CENTER);
+            float iy = card.top + 4 + headH;
+            for (int index : g.items) {
+                const auto& c = rows[static_cast<size_t>(index)];
+                const bool applied = c.status == HealthStatus::Pass;
+                const D2D1_COLOR_F mark = applied ? col::green : col::red;
+                const D2D1_RECT_F box = D2D1::RectF(card.right - 16, iy + 1, card.right - 6, iy + itemH - 2);
+                rd_.Glow(D2D1::Point2F((box.left + box.right) * 0.5f, (box.top + box.bottom) * 0.5f), 7, mark, 0.4f);
+                rd_.FillRound(box, 2, mark);
+                rd_.Text(c.name, D2D1::RectF(card.left + 4, iy, box.left - 4, iy + itemH), rd_.fMonoSmall.Get(), col::text,
+                         DWRITE_TEXT_ALIGNMENT_TRAILING, DWRITE_PARAGRAPH_ALIGNMENT_CENTER);
+                iy += itemH;
+            }
+            y += h + gap;
         }
     }
 
@@ -4520,6 +4562,11 @@ private:
     bool pulseDim_ = false;
     bool showUpdatePrompt_ = false;
     HICON trayIcon_ = nullptr;
+    bool homeLoaded_ = false;
+    bool homeHas_ = false;
+    std::wstring homeScanLabel_;
+    std::vector<LatCell> homeLat_;
+    std::vector<ColStat> homeCol_;
     NOTIFYICONDATAW nid_{};
     UINT showMsg_ = 0;
     MonitorPrefs prefs_{};

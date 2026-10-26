@@ -4,8 +4,9 @@ Current release: **2.2.0**.
 
 ## 2.2.0 — 2026-10-26
 
-- A Home button sits at the top of every screen, including the first-run tune flow.
-- The home list groups each tweak under the step it belongs to. A box lights green when that tweak is applied and red when it is not.
+- A house icon is centered at the top of every screen and returns to home.
+- Tweaks on the home screen sit in a separate rounded group for each step. Groups wrap into the next column instead of scrolling off the window. A box lights green when that tweak is applied and red when it is not.
+- The lower left of the home screen draws the 3D lattice from the most recent timer-resolution scan.
 
 ## 2.1.0 — 2026-10-26
 
