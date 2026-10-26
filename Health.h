@@ -44,7 +44,8 @@ struct HealthSummary {
 struct MonitorPrefs {
     bool closeToTray = true;
     bool startMinimized = false;
-    bool launchAtLogin = false;
+    bool launchAtLogin = true;
+    bool trayPrompted = false;
     bool notify = true;
     bool paused = false;
     int scanHours = 6;
@@ -67,5 +68,25 @@ bool CheckDisabled(const std::wstring& id);
 void SetCheckDisabled(const std::wstring& id, bool disabled);
 void ApplyLaunchAtLogin(bool enabled);
 void AppendHealthLog(const std::wstring& line);
+
+struct StepChoices {
+    bool prepare = true;
+    bool measure = true;
+    bool hold = true;
+    bool cpu = true;
+    bool gpuClean = true;
+    bool gpu = true;
+    bool afterburner = true;
+    bool memory = true;
+    bool storage = true;
+};
+
+bool SetupComplete();
+void MarkSetupComplete();
+void SaveStepChoices(const StepChoices& choices);
+StepChoices LoadStepChoices();
+bool StepChosen(const wchar_t* name);
+// Live read of every power, storage, and GPU tweak the apply steps write.
+void AppendTuneChecks(std::vector<HealthCheck>& out, const std::atomic<bool>* cancelled);
 
 }  // namespace gui

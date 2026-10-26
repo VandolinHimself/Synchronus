@@ -70,7 +70,7 @@ gui::MeasurePlan gui::MeasurePlanFor(int fidelity) {
 
 namespace {
 
-constexpr wchar_t kVersion[] = L"2.0.0";
+constexpr wchar_t kVersion[] = L"2.1.0";
 constexpr wchar_t kProduct[] = L"Synchronus";
 constexpr wchar_t kCompany[] = L"Lucius And Wayne Systems LLC";
 constexpr wchar_t kCompanyUrl[] = L"https://luciuswayne.com";
@@ -4043,7 +4043,7 @@ int RunCli(const Options& opts, const std::vector<std::wstring>& args) {
             const gui::HealthSummary sum = gui::Summarize(checks);
             Out(sum.headline);
             for (const auto& c : checks) {
-                Out(Format(L"  [%s] %s — %s — %s", gui::HealthStatusText(c.status), c.category.c_str(), c.name.c_str(),
+                Out(Format(L"  [%s] %s | %s | %s", gui::HealthStatusText(c.status), c.category.c_str(), c.name.c_str(),
                            c.observed.c_str()));
             }
             exitCode = 0;
@@ -4346,7 +4346,152 @@ int RunGui(const Options& opts, const std::vector<std::wstring>&) {
     return rc;
 }
 
+void FillTuneChecks(std::vector<gui::HealthCheck>& out, const std::atomic<bool>* cancelled) {
+    auto stopped = [&] { return cancelled && cancelled->load(); };
+    auto stamp = [] {
+        FILETIME ft{};
+        GetSystemTimeAsFileTime(&ft);
+        ULARGE_INTEGER u{};
+        u.LowPart = ft.dwLowDateTime;
+        u.HighPart = ft.dwHighDateTime;
+        return u.QuadPart;
+    };
+    auto add = [&](const wchar_t* id, const wchar_t* category, const wchar_t* name, const wchar_t* repair,
+                   const wchar_t* choice, bool readable, bool match, const std::wstring& expected,
+                   const std::wstring& observed, bool missingClass) {
+        if (stopped()) return;
+        gui::HealthCheck c;
+        c.id = id;
+        c.category = category;
+        c.name = name;
+        c.repair = repair ? repair : L"";
+        c.expected = expected;
+        c.observed = observed;
+        c.checkedAt = stamp();
+        if (gui::CheckDisabled(c.id)) {
+            c.status = gui::HealthStatus::Disabled;
+            c.explanation = L"This check is turned off in Settings.";
+            c.repair.clear();
+        } else if (missingClass) {
+            c.status = gui::HealthStatus::Unsupported;
+            c.explanation = L"This processor or device does not expose this setting.";
+            c.repair.clear();
+        } else if (!readable) {
+            c.status = gui::HealthStatus::Inaccessible;
+            c.severity = 1;
+            c.explanation = L"The live value could not be read. That is not a pass.";
+        } else if (match) {
+            c.status = gui::HealthStatus::Pass;
+            c.explanation = L"Live. This tweak is currently applied.";
+            c.repair.clear();
+        } else if (!gui::StepChosen(choice)) {
+            c.status = gui::HealthStatus::Info;
+            c.explanation = L"You left this step off. It is not currently applied.";
+            c.repair.clear();
+        } else {
+            c.status = gui::HealthStatus::Attention;
+            c.severity = 1;
+            c.explanation = L"Not live. Repair puts the Synchronus value back.";
+        }
+        out.push_back(std::move(c));
+    };
+
+    GUID* scheme = nullptr;
+    const bool haveScheme = PowerGetActiveScheme(nullptr, &scheme) == ERROR_SUCCESS && scheme;
+    for (const auto& t : kPpmTweaks) {
+        DWORD value = 0;
+        const bool readable = haveScheme && ReadPowerIndex(scheme, t.subgroup, t.setting, true, value);
+        const bool classOnly = t.alias[wcslen(t.alias) - 1] == L'1';
+        add((std::wstring(L"power.") + t.alias).c_str(), L"Power and Performance", t.title, L"ppm", L"cpu", readable,
+            readable && value == t.target, Format(L"%lu", t.target),
+            readable ? Format(L"%lu", value) : L"unreadable", classOnly && !readable);
+    }
+    for (const auto& t : kStorageTweaks) {
+        DWORD value = 0;
+        const bool readable = haveScheme && ReadPowerIndex(scheme, t.subgroup, t.setting, true, value);
+        add((std::wstring(L"storage.") + t.alias).c_str(), L"Storage", t.title, L"storage", L"storage", readable,
+            readable && value == t.target, Format(L"%lu", t.target),
+            readable ? Format(L"%lu", value) : L"unreadable", false);
+    }
+    if (scheme) LocalFree(scheme);
+    if (stopped()) return;
+
+    const gui::GpuProbeView gpu = ProbeGpu();
+    NvDrs nv;
+    const bool nvOk = gpu.nvidia && nv.Open();
+    for (const auto& t : kGpuTweaks) {
+        if (!TweakApplies(t, gpu)) continue;
+        if (stopped()) break;
+        const std::wstring id = std::wstring(L"gpu.") + t.alias;
+        if (t.kind == GpuTweak::Kind::RegDword) {
+            if (t.perAdapter) {
+                const auto keys = DisplayAdapterKeys(t.vendor);
+                if (keys.empty()) {
+                    add(id.c_str(), L"Windows Configuration", t.title, L"gpu", L"gpu", false, false,
+                        Format(L"%lu", t.target), L"no matching adapter", true);
+                    continue;
+                }
+                int matched = 0;
+                bool anyRead = false;
+                for (const auto& key : keys) {
+                    DWORD value = 0;
+                    DWORD size = sizeof(value);
+                    if (RegGetValueW(HKEY_LOCAL_MACHINE, key.c_str(), t.regName, RRF_RT_REG_DWORD, nullptr, &value,
+                                     &size) == ERROR_SUCCESS) {
+                        anyRead = true;
+                        if (value == t.target) ++matched;
+                    }
+                }
+                add(id.c_str(), L"Windows Configuration", t.title, L"gpu", L"gpu", anyRead, matched == static_cast<int>(keys.size()),
+                    Format(L"%lu on every adapter", t.target),
+                    Format(L"%d of %d adapters match", matched, static_cast<int>(keys.size())), false);
+            } else {
+                const bool userHive = t.regKey && (wcsstr(t.regKey, L"GameBar") || wcsstr(t.regKey, L"CurrentVersion\\GameDVR"));
+                DWORD value = 0;
+                DWORD size = sizeof(value);
+                const HKEY root = userHive ? HKEY_CURRENT_USER : HKEY_LOCAL_MACHINE;
+                const bool readable = RegGetValueW(root, t.regKey, t.regName, RRF_RT_REG_DWORD, nullptr, &value, &size) == ERROR_SUCCESS;
+                add(id.c_str(), L"Windows Configuration", t.title, L"gpu", L"gpu", readable, readable && value == t.target,
+                    Format(L"%lu", t.target), readable ? Format(L"%lu", value) : L"not set", false);
+            }
+        } else if (t.kind == GpuTweak::Kind::Service) {
+            DWORD start = 0;
+            const SC_HANDLE scm = OpenSCManagerW(nullptr, nullptr, SC_MANAGER_CONNECT);
+            SC_HANDLE svc = scm ? OpenServiceW(scm, t.serviceName, SERVICE_QUERY_CONFIG) : nullptr;
+            bool present = svc != nullptr;
+            bool disabled = false;
+            if (svc) {
+                DWORD bytes = 0;
+                QueryServiceConfigW(svc, nullptr, 0, &bytes);
+                std::vector<unsigned char> buf(bytes ? bytes : 1);
+                auto* cfg = reinterpret_cast<QUERY_SERVICE_CONFIGW*>(buf.data());
+                if (bytes && QueryServiceConfigW(svc, cfg, bytes, &bytes)) {
+                    start = cfg->dwStartType;
+                    disabled = start == SERVICE_DISABLED;
+                }
+                CloseServiceHandle(svc);
+            }
+            if (scm) CloseServiceHandle(scm);
+            add(id.c_str(), L"Windows Configuration", t.title, L"gpu", L"gpu", true, !present || disabled,
+                L"disabled or not installed",
+                !present ? L"not installed" : Format(L"start type %lu", start), false);
+        } else if (t.kind == GpuTweak::Kind::NvDrs) {
+            DWORD value = 0;
+            const bool readable = nvOk && nv.Get(t.nvId, value);
+            add(id.c_str(), L"Windows Configuration", t.title, L"gpu", L"gpu", readable, readable && value == t.target,
+                Format(L"%lu", t.target), readable ? Format(L"%lu", value) : L"NVIDIA profile could not be read", false);
+        }
+    }
+    nv.Close(false);
+}
+
 }  // namespace
+
+namespace gui {
+void AppendTuneChecks(std::vector<HealthCheck>& out, const std::atomic<bool>* cancelled) {
+    FillTuneChecks(out, cancelled);
+}
+}  // namespace gui
 
 static bool LooksLikeCli(const std::vector<std::wstring>& args, const Options& opts) {
     if (opts.gui) return false;

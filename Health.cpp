@@ -217,24 +217,17 @@ void FinishPolicy(HealthCheck& c, bool readable, bool tracked, bool matches, con
         c.explanation = L"The live value could not be read. That is not a pass.";
         return;
     }
-    if (!tracked) {
-        c.status = HealthStatus::Info;
-        c.severity = 0;
-        c.explanation = matches
-                            ? L"The live value already matches the tuned setting. Synchronus has not recorded this as one of its applied tweaks."
-                            : L"Synchronus has not applied this tweak on this machine, so the difference is informational.";
-        c.repair.clear();
-        return;
-    }
     if (matches) {
         c.status = HealthStatus::Pass;
         c.severity = 0;
-        c.explanation = L"The live setting matches what Synchronus last applied.";
+        c.explanation = L"Live. This tweak is currently applied.";
+        c.repair.clear();
         return;
     }
     c.status = HealthStatus::Attention;
     c.severity = 1;
-    c.explanation = L"The live setting no longer matches what Synchronus applied. The saved flag alone is not treated as proof.";
+    c.explanation = L"Not live. The setting has changed, or it was never applied. Repair puts the Synchronus value back.";
+    (void)tracked;
 }
 
 }  // namespace
@@ -298,6 +291,7 @@ MonitorPrefs LoadMonitorPrefs() {
     if (ReadDword(HKEY_CURRENT_USER, kMonitor, L"CloseToTray", v)) p.closeToTray = v != 0;
     if (ReadDword(HKEY_CURRENT_USER, kMonitor, L"StartMinimized", v)) p.startMinimized = v != 0;
     if (ReadDword(HKEY_CURRENT_USER, kMonitor, L"LaunchAtLogin", v)) p.launchAtLogin = v != 0;
+    if (ReadDword(HKEY_CURRENT_USER, kMonitor, L"TrayPrompted", v)) p.trayPrompted = v != 0;
     if (ReadDword(HKEY_CURRENT_USER, kMonitor, L"Notify", v)) p.notify = v != 0;
     if (ReadDword(HKEY_CURRENT_USER, kMonitor, L"Paused", v)) p.paused = v != 0;
     if (ReadDword(HKEY_CURRENT_USER, kMonitor, L"ScanHours", v) && v >= 1 && v <= 168) p.scanHours = static_cast<int>(v);
@@ -313,6 +307,7 @@ void SaveMonitorPrefs(const MonitorPrefs& prefs) {
     put(L"CloseToTray", prefs.closeToTray ? 1 : 0);
     put(L"StartMinimized", prefs.startMinimized ? 1 : 0);
     put(L"LaunchAtLogin", prefs.launchAtLogin ? 1 : 0);
+    put(L"TrayPrompted", prefs.trayPrompted ? 1 : 0);
     put(L"Notify", prefs.notify ? 1 : 0);
     put(L"Paused", prefs.paused ? 1 : 0);
     put(L"ScanHours", static_cast<DWORD>(prefs.scanHours < 1 ? 6 : prefs.scanHours));
@@ -338,6 +333,65 @@ void ApplyLaunchAtLogin(bool enabled) {
     RegSetValueExW(key, L"Synchronus", 0, REG_SZ, reinterpret_cast<const BYTE*>(quoted.c_str()),
                    static_cast<DWORD>((quoted.size() + 1) * sizeof(wchar_t)));
     RegCloseKey(key);
+}
+
+bool SetupComplete() {
+    DWORD v = 0;
+    return ReadDword(HKEY_CURRENT_USER, kMonitor, L"SetupComplete", v) && v != 0;
+}
+
+void MarkSetupComplete() {
+    HKEY key = nullptr;
+    if (RegCreateKeyExW(HKEY_CURRENT_USER, kMonitor, 0, nullptr, 0, KEY_SET_VALUE, nullptr, &key, nullptr) != ERROR_SUCCESS) return;
+    const DWORD one = 1;
+    RegSetValueExW(key, L"SetupComplete", 0, REG_DWORD, reinterpret_cast<const BYTE*>(&one), sizeof(one));
+    RegCloseKey(key);
+}
+
+void SaveStepChoices(const StepChoices& choices) {
+    HKEY key = nullptr;
+    if (RegCreateKeyExW(HKEY_CURRENT_USER, kMonitor, 0, nullptr, 0, KEY_SET_VALUE, nullptr, &key, nullptr) != ERROR_SUCCESS) return;
+    auto put = [&](const wchar_t* name, bool on) {
+        const DWORD v = on ? 1 : 0;
+        const std::wstring full = std::wstring(L"Want_") + name;
+        RegSetValueExW(key, full.c_str(), 0, REG_DWORD, reinterpret_cast<const BYTE*>(&v), sizeof(v));
+    };
+    put(L"prepare", choices.prepare);
+    put(L"measure", choices.measure);
+    put(L"hold", choices.hold);
+    put(L"cpu", choices.cpu);
+    put(L"gpuclean", choices.gpuClean);
+    put(L"gpu", choices.gpu);
+    put(L"afterburner", choices.afterburner);
+    put(L"memory", choices.memory);
+    put(L"storage", choices.storage);
+    RegCloseKey(key);
+}
+
+StepChoices LoadStepChoices() {
+    StepChoices c;
+    auto get = [&](const wchar_t* name, bool& dest) {
+        DWORD v = 1;
+        const std::wstring full = std::wstring(L"Want_") + name;
+        if (ReadDword(HKEY_CURRENT_USER, kMonitor, full.c_str(), v)) dest = v != 0;
+    };
+    get(L"prepare", c.prepare);
+    get(L"measure", c.measure);
+    get(L"hold", c.hold);
+    get(L"cpu", c.cpu);
+    get(L"gpuclean", c.gpuClean);
+    get(L"gpu", c.gpu);
+    get(L"afterburner", c.afterburner);
+    get(L"memory", c.memory);
+    get(L"storage", c.storage);
+    return c;
+}
+
+bool StepChosen(const wchar_t* name) {
+    DWORD v = 1;
+    const std::wstring full = std::wstring(L"Want_") + name;
+    if (ReadDword(HKEY_CURRENT_USER, kMonitor, full.c_str(), v)) return v != 0;
+    return true;
 }
 
 void AppendHealthLog(const std::wstring& line) {
@@ -444,45 +498,6 @@ std::vector<HealthCheck> RunHealth(const std::atomic<bool>* cancelled) {
     }
     if (Stopped(cancelled)) return out;
 
-    auto powerCheck = [&](const wchar_t* id, const wchar_t* name, const GUID& sub, const GUID& setting, DWORD target,
-                          const wchar_t* trackedFlag, const wchar_t* repair) {
-        HealthCheck c = Make(id, L"Power and Performance", name, repair);
-        DWORD value = 0;
-        const bool readable = ReadPower(sub, setting, value);
-        FinishPolicy(c, readable, FlagOn(trackedFlag), readable && value == target, Format(L"%lu", target),
-                     readable ? Format(L"%lu", value) : L"unreadable");
-        push(c);
-    };
-    powerCheck(L"power.perfcheck", L"Performance check interval", kSubProcessor, kPerfCheck, 5000, L"PpmApplied", L"ppm");
-    powerCheck(L"power.parking", L"Core parking minimum", kSubProcessor, kParkMin, 100, L"PpmApplied", L"ppm");
-    powerCheck(L"power.boost", L"Processor boost mode", kSubProcessor, kBoostMode, 0, L"PpmApplied", L"ppm");
-    if (Stopped(cancelled)) return out;
-
-    {
-        HealthCheck c = Make(L"gpu.hags", L"Windows Configuration", L"Hardware-accelerated GPU scheduling", L"gpu");
-        DWORD v = 0;
-        const bool readable = ReadDword(HKEY_LOCAL_MACHINE, kGfx, L"HwSchMode", v);
-        FinishPolicy(c, readable, FlagOn(L"GpuApplied"), readable && v == 2, L"HwSchMode = 2",
-                     readable ? Format(L"HwSchMode = %lu", v) : L"unreadable");
-        if (c.status == HealthStatus::Pass || (readable && v == 2)) {
-            c.explanation += L" HAGS takes effect after a restart.";
-        }
-        push(c);
-    }
-    {
-        HealthCheck c = Make(L"gpu.gamedvr", L"Windows Configuration", L"Game DVR policy", L"gpu");
-        DWORD v = 0;
-        const bool readable = ReadDword(HKEY_LOCAL_MACHINE, L"SOFTWARE\\Policies\\Microsoft\\Windows\\GameDVR", L"AllowGameDVR", v);
-        FinishPolicy(c, readable, FlagOn(L"GpuApplied"), readable && v == 0, L"AllowGameDVR = 0",
-                     readable ? Format(L"AllowGameDVR = %lu", v) : L"policy value is not set");
-        if (!readable && FlagOn(L"GpuApplied")) {
-            c.status = HealthStatus::Attention;
-            c.severity = 1;
-            c.observed = L"AllowGameDVR is absent";
-            c.explanation = L"Synchronus records a GPU pass, but the Game DVR policy value is missing.";
-        }
-        push(c);
-    }
     {
         HealthCheck c = Make(L"gpu.driver", L"Graphics Drivers", L"Installed display driver", L"");
         std::wstring version, desc;
@@ -599,18 +614,8 @@ std::vector<HealthCheck> RunHealth(const std::atomic<bool>* cancelled) {
         push(c);
     }
     if (Stopped(cancelled)) return out;
-
-    auto storage = [&](const wchar_t* id, const wchar_t* name, const GUID& sub, const GUID& setting, DWORD target) {
-        HealthCheck c = Make(id, L"Storage", name, L"storage");
-        DWORD value = 0;
-        const bool readable = ReadPower(sub, setting, value);
-        FinishPolicy(c, readable, FlagOn(L"StorageApplied"), readable && value == target, Format(L"%lu", target),
-                     readable ? Format(L"%lu", value) : L"unreadable");
-        push(c);
-    };
-    storage(L"storage.aspm", L"PCIe link-state power management", kSubPci, kAspm, 0);
-    storage(L"storage.diskidle", L"Disk idle timeout", kSubDisk, kDiskIdle, 0);
-    storage(L"storage.usb", L"USB selective suspend", kSubUsb, kUsbSuspend, 0);
+    AppendTuneChecks(out, cancelled);
+    if (Stopped(cancelled)) return out;
 
     {
         HealthCheck c = Make(L"storage.sysmain", L"Storage", L"SysMain service", L"storage");

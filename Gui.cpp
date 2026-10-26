@@ -75,9 +75,14 @@ using gui::HealthStatus;
 using gui::HealthStatusText;
 using gui::HealthSummary;
 using gui::LoadMonitorPrefs;
+using gui::LoadStepChoices;
+using gui::MarkSetupComplete;
 using gui::MonitorPrefs;
 using gui::RunHealth;
 using gui::SaveMonitorPrefs;
+using gui::SaveStepChoices;
+using gui::SetupComplete;
+using gui::StepChoices;
 using gui::Summarize;
 
 using Microsoft::WRL::ComPtr;
@@ -1342,7 +1347,8 @@ enum class Stage {
     MemoryPrompt, MemoryApplying, MemoryDone, MemoryFailed,
     StoragePrompt, StorageApplying, StorageDone, StorageFailed,
     Review,
-    Monitor
+    Monitor,
+    Home
 };
 
 constexpr int kStepCount = 10;
@@ -1402,6 +1408,8 @@ StepMeta Meta(Stage s) {
             return {10, L"Review", L"BIOS, then restart"};
         case Stage::Monitor:
             return {0, L"Health", L"live settings"};
+        case Stage::Home:
+            return {0, L"Home", L"functions and live tweaks"};
         default:
             return {10, L"Review", L"BIOS, then restart"};
     }
@@ -1498,7 +1506,7 @@ public:
         const int x = work.left + std::max(0L, (work.right - work.left - ww) / 2);
         const int y = work.top + std::max(0L, (work.bottom - work.top - wh) / 2);
         hwnd_ = CreateWindowExW(0, wc.lpszClassName,
-                                L"Synchronus  \u00B7  Lucius And Wayne Systems LLC",
+                                L"Synchronus  |  Lucius And Wayne Systems LLC",
                                 WS_OVERLAPPEDWINDOW, x, y, ww, wh, nullptr, nullptr, hinst, this);
         if (!hwnd_) return 1;
 
@@ -1538,9 +1546,24 @@ public:
             StartInstall();
         } else if (host_.autoInstall) {
             StartBenchmark();
-        } else {
+        } else if (!SetupComplete()) {
             stage_ = Stage::Welcome;
             state_.Phase(L"WELCOME", L"thank you for using Synchronus");
+            if (!prefs_.trayPrompted) {
+                const int answer = MessageBoxW(
+                    hwnd_,
+                    L"Keep Synchronus in the system tray and start it with Windows?\n\n"
+                    L"It watches whether your tweaks are still live and can notify you when one has changed.",
+                    L"Synchronus", MB_YESNO | MB_ICONQUESTION | MB_DEFBUTTON1);
+                prefs_.launchAtLogin = answer == IDYES;
+                prefs_.closeToTray = answer == IDYES;
+                prefs_.trayPrompted = true;
+                SaveMonitorPrefs(prefs_);
+            }
+        } else {
+            ApplySavedChoices();
+            stage_ = Stage::Home;
+            state_.Phase(L"HOME", L"choose a function");
         }
         StartUpdateCheck();
 
@@ -1653,6 +1676,10 @@ private:
                 return 0;
             case WM_TIMER:
                 if (wp == 7) OnScanTimer();
+                if (wp == 8 && updatePulse_) {
+                    pulseDim_ = !pulseDim_;
+                    UpdateTray();
+                }
                 return 0;
             case WM_MOUSEWHEEL:
                 if (stage_.load() == Stage::Monitor) {
@@ -1769,7 +1796,24 @@ private:
             if (ready) offer = updateOffer_;
         }
         if (!ready) return;
-        updatePrompted_ = true;
+        if (showUpdatePrompt_ && newer) {
+            showUpdatePrompt_ = false;
+            updatePrompted_ = true;
+        } else {
+            updatePrompted_ = true;
+            if (!newer) return;
+            updatePulse_ = true;
+            SetTimer(hwnd_, 8, 450, nullptr);
+            if (trayOn_) {
+                nid_.uFlags = NIF_INFO | NIF_ICON | NIF_TIP | NIF_MESSAGE;
+                wcsncpy_s(nid_.szInfoTitle, L"Synchronus update", _TRUNCATE);
+                const std::wstring body = L"Version " + offer.version + L" is ready. Open Synchronus to install it.";
+                wcsncpy_s(nid_.szInfo, body.c_str(), _TRUNCATE);
+                nid_.dwInfoFlags = NIIF_INFO;
+                Shell_NotifyIconW(NIM_MODIFY, &nid_);
+            }
+            return;
+        }
         if (!newer) return;
 
         std::wstring notes = offer.notes;
@@ -1901,6 +1945,11 @@ private:
     }
 
     void StartAtOrAfter(int index) {
+        if (hubReturn_) {
+            hubReturn_ = false;
+            OpenHome();
+            return;
+        }
         for (int i = index; i < kWantCount; ++i) {
             if (!want_[i]) continue;
             if (host_.autoInstall && i == kWantGpuClean) continue;
@@ -1939,9 +1988,9 @@ private:
                         }
                         stage_ = Stage::PpmPrompt;
                         state_.Phase(L"CPU TUNE", p.mode == CpuProbeView::Mode::Locked
-                                                     ? L"static frequency detected — PPM checks are just noise"
+                                                     ? L"static frequency detected. PPM checks are just noise"
                                                      : p.mode == CpuProbeView::Mode::Dynamic
-                                                           ? L"dynamic boost detected — 5000 ms interval would delay turbo"
+                                                           ? L"dynamic boost detected. A 5000 ms interval would delay turbo"
                                                            : L"could not classify the multiplier");
                     }
                     return;
@@ -2003,7 +2052,53 @@ private:
     void MaybeStartMemory() { StartAtOrAfter(kWantMemory); }
     void MaybeStartStorage() { StartAtOrAfter(kWantStorage); }
 
-    void BeginWorkflow() { StartAtOrAfter(kWantPrepare); }
+    void BeginWorkflow() {
+        StepChoices choices;
+        choices.prepare = Want(kWantPrepare);
+        choices.measure = Want(kWantMeasure);
+        choices.hold = Want(kWantHold);
+        choices.cpu = Want(kWantCpu);
+        choices.gpuClean = Want(kWantGpuClean);
+        choices.gpu = Want(kWantGpu);
+        choices.afterburner = Want(kWantAfterburner);
+        choices.memory = Want(kWantMemory);
+        choices.storage = Want(kWantStorage);
+        SaveStepChoices(choices);
+        MarkSetupComplete();
+        hubReturn_ = false;
+        StartAtOrAfter(kWantPrepare);
+    }
+
+    void ApplySavedChoices() {
+        const StepChoices choices = LoadStepChoices();
+        want_[kWantPrepare] = choices.prepare;
+        want_[kWantMeasure] = choices.measure;
+        want_[kWantHold] = choices.hold;
+        want_[kWantCpu] = choices.cpu;
+        want_[kWantGpuClean] = choices.gpuClean;
+        want_[kWantGpu] = choices.gpu;
+        want_[kWantAfterburner] = choices.afterburner;
+        want_[kWantMemory] = choices.memory;
+        want_[kWantStorage] = choices.storage;
+    }
+
+    void OpenHome() {
+        ApplySavedChoices();
+        stage_ = Stage::Home;
+        state_.Phase(L"HOME", L"choose a function");
+        if (checks_.empty() && !healthBusy_.load()) StartHealthScan();
+    }
+
+    void ShowMain() {
+        ShowWindow(hwnd_, SW_SHOW);
+        SetForegroundWindow(hwnd_);
+        if (SetupComplete()) OpenHome();
+    }
+
+    void OpenStep(Stage next) {
+        hubReturn_ = true;
+        stage_ = next;
+    }
 
     void StartPpm() {
         JoinWorker();
@@ -2138,6 +2233,10 @@ private:
         DrawBackground(w, h);
         if (stage == Stage::Welcome) {
             DrawWelcome(D2D1::RectF(pad, pad, w - pad, footer.top - 10), dt);
+        } else if (stage == Stage::Home || stage == Stage::Monitor) {
+            DrawHeader(header, bar, stage);
+            if (stage == Stage::Home) DrawHome(body, dt);
+            else DrawMonitor(body, dt);
         } else {
             DrawHeader(header, bar, stage);
             const float gap = 12;
@@ -2201,11 +2300,12 @@ private:
         grad->SetOpacity(1);
         rd_.TextBrush(L"SYNCHRONUS", D2D1::RectF(textLeft, r.top, textLeft + 560, r.top + 32), rd_.fTitle.Get(),
                       grad);
-        rd_.Text(L"Lucius And Wayne Systems LLC  \u00B7  luciuswayne.com",
+        rd_.Text(L"Lucius And Wayne Systems LLC  |  luciuswayne.com",
                  D2D1::RectF(textLeft, r.top + 32, textLeft + 560, r.top + 50), rd_.fSmall.Get(), col::cyan);
         const StepMeta meta = Meta(stage);
-        rd_.Text(meta.number ? Fmt(L"%s  \u2014  %s  \u00B7  v%s", meta.name, meta.title, host_.version.c_str())
-                             : Fmt(L"latency tuner  \u00B7  v%s", host_.version.c_str()),
+        rd_.Text((meta.number || stage == Stage::Home || stage == Stage::Monitor)
+                     ? Fmt(L"%s - %s | v%s", meta.name, meta.title, host_.version.c_str())
+                     : Fmt(L"Synchronus | v%s", host_.version.c_str()),
                  D2D1::RectF(textLeft, r.top + 50, textLeft + 560, r.top + 68), rd_.fSub.Get(), col::muted);
 
         // phase, right aligned
@@ -2232,14 +2332,14 @@ private:
             phaseColor = col::violet;
         const float pulse = 0.75f + 0.25f * std::sin(time_ * 3.0f);
         const D2D1_RECT_F pr = D2D1::RectF(r.left + 520, r.top + 2, r.right, r.top + 26);
-        rd_.Text(meta.number ? Fmt(L"STEP %d OF %d  \u00B7  %s", meta.number, kStepCount, Upper(phase).c_str())
+        rd_.Text(meta.number ? Fmt(L"STEP %d OF %d  |  %s", meta.number, kStepCount, Upper(phase).c_str())
                              : Upper(phase),
                  pr, rd_.fPhase.Get(), Alpha(phaseColor, stage == Stage::Running ? pulse : 1.0f),
                  DWRITE_TEXT_ALIGNMENT_TRAILING);
         std::wstring detail = snap_.detail;
         if (stage == Stage::Running && snap_.elapsed > 0) {
             detail += Fmt(L"   elapsed %s", Duration(snap_.elapsed).c_str());
-            if (snap_.remaining > 0) detail += Fmt(L"  \u00B7  remaining ~%s", Duration(snap_.remaining).c_str());
+            if (snap_.remaining > 0) detail += Fmt(L"  |  remaining ~%s", Duration(snap_.remaining).c_str());
         }
         rd_.Text(detail, D2D1::RectF(r.left + 520, r.top + 28, r.right, r.top + 48), rd_.fSmall.Get(), col::muted,
                  DWRITE_TEXT_ALIGNMENT_TRAILING);
@@ -2645,9 +2745,9 @@ private:
         const int passes = snap_.sweep.passes;
         const bool verify = !snap_.finalists.empty();
         Panel(R, L"Lattice",
-              verify ? Fmt(L"verification  \u00B7  128\u00B3  \u00B7  n = %u  \u00B7  missed %u", snap_.histTotal,
+              verify ? Fmt(L"verification  |  128\u00B3  |  n = %u  |  missed %u", snap_.histTotal,
                            snap_.histLate)
-                     : pass ? Fmt(L"pass %d of %d  \u00B7  late %% \u00D7 latency \u00D7 n  \u00B7  n = %u",
+                     : pass ? Fmt(L"pass %d of %d  |  late %% \u00D7 latency \u00D7 n  |  n = %u",
                                   pass, std::max(1, passes), snap_.histTotal)
                             : L"late %  \u00D7  measured latency  \u00D7  sample n");
         const D2D1_RECT_F P = Inset(R, 8, 36, 8, 8);
@@ -2695,7 +2795,7 @@ private:
         const unsigned req = c ? c->requested : (snap_.activeIdx >= 0 && static_cast<size_t>(snap_.activeIdx) < items.size()
                                                      ? items[static_cast<size_t>(snap_.activeIdx)].requested
                                                      : 0);
-        Panel(R, L"Candidate", req ? Fmt(L"%.4f ms  \u00B7  %s", Ms(req), who.c_str()) : L"statistics of the candidate being measured");
+        Panel(R, L"Candidate", req ? Fmt(L"%.4f ms  |  %s", Ms(req), who.c_str()) : L"statistics of the candidate being measured");
 
         const float targets[7] = {
             c ? static_cast<float>(c->loop.median) : 0, c ? static_cast<float>(c->loop.mean) : 0,
@@ -2714,7 +2814,7 @@ private:
             const int cx = i % 3, cy = i / 3;
             const D2D1_RECT_F t = D2D1::RectF(P.left + cx * (tw + 8), P.top + cy * (th + 8), P.left + cx * (tw + 8) + tw,
                                               P.top + cy * (th + 8) + th);
-            std::wstring value = L"\u2014";
+            std::wstring value = L"-";
             if (c) {
                 if (i == 3 || i == 5) value = Fmt(L"%.1f%%", statV_[i]);
                 else if (i == 2) value = Fmt(L"%.4f", statV_[i]);
@@ -2737,7 +2837,7 @@ private:
             const float ea = a0 + (a1 - a0) * frac;
             rd_.GlowDot(D2D1::Point2F(gc.x + gr * std::cos(ea), gc.y + gr * std::sin(ea)), 4, gcol, 1);
         }
-        rd_.Text(c ? Fmt(L"%.3f", statV_[6]) : L"\u2014", D2D1::RectF(G.left, gc.y - 22, G.right, gc.y + 6),
+        rd_.Text(c ? Fmt(L"%.3f", statV_[6]) : L"-", D2D1::RectF(G.left, gc.y - 22, G.right, gc.y + 6),
                  rd_.fMonoBig.Get(), col::text, DWRITE_TEXT_ALIGNMENT_CENTER, DWRITE_PARAGRAPH_ALIGNMENT_CENTER);
         rd_.Text(L"SCORE", D2D1::RectF(G.left, gc.y + 8, G.right, gc.y + 24), rd_.fLabel.Get(), col::muted,
                  DWRITE_TEXT_ALIGNMENT_CENTER, DWRITE_PARAGRAPH_ALIGNMENT_CENTER);
@@ -2825,16 +2925,121 @@ private:
         DrawResultBanner(B, dt, stage);
     }
 
+    int TraySlotPx() const {
+        UINT dpi = 96;
+        const HMODULE shcore = LoadLibraryW(L"Shcore.dll");
+        if (shcore) {
+            using GetDpi = HRESULT(WINAPI*)(HMONITOR, int, UINT*, UINT*);
+            const auto fn = reinterpret_cast<GetDpi>(GetProcAddress(shcore, "GetDpiForMonitor"));
+            if (fn) {
+                UINT x = 96, y = 96;
+                const HMONITOR mon = MonitorFromWindow(hwnd_ ? hwnd_ : GetDesktopWindow(), MONITOR_DEFAULTTONEAREST);
+                if (SUCCEEDED(fn(mon, 0, &x, &y)) && x >= 96) dpi = x;
+            }
+            FreeLibrary(shcore);
+        }
+        int px = GetSystemMetricsForDpi(SM_CXSMICON, dpi);
+        // The mark has a margin, and a 16px tray image lands smaller than the other icons.
+        // A filled 32px image is what the shell scales into the slot.
+        if (px < 32) px = 32;
+        if (px > 64) px = 64;
+        return px;
+    }
+
+    HICON MakeTrayIcon(bool dim) {
+        const int slot = TraySlotPx();
+        constexpr int kSrc = 128;
+        BITMAPINFO bi{};
+        bi.bmiHeader.biSize = sizeof(bi.bmiHeader);
+        bi.bmiHeader.biWidth = kSrc;
+        bi.bmiHeader.biHeight = -kSrc;
+        bi.bmiHeader.biPlanes = 1;
+        bi.bmiHeader.biBitCount = 32;
+        bi.bmiHeader.biCompression = BI_RGB;
+        void* srcBits = nullptr;
+        HDC screen = GetDC(nullptr);
+        HBITMAP srcBmp = CreateDIBSection(screen, &bi, DIB_RGB_COLORS, &srcBits, nullptr, 0);
+        HDC srcDc = CreateCompatibleDC(screen);
+        SelectObject(srcDc, srcBmp);
+        HICON raw = reinterpret_cast<HICON>(LoadImageW(GetModuleHandleW(nullptr), MAKEINTRESOURCEW(101), IMAGE_ICON, kSrc, kSrc, LR_DEFAULTCOLOR));
+        if (raw) DrawIconEx(srcDc, 0, 0, raw, kSrc, kSrc, 0, nullptr, DI_NORMAL);
+        const auto* px = static_cast<const BYTE*>(srcBits);
+        int minX = kSrc, minY = kSrc, maxX = 0, maxY = 0;
+        if (px) {
+            for (int y = 0; y < kSrc; ++y) {
+                for (int x = 0; x < kSrc; ++x) {
+                    if (px[(y * kSrc + x) * 4 + 3] > 20) {
+                        if (x < minX) minX = x;
+                        if (y < minY) minY = y;
+                        if (x > maxX) maxX = x;
+                        if (y > maxY) maxY = y;
+                    }
+                }
+            }
+        }
+        if (maxX < minX) {
+            minX = 0;
+            minY = 0;
+            maxX = kSrc - 1;
+            maxY = kSrc - 1;
+        }
+        const int bw = maxX - minX + 1;
+        const int bh = maxY - minY + 1;
+        BITMAPINFO outInfo = bi;
+        outInfo.bmiHeader.biWidth = slot;
+        outInfo.bmiHeader.biHeight = -slot;
+        void* outBits = nullptr;
+        HBITMAP color = CreateDIBSection(screen, &outInfo, DIB_RGB_COLORS, &outBits, nullptr, 0);
+        auto* dst = static_cast<BYTE*>(outBits);
+        if (px && dst) {
+            for (int y = 0; y < slot; ++y) {
+                const int sy = minY + (bh <= 1 ? 0 : y * (bh - 1) / std::max(1, slot - 1));
+                for (int x = 0; x < slot; ++x) {
+                    const int sx = minX + (bw <= 1 ? 0 : x * (bw - 1) / std::max(1, slot - 1));
+                    const BYTE* s = px + (sy * kSrc + sx) * 4;
+                    BYTE* d = dst + (y * slot + x) * 4;
+                    BYTE a = s[3];
+                    BYTE b = s[0], g = s[1], r = s[2];
+                    if (dim) {
+                        a = static_cast<BYTE>(a / 3);
+                        b = static_cast<BYTE>(b / 3);
+                        g = static_cast<BYTE>(g / 3);
+                        r = static_cast<BYTE>(r / 3);
+                    }
+                    d[0] = b;
+                    d[1] = g;
+                    d[2] = r;
+                    d[3] = a;
+                }
+            }
+        }
+        HBITMAP mask = CreateBitmap(slot, slot, 1, 1, nullptr);
+        ICONINFO ii{};
+        ii.fIcon = TRUE;
+        ii.hbmColor = color;
+        ii.hbmMask = mask;
+        HICON icon = CreateIconIndirect(&ii);
+        if (raw) DestroyIcon(raw);
+        DeleteObject(mask);
+        DeleteObject(color);
+        DeleteObject(srcBmp);
+        DeleteDC(srcDc);
+        ReleaseDC(nullptr, screen);
+        return icon;
+    }
+
     void AddTray() {
         nid_.cbSize = sizeof(nid_);
         nid_.hWnd = hwnd_;
         nid_.uID = 1;
         nid_.uFlags = NIF_MESSAGE | NIF_ICON | NIF_TIP;
         nid_.uCallbackMessage = WM_APP + 42;
-        nid_.hIcon = LoadIconW(GetModuleHandleW(nullptr), MAKEINTRESOURCEW(101));
-        if (!nid_.hIcon) nid_.hIcon = LoadIconW(nullptr, IDI_APPLICATION);
+        trayIcon_ = MakeTrayIcon(false);
+        nid_.hIcon = trayIcon_ ? trayIcon_ : LoadIconW(GetModuleHandleW(nullptr), MAKEINTRESOURCEW(101));
         wcscpy_s(nid_.szTip, L"Synchronus");
         Shell_NotifyIconW(NIM_ADD, &nid_);
+        nid_.uVersion = NOTIFYICON_VERSION;
+        Shell_NotifyIconW(NIM_SETVERSION, &nid_);
         trayOn_ = true;
     }
 
@@ -2842,6 +3047,10 @@ private:
         if (!trayOn_) return;
         Shell_NotifyIconW(NIM_DELETE, &nid_);
         trayOn_ = false;
+        if (trayIcon_) {
+            DestroyIcon(trayIcon_);
+            trayIcon_ = nullptr;
+        }
     }
 
     void UpdateTray() {
@@ -2852,26 +3061,33 @@ private:
             sum = Summarize(checks_);
         }
         const bool bad = sum.attention > 0;
-        nid_.hIcon = LoadIconW(nullptr, bad ? IDI_WARNING : IDI_APPLICATION);
-        HICON app = LoadIconW(GetModuleHandleW(nullptr), MAKEINTRESOURCEW(101));
-        if (!bad && app) nid_.hIcon = app;
-        nid_.uFlags = NIF_ICON | NIF_TIP;
-        const std::wstring tip = bad ? (L"Synchronus — " + sum.headline) : L"Synchronus — nothing needs attention";
+        HICON next = MakeTrayIcon(updatePulse_ && pulseDim_);
+        if (next) {
+            if (trayIcon_) DestroyIcon(trayIcon_);
+            trayIcon_ = next;
+            nid_.hIcon = trayIcon_;
+        } else if (bad) {
+            nid_.hIcon = LoadIconW(nullptr, IDI_WARNING);
+        }
+        nid_.uFlags = NIF_ICON | NIF_TIP | NIF_MESSAGE;
+        std::wstring tip = L"Synchronus";
+        if (updatePulse_) tip += L": update available";
+        else if (bad) tip += L": " + sum.headline;
+        else if (sum.pass + sum.attention + sum.info + sum.other > 0) tip += L": nothing needs attention";
         wcsncpy_s(nid_.szTip, tip.c_str(), _TRUNCATE);
         Shell_NotifyIconW(NIM_MODIFY, &nid_);
     }
 
     void OnTray(LPARAM lp) {
         if (lp == WM_LBUTTONDBLCLK || lp == WM_LBUTTONUP) {
-            ShowWindow(hwnd_, SW_SHOW);
-            SetForegroundWindow(hwnd_);
-            if (stage_.load() == Stage::Welcome) OpenHealth();
+            ShowMain();
             return;
         }
         if (lp == NIN_BALLOONUSERCLICK) {
             ShowWindow(hwnd_, SW_SHOW);
             SetForegroundWindow(hwnd_);
-            OpenHealth();
+            if (updatePulse_) showUpdatePrompt_ = true;
+            else OpenHome();
             return;
         }
         if (lp != WM_RBUTTONUP) return;
@@ -2890,18 +3106,17 @@ private:
         const int cmd = TrackPopupMenu(menu, TPM_RETURNCMD | TPM_RIGHTBUTTON, pt.x, pt.y, 0, hwnd_, nullptr);
         DestroyMenu(menu);
         if (cmd == 4100) {
-            ShowWindow(hwnd_, SW_SHOW);
-            SetForegroundWindow(hwnd_);
+            ShowMain();
         } else if (cmd == 4101) {
             ShowWindow(hwnd_, SW_SHOW);
+            SetForegroundWindow(hwnd_);
             OpenHealth();
             StartHealthScan();
         } else if (cmd == 4102) {
             prefs_.paused = !prefs_.paused;
             SaveMonitorPrefs(prefs_);
         } else if (cmd == 4103) {
-            ShowWindow(hwnd_, SW_SHOW);
-            OpenHealth();
+            ShowMain();
         } else if (cmd == 4105) {
             prefs_.launchAtLogin = !prefs_.launchAtLogin;
             SaveMonitorPrefs(prefs_);
@@ -2967,7 +3182,7 @@ private:
             std::lock_guard<std::mutex> g(healthM_);
             for (const auto& c : checks_) {
                 if (!HealthNeedsAttention(c.status)) continue;
-                text = c.name + L" — " + c.observed;
+                text = c.name + L": " + c.observed;
                 break;
             }
         }
@@ -3066,7 +3281,7 @@ private:
             else if (c.status == HealthStatus::Error || c.status == HealthStatus::Inaccessible) mark = col::red;
             rd_.FillRound(D2D1::RectF(row.left + 6, y + 12, row.left + 16, y + 22), 5, mark);
             rd_.Text(c.name, D2D1::RectF(row.left + 22, y + 2, row.right - 8, y + 18), rd_.fSmall.Get(), col::text);
-            rd_.Text(HealthStatusText(c.status) + std::wstring(L"  ·  ") + c.observed,
+            rd_.Text(std::wstring(HealthStatusText(c.status)) + L" | " + c.observed,
                      D2D1::RectF(row.left + 22, y + 16, row.right - 8, y + 32), rd_.fMonoSmall.Get(), col::muted);
         }
         if (healthSelected_ >= 0 && healthSelected_ < static_cast<int>(rows.size())) {
@@ -3137,6 +3352,82 @@ private:
         return acted;
     }
 
+    void DrawHome(const D2D1_RECT_F& B, float dt) {
+        rd_.Text(L"Synchronus", D2D1::RectF(B.left, B.top, B.left + W(B) * 0.42f, B.top + 36), rd_.fTitle.Get(), col::text);
+        rd_.Text(L"Choose a function. The list shows whether each tweak is live.",
+                 D2D1::RectF(B.left, B.top + 40, B.left + W(B) * 0.42f, B.top + 80), rd_.fSmall.Get(), col::muted);
+        const wchar_t* labels[] = {L"Full tune", L"Health", L"Measure timing", L"CPU power", L"GPU driver",
+                                   L"GPU settings", L"Afterburner", L"Memory", L"Storage", L"Restart notes"};
+        const float colW = (W(B) * 0.42f - 12) / 2;
+        const float btnH = 36;
+        for (int i = 0; i < 10; ++i) {
+            const float x = B.left + (i % 2) * (colW + 8);
+            const float y = B.top + 88 + (i / 2) * (btnH + 6);
+            if (!Button(200 + i, D2D1::RectF(x, y, x + colW, y + btnH), labels[i], col::cyan, i == 0, true, dt)) continue;
+            if (i == 0) {
+                stage_ = Stage::Welcome;
+            } else if (i == 1) {
+                OpenHealth();
+            } else if (i == 2) {
+                hubReturn_ = true;
+                StartBenchmark();
+            } else if (i == 3) {
+                OpenStep(Stage::PpmPrompt);
+            } else if (i == 4) {
+                hubReturn_ = true;
+                stage_ = Stage::GpuClean;
+                state_.Phase(L"GPU CLEAN", L"looking up the current driver");
+                BeginGpuLookup();
+            } else if (i == 5) {
+                OpenStep(Stage::GpuPrompt);
+            } else if (i == 6) {
+                OpenStep(Stage::AfterburnerPrompt);
+            } else if (i == 7) {
+                OpenStep(Stage::MemoryPrompt);
+            } else if (i == 8) {
+                OpenStep(Stage::StoragePrompt);
+            } else {
+                hubReturn_ = true;
+                stage_ = Stage::Review;
+                state_.Phase(L"REVIEW", L"set BIOS, then restart");
+            }
+        }
+        if (updatePulse_ && Button(220, D2D1::RectF(B.left, B.bottom - 40, B.left + W(B) * 0.42f, B.bottom - 6),
+                                   L"Install update", col::green, true, true, dt)) {
+            showUpdatePrompt_ = true;
+        }
+        std::vector<HealthCheck> rows;
+        HealthSummary sum;
+        {
+            std::lock_guard<std::mutex> g(healthM_);
+            rows = checks_;
+            sum = Summarize(checks_);
+        }
+        const float rx = B.left + W(B) * 0.46f;
+        rd_.Text(healthBusy_.load() ? L"Checking live settings" : sum.headline,
+                 D2D1::RectF(rx, B.top, B.right, B.top + 28), rd_.fPhase.Get(), col::cyan);
+        rd_.Text(Fmt(L"%d live    %d need attention    %d other", sum.pass, sum.attention, sum.info + sum.other),
+                 D2D1::RectF(rx, B.top + 30, B.right, B.top + 48), rd_.fMonoSmall.Get(), col::dim);
+        const float listTop = B.top + 56;
+        const float rowH = 22;
+        const int visible = std::max(1, static_cast<int>((B.bottom - listTop) / rowH));
+        if (healthScroll_ > std::max(0, static_cast<int>(rows.size()) - visible))
+            healthScroll_ = std::max(0, static_cast<int>(rows.size()) - visible);
+        for (int i = 0; i < visible; ++i) {
+            const int idx = healthScroll_ + i;
+            if (idx < 0 || idx >= static_cast<int>(rows.size())) break;
+            const auto& c = rows[static_cast<size_t>(idx)];
+            const float y = listTop + i * rowH;
+            D2D1_COLOR_F mark = col::dim;
+            if (c.status == HealthStatus::Pass) mark = col::green;
+            else if (HealthNeedsAttention(c.status)) mark = col::amber;
+            else if (c.status == HealthStatus::Error || c.status == HealthStatus::Inaccessible) mark = col::red;
+            rd_.FillRound(D2D1::RectF(rx, y + 6, rx + 10, y + 16), 5, mark);
+            rd_.Text(c.name + L"  " + HealthStatusText(c.status), D2D1::RectF(rx + 16, y, B.right, y + rowH),
+                     rd_.fSmall.Get(), col::text, DWRITE_TEXT_ALIGNMENT_LEADING, DWRITE_PARAGRAPH_ALIGNMENT_CENTER);
+        }
+    }
+
     void DrawWelcome(const D2D1_RECT_F& R, float dt) {
         const float cx = (R.left + R.right) / 2;
         const float cardW = std::min(780.0f, W(R) - 40);
@@ -3184,7 +3475,7 @@ private:
                  DWRITE_TEXT_ALIGNMENT_CENTER);
         y += 86;
 
-        rd_.Text(L"Select the steps to run  \u2014  everything is on by default",
+        rd_.Text(L"Select the steps to run  -  everything is on by default",
                  D2D1::RectF(card.left + 36, y, card.right - 220, y + 22), rd_.fSmall.Get(), col::muted,
                  DWRITE_TEXT_ALIGNMENT_LEADING, DWRITE_PARAGRAPH_ALIGNMENT_CENTER);
         const D2D1_RECT_F allR = D2D1::RectF(card.right - 210, y, card.right - 128, y + 22);
@@ -3198,16 +3489,16 @@ private:
         y += 28;
 
         static const wchar_t* kLabels[kWantCount + 1] = {
-            L"Prepare \u2014 restore point",
-            L"Measure \u2014 Sleep(1) sweep",
-            L"Hold \u2014 boot service",
-            L"CPU Tune \u2014 Ultimate + PPM",
-            L"GPU Clean \u2014 latest driver, no extras",
-            L"GPU Config \u2014 power & latency",
-            L"Afterburner \u2014 download and scan, ~30 min",
-            L"Memory \u2014 pagefile, compression",
-            L"Storage \u2014 ASPM, TRIM, USB",
-            L"Review \u2014 BIOS, then restart",
+            L"Prepare - restore point",
+            L"Measure - Sleep(1) sweep",
+            L"Hold - boot service",
+            L"CPU Tune - Ultimate + PPM",
+            L"GPU Clean - latest driver, no extras",
+            L"GPU Config - power & latency",
+            L"Afterburner - download and scan, ~30 min",
+            L"Memory - pagefile, compression",
+            L"Storage - ASPM, TRIM, USB",
+            L"Review - BIOS, then restart",
         };
         const float colW = (W(card) - 88) / 2;
         const int rows = 5;
@@ -3301,7 +3592,7 @@ private:
                          D2D1::RectF(B.left + 8, B.top + 36, B.right - 8, B.bottom - (snap_.hasBaseline ? 64 : 44)),
                          rd_.fBody.Get(), col::muted);
                 if (snap_.hasBaseline) {
-                    rd_.Text(Fmt(L"untuned Sleep(1) overshoots by %+.2f ms  \u2014  default ~15.6 ms clock",
+                    rd_.Text(Fmt(L"untuned Sleep(1) overshoots by %+.2f ms  -  default ~15.6 ms clock",
                                  snap_.baseline.median),
                              D2D1::RectF(B.left + 8, B.bottom - 62, B.right - 8, B.bottom - 44), rd_.fMonoSmall.Get(),
                              col::dim);
@@ -3339,7 +3630,7 @@ private:
                         rd_.Text(L"Install a boot service that holds this period at every startup.",
                                  D2D1::RectF(B.left, B.top + 108, B.right, B.top + 132), rd_.fSmall.Get(), col::muted,
                                  DWRITE_TEXT_ALIGNMENT_CENTER);
-                        if (Button(2, btnA, L"Continue  \u2014  install service", col::green, true, snap_.system.admin, dt, true,
+                        if (Button(2, btnA, L"Continue  -  install service", col::green, true, snap_.system.admin, dt, true,
                                    true)) {
                             StartInstall();
                         }
@@ -3395,7 +3686,7 @@ private:
                 DrawPackPrompt(B, dt, L"Create a restore point first",
                                L"Writes a System Restore checkpoint named 'Synchronus pre-tune'. Use it to roll "
                                L"back if a later change is unstable. This can take a minute.",
-                               L"Continue  \u2014  create restore point", col::cyan,
+                               L"Continue  -  create restore point", col::cyan,
                                [this] { StartPrepare(); },
                                [this] { StartAtOrAfter(kWantMeasure); });
                 break;
@@ -3416,7 +3707,7 @@ private:
                 DrawTweakProgress(B, dt, stage == Stage::PpmDone, false);
                 break;
             case Stage::PpmFailed:
-                rd_.Text(L"PPM apply failed \u2014 see the log. Timer resolution is still installed.",
+                rd_.Text(L"PPM apply failed - see the log. Timer resolution is still installed.",
                          D2D1::RectF(B.left, B.top + 16, B.right, B.top + 40), rd_.fSub.Get(), col::red,
                          DWRITE_TEXT_ALIGNMENT_CENTER);
                 rd_.Text(L"Timer resolution is still held. Retry the power-plan writes, or skip to the next step.",
@@ -3436,7 +3727,7 @@ private:
                 DrawTweakProgress(B, dt, stage == Stage::GpuDone, true);
                 break;
             case Stage::GpuFailed:
-                rd_.Text(L"GPU apply failed \u2014 see the log. Timer resolution is still installed.",
+                rd_.Text(L"GPU apply failed - see the log. Timer resolution is still installed.",
                          D2D1::RectF(B.left, B.top + 16, B.right, B.top + 40), rd_.fSub.Get(), col::red,
                          DWRITE_TEXT_ALIGNMENT_CENTER);
                 rd_.Text(L"Timer resolution is still held. Retry the GPU writes, or skip to the next step.",
@@ -3450,7 +3741,7 @@ private:
                                L"The Afterburner download and the OC scan take about 30 minutes. MSI Afterburner 4.6.6 and "
                                L"RivaTuner are installed if they are missing. On an NVIDIA GPU the scanner starts on its own. "
                                L"The curve it finds is saved as profile 1 and applied every time you log on. This step does not change the GPU driver.",
-                               L"Continue  \u2014  install and scan", col::green,
+                               L"Continue  -  install and scan", col::green,
                                [this] { StartAfterburner(); },
                                [this] { MaybeStartMemory(); });
                 break;
@@ -3459,7 +3750,7 @@ private:
                 DrawTweakProgress(B, dt, stage == Stage::AfterburnerDone, false);
                 break;
             case Stage::AfterburnerFailed:
-                DrawPackFail(B, dt, L"Afterburner failed \u2014 see the log. The GPU driver settings are unchanged.",
+                DrawPackFail(B, dt, L"Afterburner failed - see the log. The GPU driver settings are unchanged.",
                              [this] { StartAfterburner(); },
                              [this] { MaybeStartMemory(); });
                 break;
@@ -3467,7 +3758,7 @@ private:
                 DrawPackPrompt(B, dt, L"Pagefile and memory compression",
                                L"Keeps a system-managed pagefile so commit never hits a zero-pagefile cliff, and "
                                L"turns off memory compression so standby pages are not compressed on a CPU thread.",
-                               L"Continue  \u2014  apply memory tweaks", col::violet,
+                               L"Continue  -  apply memory tweaks", col::violet,
                                [this] { StartMemory(); },
                                [this] { MaybeStartStorage(); });
                 break;
@@ -3476,7 +3767,7 @@ private:
                 DrawTweakProgress(B, dt, stage == Stage::MemoryDone, false);
                 break;
             case Stage::MemoryFailed:
-                DrawPackFail(B, dt, L"Memory tweaks failed \u2014 see the log. Earlier writes are still in place.",
+                DrawPackFail(B, dt, L"Memory tweaks failed - see the log. Earlier writes are still in place.",
                              [this] { StartMemory(); },
                              [this] { MaybeStartStorage(); });
                 break;
@@ -3485,7 +3776,7 @@ private:
                                L"PCIe ASPM off, disks never spun down, USB selective suspend off, TRIM on, "
                                L"SysMain/Superfetch disabled, hibernate off, write cache on, NTFS last-access "
                                L"timestamps off. Windows Search is left running so Start-menu search still works.",
-                               L"Continue  \u2014  apply storage tweaks", col::amber,
+                               L"Continue  -  apply storage tweaks", col::amber,
                                [this] { StartStorage(); },
                                [this] { stage_ = Stage::Review; });
                 break;
@@ -3494,7 +3785,7 @@ private:
                 DrawTweakProgress(B, dt, stage == Stage::StorageDone, true);
                 break;
             case Stage::StorageFailed:
-                DrawPackFail(B, dt, L"Storage tweaks failed \u2014 see the log. Retry, or skip to Review.",
+                DrawPackFail(B, dt, L"Storage tweaks failed - see the log. Retry, or skip to Review.",
                              [this] { StartStorage(); },
                              [this] { stage_ = Stage::Review; });
                 break;
@@ -3780,7 +4071,7 @@ private:
             if (Button(7, btnB, L"Skip this step", col::muted, false, true, dt)) SkipGpuClean();
         } else if (phase == GpuDl::Offer) {
             std::wstring go = offer.vendor == 2 ? L"Download AMD driver" : L"Download NVIDIA driver";
-            if (offer.bytes) go = L"Download  \u00B7  " + sizeText(offer.bytes);
+            if (offer.bytes) go = L"Download  |  " + sizeText(offer.bytes);
             if (offer.canDownload) {
                 if (Button(6, btnA, go, col::cyan, true, true, dt, true, true)) BeginGpuDownload();
             } else if (Button(6, btnA, L"Check again", col::cyan, true, true, dt, true, true)) {
@@ -3793,7 +4084,7 @@ private:
             if (Button(6, btnA, L"Install trimmed driver", col::green, true, true, dt, true, true)) BeginGpuInstall();
             if (Button(7, btnB, L"Skip this step", col::muted, false, true, dt)) SkipGpuClean();
         } else if (phase == GpuDl::Done) {
-            if (Button(6, btnA, L"Continue  \u2014  configure GPU", col::green, true, true, dt, true, true))
+            if (Button(6, btnA, L"Continue  -  configure GPU", col::green, true, true, dt, true, true))
                 StartAtOrAfter(kWantGpu);
         } else if (phase == GpuDl::Failed) {
             if (Button(6, btnA, L"Retry", col::cyan, true, true, dt, true, true)) {
@@ -3837,7 +4128,7 @@ private:
                      p.idleMhz, p.busyMhz, p.maxMhz, p.hybrid ? L"   hybrid" : L""),
                  D2D1::RectF(B.left, B.top + 50, B.right, B.top + 68), rd_.fMonoSmall.Get(), col::muted,
                  DWRITE_TEXT_ALIGNMENT_CENTER);
-        rd_.Text(p.alreadyApplied ? (p.reason + L"  \u00B7  reapplying current values")
+        rd_.Text(p.alreadyApplied ? (p.reason + L"  |  reapplying current values")
                                   : p.reason,
                  D2D1::RectF(B.left, B.top + 68, B.right, B.top + 86), rd_.fSmall.Get(),
                  p.alreadyApplied ? col::amber : col::dim, DWRITE_TEXT_ALIGNMENT_CENTER);
@@ -3851,7 +4142,7 @@ private:
         const float bw = std::min(270.0f, (W(B) - 16) / 2);
         const D2D1_RECT_F btnA = D2D1::RectF(cx - bw - 6, B.bottom - 38, cx - 6, B.bottom - 4);
         const D2D1_RECT_F btnB = D2D1::RectF(cx + 6, B.bottom - 38, cx + 6 + bw, B.bottom - 4);
-        if (Button(6, btnA, locked ? L"Continue  \u2014  apply CPU tweaks" : L"Continue anyway", accent, true, true, dt,
+        if (Button(6, btnA, locked ? L"Continue  -  apply CPU tweaks" : L"Continue anyway", accent, true, true, dt,
                    true, true))
             StartPpm();
         if (Button(7, btnB, L"Skip this step", col::muted, false, true, dt)) {
@@ -3869,7 +4160,7 @@ private:
                  rd_.fPhase.Get(), col::violet, DWRITE_TEXT_ALIGNMENT_CENTER);
         rd_.Text(g.name, D2D1::RectF(B.left, B.top + 30, B.right, B.top + 50), rd_.fPhase.Get(), accent,
                  DWRITE_TEXT_ALIGNMENT_CENTER);
-        rd_.Text(g.alreadyApplied ? (g.detail + L"  \u00B7  reapplying current values") : g.detail,
+        rd_.Text(g.alreadyApplied ? (g.detail + L"  |  reapplying current values") : g.detail,
                  D2D1::RectF(B.left, B.top + 50, B.right, B.top + 70), rd_.fMonoSmall.Get(),
                  g.alreadyApplied ? col::amber : col::muted, DWRITE_TEXT_ALIGNMENT_CENTER);
         rd_.Text(L"Writes Windows and driver latency settings: hardware-accelerated GPU scheduling, Game DVR "
@@ -3881,7 +4172,7 @@ private:
         const float bw = std::min(270.0f, (W(B) - 16) / 2);
         const D2D1_RECT_F btnA = D2D1::RectF(cx - bw - 6, B.bottom - 38, cx - 6, B.bottom - 4);
         const D2D1_RECT_F btnB = D2D1::RectF(cx + 6, B.bottom - 38, cx + 6 + bw, B.bottom - 4);
-        if (Button(6, btnA, L"Continue  \u2014  apply GPU tweaks", accent, true, true, dt, true, true)) StartGpu();
+        if (Button(6, btnA, L"Continue  -  apply GPU tweaks", accent, true, true, dt, true, true)) StartGpu();
         if (Button(7, btnB, L"Skip this step", col::muted, false, true, dt)) {
             gpuSkipped_ = true;
             state_.Phase(L"GPU CONFIG", L"GPU tweaks skipped");
@@ -3941,7 +4232,7 @@ private:
             const auto& s = steps[static_cast<size_t>(i)];
             const float y = listTop + (i - start) * rowH;
             D2D1_COLOR_F c = col::dim;
-            const wchar_t* mark = L"\u00B7";
+            const wchar_t* mark = L"|";
             if (s.status == 1) {
                 c = col::amber;
                 mark = L"\u25B6";
@@ -4064,6 +4355,11 @@ private:
     bool running_ = true;
     bool exitRequested_ = false;
     bool trayOn_ = false;
+    bool hubReturn_ = false;
+    bool updatePulse_ = false;
+    bool pulseDim_ = false;
+    bool showUpdatePrompt_ = false;
+    HICON trayIcon_ = nullptr;
     NOTIFYICONDATAW nid_{};
     UINT showMsg_ = 0;
     MonitorPrefs prefs_{};

@@ -1,6 +1,14 @@
 # Changelog
 
-Current release: **2.0.0**.
+Current release: **2.1.0**.
+
+## 2.1.0 — 2026-10-26
+
+- The tray tip uses plain text. The icon is drawn to fill the tray slot.
+- The first launch still walks through setup, and asks whether to keep the tray monitor and start with Windows. The default answer is yes.
+- Later launches, and a normal click of the tray icon, open a home screen with a button for each function and a live list of every tweak.
+- The health check reads every processor-power, storage-power, and graphics setting the tuner writes, plus the timer, memory, TRIM, and SysMain checks. A tweak that matches is live. A tweak that does not match needs to be put back.
+- The step choices from the first run are remembered. An available update pulses the tray icon and posts a Windows notification.
 
 ## 2.0.0 — 2026-10-26
 
