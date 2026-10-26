@@ -4,9 +4,11 @@ Current release: **2.2.0**.
 
 ## 2.2.0 — 2026-10-26
 
-- A house icon is centered at the top of every screen and returns to home.
-- Tweaks on the home screen sit in a separate rounded group for each step. Groups wrap into the next column instead of scrolling off the window. A box lights green when that tweak is applied and red when it is not.
+- A house icon is centered at the top of every screen and returns to home. It is wide, and its edges fade into the window so it reads as a laser etch rather than a button.
+- Tweaks on the home screen sit in a separate rounded group for each step, held against the right edge. Groups wrap into the next column instead of scrolling off the window. A box lights green when that tweak is applied and red when it is not.
+- The center of the home screen describes whichever tool, tweak, or the house the pointer is over.
 - The lower left of the home screen draws the 3D lattice from the most recent timer-resolution scan.
+- Tools, groups, and the heatmap are larger so they fill the default window.
 
 ## 2.1.0 — 2026-10-26
 

@@ -876,7 +876,7 @@ public:
 
     // formats
     ComPtr<IDWriteTextFormat> fTitle, fPhase, fLabel, fSmall, fBody, fMono, fMonoSmall, fMonoBig, fHuge, fButton,
-        fSub, fTileLabel;
+        fHomeBtn, fGuideTitle, fGuide, fSub, fTileLabel;
 
 private:
     bool InitLattice() {
@@ -1242,6 +1242,9 @@ float4 ps(VSOut i) : SV_TARGET {
         fMonoBig = Format(L"Consolas", DWRITE_FONT_WEIGHT_BOLD, 15);
         fHuge = Format(L"Bruno Ace SC", DWRITE_FONT_WEIGHT_NORMAL, 40);
         fButton = Format(L"Philosopher", DWRITE_FONT_WEIGHT_BOLD, 13.5f);
+        fHomeBtn = Format(L"Philosopher", DWRITE_FONT_WEIGHT_BOLD, 16);
+        fGuideTitle = Format(L"Philosopher", DWRITE_FONT_WEIGHT_BOLD, 22, true, false);
+        fGuide = Format(L"Philosopher", DWRITE_FONT_WEIGHT_NORMAL, 16, true, false);
     }
 
     ComPtr<ID2D1LinearGradientBrush> MakeLinear(D2D1_COLOR_F a, D2D1_COLOR_F b) {
@@ -2216,6 +2219,8 @@ private:
 
         buttons_.clear();
         hoverButton_ = false;
+        tipTitle_ = L"Home";
+        tipBody_ = L"Move the pointer over a tool, a tweak, or the house. This panel describes what it does.";
 
         const D2D1_SIZE_F size = rd_.Size();
         const float w = size.width, h = size.height;
@@ -2333,10 +2338,9 @@ private:
             phaseColor = col::violet;
         const float pulse = 0.75f + 0.25f * std::sin(time_ * 3.0f);
         const float hcx = (r.left + r.right) * 0.5f;
-        const D2D1_RECT_F homeBtn = D2D1::RectF(hcx - 20, r.top + 2, hcx + 20, r.top + 42);
-        if (Button(250, homeBtn, L"", col::cyan, stage == Stage::Home, true, dt) && stage != Stage::Home) OpenHome();
-        DrawHouse(D2D1::RectF(homeBtn.left + 6, homeBtn.top + 4, homeBtn.right - 6, homeBtn.bottom - 4),
-                  stage == Stage::Home ? col::white : col::cyan);
+        const float half = std::min(270.0f, W(r) * 0.22f);
+        if (DrawEtchedHome(D2D1::RectF(hcx - half, r.top, hcx + half, r.bottom), dt) && stage != Stage::Home)
+            OpenHome();
         const D2D1_RECT_F pr = D2D1::RectF(r.left + 420, r.top + 2, r.right, r.top + 26);
         rd_.Text(meta.number ? Fmt(L"STEP %d OF %d  |  %s", meta.number, kStepCount, Upper(phase).c_str())
                              : Upper(phase),
@@ -2395,7 +2399,8 @@ private:
     };
 
     bool Button(int id, const D2D1_RECT_F& r, const std::wstring& label, D2D1_COLOR_F accent, bool primary,
-                bool enabled, float dt, bool pulse = false, bool acceptEnter = false) {
+                bool enabled, float dt, bool pulse = false, bool acceptEnter = false,
+                IDWriteTextFormat* font = nullptr) {
         if (hover_.size() <= static_cast<size_t>(id)) hover_.resize(static_cast<size_t>(id) + 1, 0.0f);
         const bool over = enabled && PtIn(mouse_, r);
         if (over) hoverButton_ = true;
@@ -2413,12 +2418,12 @@ private:
             rd_.FillRound(r, 8, fill);
             rd_.StrokeRound(r, 8, Alpha(col::white, (pulse ? 0.28f : 0.18f) + 0.25f * hv + 0.25f * breathe),
                             pulse ? 1.6f : 1.0f);
-            rd_.Text(label, r, rd_.fButton.Get(), enabled ? col::text : col::dim, DWRITE_TEXT_ALIGNMENT_CENTER,
-                     DWRITE_PARAGRAPH_ALIGNMENT_CENTER);
+            rd_.Text(label, r, font ? font : rd_.fButton.Get(), enabled ? col::text : col::dim,
+                     DWRITE_TEXT_ALIGNMENT_CENTER, DWRITE_PARAGRAPH_ALIGNMENT_CENTER);
         } else {
             rd_.FillRound(r, 8, Alpha(accent, enabled ? 0.08f + 0.12f * hv : 0.03f));
             rd_.StrokeRound(r, 8, Alpha(accent, enabled ? 0.45f + 0.4f * hv : 0.15f));
-            rd_.Text(label, r, rd_.fButton.Get(), enabled ? MixC(accent, col::white, 0.3f * hv) : col::dim,
+            rd_.Text(label, r, font ? font : rd_.fButton.Get(), enabled ? MixC(accent, col::white, 0.3f * hv) : col::dim,
                      DWRITE_TEXT_ALIGNMENT_CENTER, DWRITE_PARAGRAPH_ALIGNMENT_CENTER);
         }
         buttons_.push_back({id, r});
@@ -3358,20 +3363,80 @@ private:
         return acted;
     }
 
-    void DrawHouse(const D2D1_RECT_F& r, D2D1_COLOR_F c) {
+    bool HitTarget(int id, const D2D1_RECT_F& r, bool enabled, float dt) {
+        if (hover_.size() <= static_cast<size_t>(id)) hover_.resize(static_cast<size_t>(id) + 1, 0.0f);
+        const bool over = enabled && PtIn(mouse_, r);
+        if (over) hoverButton_ = true;
+        hover_[id] = Approach(hover_[id], over ? 1.0f : 0.0f, dt, 10.0f);
+        buttons_.push_back({id, r});
+        return enabled && clickPending_ && PtIn(clickPos_, r);
+    }
+
+    void NoteTip(const D2D1_RECT_F& r, const std::wstring& title, const std::wstring& body) {
+        if (PtIn(mouse_, r)) {
+            tipTitle_ = title;
+            tipBody_ = body;
+        }
+    }
+
+    void DrawHouse(const D2D1_RECT_F& r, D2D1_COLOR_F c, float glow) {
         const float left = r.left + 1;
         const float right = r.right - 1;
         const float top = r.top + 1;
         const float bottom = r.bottom - 1;
         const float cx = (left + right) * 0.5f;
         const float eave = top + (bottom - top) * 0.40f;
-        rd_.Line(D2D1::Point2F(left, eave), D2D1::Point2F(cx, top), c, 2.0f);
-        rd_.Line(D2D1::Point2F(cx, top), D2D1::Point2F(right, eave), c, 2.0f);
-        rd_.Line(D2D1::Point2F(left + 3, eave), D2D1::Point2F(left + 3, bottom), c, 2.0f);
-        rd_.Line(D2D1::Point2F(right - 3, eave), D2D1::Point2F(right - 3, bottom), c, 2.0f);
-        rd_.Line(D2D1::Point2F(left + 3, bottom), D2D1::Point2F(right - 3, bottom), c, 2.0f);
-        const float doorW = (right - left) * 0.22f;
-        rd_.FillRound(D2D1::RectF(cx - doorW, bottom - (bottom - eave) * 0.55f, cx + doorW, bottom), 1.2f, c);
+        rd_.GlowLine({D2D1::Point2F(left, eave), D2D1::Point2F(cx, top), D2D1::Point2F(right, eave)}, c, 1.5f, glow);
+        rd_.GlowLine({D2D1::Point2F(left + 2.5f, eave), D2D1::Point2F(left + 2.5f, bottom),
+                      D2D1::Point2F(right - 2.5f, bottom), D2D1::Point2F(right - 2.5f, eave)},
+                     c, 1.5f, glow);
+        const float doorW = (right - left) * 0.16f;
+        const float doorTop = bottom - (bottom - eave) * 0.48f;
+        rd_.GlowLine({D2D1::Point2F(cx - doorW, bottom), D2D1::Point2F(cx - doorW, doorTop),
+                      D2D1::Point2F(cx + doorW, doorTop), D2D1::Point2F(cx + doorW, bottom)},
+                     c, 1.25f, glow);
+    }
+
+    bool DrawEtchedHome(const D2D1_RECT_F& band, float dt) {
+        const float hcx = (band.left + band.right) * 0.5f;
+        const float midY = (band.top + band.bottom) * 0.5f;
+        const float halfW = W(band) * 0.5f;
+        const float halfH = H(band) * 0.5f;
+        const D2D1_RECT_F hit = D2D1::RectF(hcx - halfW * 0.58f, band.top, hcx + halfW * 0.58f, band.bottom);
+        const bool clicked = HitTarget(250, hit, true, dt);
+        const float hv = hover_.size() > 250 ? hover_[250] : 0.0f;
+        NoteTip(hit, L"Home",
+                L"Returns to this screen. The house is cut into the window rather than drawn as a button. "
+                L"A tune you already started keeps its place until that step finishes.");
+        const D2D1_POINT_2F c = D2D1::Point2F(hcx, midY);
+        auto wash = [&](ID2D1RadialGradientBrush* br, float rx, float ry, float opacity) {
+            if (!br) return;
+            br->SetCenter(c);
+            br->SetGradientOriginOffset(D2D1::Point2F(0, 0));
+            br->SetRadiusX(rx);
+            br->SetRadiusY(ry);
+            br->SetOpacity(Clamp01(opacity));
+            rd_.Dc()->FillEllipse(D2D1::Ellipse(c, rx, ry), br);
+        };
+        wash(rd_.GlowBrush(col::violet), halfW * 0.92f, halfH * 1.15f, 0.10f + 0.08f * hv);
+        wash(rd_.GlowBrush(col::cyan), halfW, halfH * 0.95f, 0.20f + 0.28f * hv);
+        const int slices = 32;
+        for (int i = 0; i < slices; ++i) {
+            const float t0 = -1.0f + 2.0f * static_cast<float>(i) / slices;
+            const float t1 = -1.0f + 2.0f * static_cast<float>(i + 1) / slices;
+            const float tm = (t0 + t1) * 0.5f;
+            const float fade = std::exp(-tm * tm * 3.1f);
+            const float y = band.bottom - 7.0f;
+            rd_.Line(D2D1::Point2F(hcx + t0 * halfW, y), D2D1::Point2F(hcx + t1 * halfW, y),
+                     Alpha(col::cyan, (0.10f + 0.16f * hv) * fade), 4.0f);
+            rd_.Line(D2D1::Point2F(hcx + t0 * halfW, y), D2D1::Point2F(hcx + t1 * halfW, y),
+                     Alpha(col::white, (0.28f + 0.45f * hv) * fade), 1.15f);
+        }
+        const float houseH = std::min(34.0f, H(band) - 16.0f);
+        const float houseW = houseH * 1.15f;
+        DrawHouse(D2D1::RectF(hcx - houseW * 0.5f, midY - houseH * 0.58f, hcx + houseW * 0.5f, midY - houseH * 0.58f + houseH),
+                  MixC(col::cyan, col::white, 0.25f + 0.55f * hv), 0.65f + 0.7f * hv);
+        return clicked;
     }
 
     void LoadHomeLattice() {
@@ -3469,18 +3534,53 @@ private:
         homeScanLabel_ = best;
     }
 
+    void DrawGuide(const D2D1_RECT_F& r) {
+        rd_.FillRound(r, 18, Alpha(col::panel, 0.78f));
+        rd_.StrokeRound(r, 18, Alpha(col::cyan, 0.20f), 1.2f);
+        rd_.Glow(D2D1::Point2F((r.left + r.right) * 0.5f, r.top + 8), W(r) * 0.45f, col::cyan, 0.10f);
+        rd_.Text(tipTitle_, D2D1::RectF(r.left + 22, r.top + 20, r.right - 22, r.top + 92), rd_.fGuideTitle.Get(), col::cyan);
+        rd_.Text(tipBody_, D2D1::RectF(r.left + 22, r.top + 100, r.right - 22, r.bottom - 22), rd_.fGuide.Get(), col::text);
+    }
+
     void DrawHome(const D2D1_RECT_F& B, float dt) {
-        rd_.Text(L"Synchronus", D2D1::RectF(B.left, B.top, B.left + W(B) * 0.42f, B.top + 36), rd_.fTitle.Get(), col::text);
-        rd_.Text(L"Choose a function. The list shows whether each tweak is live.",
-                 D2D1::RectF(B.left, B.top + 40, B.left + W(B) * 0.42f, B.top + 80), rd_.fSmall.Get(), col::muted);
+        const float gap = 14.0f;
+        float leftW = std::floor(W(B) * 0.30f);
+        float rightW = std::floor(W(B) * 0.42f);
+        if (W(B) - leftW - rightW - gap * 2 < 240.0f) {
+            const float spare = std::max(0.0f, W(B) - 240.0f - gap * 2);
+            leftW = std::floor(spare * 0.42f);
+            rightW = std::floor(spare * 0.58f);
+        }
+        const float centerL = B.left + leftW + gap;
+        const float centerR = B.right - rightW - gap;
         const wchar_t* labels[] = {L"Full tune", L"Health", L"Measure timing", L"CPU power", L"GPU driver",
                                    L"GPU settings", L"Afterburner", L"Memory", L"Storage", L"Restart notes"};
-        const float colW = (W(B) * 0.42f - 12) / 2;
-        const float btnH = 36;
+        const wchar_t* blurbs[] = {
+            L"Opens the setup flow. You choose which steps to run, then Synchronus walks through them in order.",
+            L"Opens the health screen. It reads the live settings and lists anything that has drifted. Nothing changes until you choose a repair.",
+            L"Times Sleep(1) across timer resolutions and saves a scan. The heatmap on this screen uses the newest of those scans.",
+            L"Writes the processor power plan. Core parking and throttling are turned off, and the plan asks the CPU to stay at a high, steady state.",
+            L"Looks up the current graphics driver and can install a clean copy. This step does not install Afterburner.",
+            L"Turns on hardware-accelerated GPU scheduling, turns off Game DVR and Game Bar capture, and writes the NVIDIA or AMD low-latency profile when that vendor is present.",
+            L"Installs MSI Afterburner and RivaTuner, runs the overclock scanner, and saves that curve so it applies at sign-in. The download and scan take about 30 minutes.",
+            L"Sets the page file and turns memory compression off.",
+            L"Turns SysMain off and checks that TRIM is enabled for the system drive.",
+            L"Shows the BIOS settings to change by hand, then asks you to restart. Windows cannot write those settings for you.",
+        };
+        rd_.Text(L"Tools", D2D1::RectF(B.left, B.top, B.left + leftW, B.top + 32), rd_.fPhase.Get(), col::cyan);
+        const bool showUpdate = updatePulse_;
+        const float heatH = std::max(200.0f, H(B) * 0.40f);
+        const float btnTop = B.top + 40;
+        const float btnBottom = B.bottom - heatH - (showUpdate ? 52.0f : 12.0f);
+        const float btnGap = 8.0f;
+        const float btnH = std::max(40.0f, (btnBottom - btnTop - 4.0f * btnGap) / 5.0f);
+        const float colW = (leftW - 10.0f) / 2.0f;
         for (int i = 0; i < 10; ++i) {
-            const float x = B.left + (i % 2) * (colW + 8);
-            const float y = B.top + 88 + (i / 2) * (btnH + 6);
-            if (!Button(200 + i, D2D1::RectF(x, y, x + colW, y + btnH), labels[i], col::cyan, i == 0, true, dt)) continue;
+            const float x = B.left + (i % 2) * (colW + 10);
+            const float y = btnTop + (i / 2) * (btnH + btnGap);
+            const D2D1_RECT_F cell = D2D1::RectF(x, y, x + colW, y + btnH);
+            NoteTip(cell, labels[i], blurbs[i]);
+            if (!Button(200 + i, cell, labels[i], col::cyan, i == 0, true, dt, false, false, rd_.fHomeBtn.Get())) continue;
             if (i == 0) {
                 stage_ = Stage::Welcome;
             } else if (i == 1) {
@@ -3509,21 +3609,27 @@ private:
                 state_.Phase(L"REVIEW", L"set BIOS, then restart");
             }
         }
-        const float buttonsBottom = B.top + 88 + 5 * (btnH + 6);
-        if (updatePulse_ && Button(220, D2D1::RectF(B.left, buttonsBottom, B.left + W(B) * 0.42f, buttonsBottom + 28),
-                                   L"Install update", col::green, true, true, dt)) {
-            showUpdatePrompt_ = true;
+        const float buttonsBottom = btnTop + 5 * btnH + 4 * btnGap;
+        const D2D1_RECT_F updateR = D2D1::RectF(B.left, buttonsBottom + 8, B.left + leftW, buttonsBottom + 44);
+        if (showUpdate) {
+            NoteTip(updateR, L"Install update",
+                    L"A newer Synchronus build is ready. This downloads it and starts the installer.");
+            if (Button(220, updateR, L"Install update", col::green, true, true, dt, false, false, rd_.fHomeBtn.Get()))
+                showUpdatePrompt_ = true;
         }
         if (!homeLoaded_) LoadHomeLattice();
-        const float heatTop = buttonsBottom + (updatePulse_ ? 36.0f : 8.0f);
-        const D2D1_RECT_F heat = D2D1::RectF(B.left, heatTop, B.left + W(B) * 0.44f, B.bottom);
-        rd_.FillRound(heat, 12, Alpha(col::panel, 0.88f));
-        rd_.StrokeRound(heat, 12, Alpha(col::cyan, 0.28f), 1.2f);
+        const float heatTop = showUpdate ? updateR.bottom + 10.0f : buttonsBottom + 12.0f;
+        const D2D1_RECT_F heat = D2D1::RectF(B.left, heatTop, B.left + leftW, B.bottom);
+        NoteTip(heat, L"Last timer scan",
+                homeHas_ ? L"This 3D chart is rebuilt from the newest saved timer-resolution scan. Brighter cells are where Sleep(1) landed. Run Measure timing to replace it."
+                         : L"No timer scan has been saved yet. Run Measure timing and this chart fills in from that result.");
+        rd_.FillRound(heat, 16, Alpha(col::panel, 0.88f));
+        rd_.StrokeRound(heat, 16, Alpha(col::cyan, 0.28f), 1.2f);
         rd_.Text(homeHas_ ? (L"Last timer scan  " + homeScanLabel_) : L"No timer scan saved yet",
-                 D2D1::RectF(heat.left + 8, heat.top + 6, heat.right - 8, heat.top + 22), rd_.fMonoSmall.Get(), col::cyan);
+                 D2D1::RectF(heat.left + 12, heat.top + 8, heat.right - 12, heat.top + 30), rd_.fSmall.Get(), col::cyan);
         if (homeHas_ && rd_.LatticeReady()) {
             rd_.RenderLattice(time_, homeLat_.data(), homeCol_.data());
-            const D2D1_RECT_F plot = D2D1::RectF(heat.left + 8, heat.top + 24, heat.right - 8, heat.bottom - 8);
+            const D2D1_RECT_F plot = D2D1::RectF(heat.left + 10, heat.top + 34, heat.right - 10, heat.bottom - 10);
             const float side = std::min(W(plot), H(plot));
             const float pcx = (plot.left + plot.right) * 0.5f;
             const float pcy = (plot.top + plot.bottom) * 0.5f;
@@ -3539,7 +3645,7 @@ private:
             rows = checks_;
             sum = Summarize(checks_);
         }
-        const float rx = B.left + W(B) * 0.46f;
+        const float rx = centerR;
         rd_.Text(healthBusy_.load() ? L"Checking live settings" : sum.headline,
                  D2D1::RectF(rx, B.top, B.right, B.top + 28), rd_.fPhase.Get(), col::cyan, DWRITE_TEXT_ALIGNMENT_TRAILING);
         rd_.Text(Fmt(L"%d live    %d need attention    %d other", sum.pass, sum.attention, sum.info + sum.other),
@@ -3563,83 +3669,105 @@ private:
             }
             groups[g].items.push_back(i);
         }
-        const float listTop = B.top + 52;
+        const float listTop = B.top + 56;
         const float availH = std::max(40.0f, B.bottom - listTop);
-        float itemH = 12.0f;
-        const float headH = 14.0f;
+        float itemH = 20.0f;
+        const float headH = 22.0f;
         auto groupHeight = [&](size_t n) { return 8.0f + headH + n * itemH + 6.0f; };
         float tallest = 0;
         for (const auto& g : groups) {
             if (!g.items.empty()) tallest = std::max(tallest, groupHeight(g.items.size()));
         }
-        while (tallest > availH - 4.0f && itemH > 9.0f) {
+        while (tallest > availH - 4.0f && itemH > 12.0f) {
             itemH -= 1.0f;
             tallest = 0;
             for (const auto& g : groups) {
                 if (!g.items.empty()) tallest = std::max(tallest, groupHeight(g.items.size()));
             }
         }
-        const float gap = 6.0f;
+        const float cardGap = 8.0f;
         const float paneW = std::max(80.0f, B.right - rx);
         int columns = 1;
         float used = 0;
         for (const auto& g : groups) {
             if (g.items.empty()) continue;
-            const float h = groupHeight(g.items.size()) + gap;
+            const float h = groupHeight(g.items.size()) + cardGap;
             if (used > 0 && used + h > availH) {
                 ++columns;
                 used = 0;
             }
             used += h;
         }
-        float groupW = 196.0f;
-        if (columns * (groupW + gap) > paneW) groupW = std::max(108.0f, (paneW - gap * columns) / columns);
+        float groupW = 228.0f;
+        if (columns * (groupW + cardGap) > paneW) groupW = std::max(128.0f, (paneW - cardGap * columns) / columns);
         float xRight = B.right;
         float y = listTop;
         bool placed = false;
-        for (const auto& g : groups) {
+        for (int gi = 0; gi < 8; ++gi) {
+            const auto& g = groups[gi];
             if (g.items.empty()) continue;
             const float h = groupHeight(g.items.size());
             if (placed && y + h > B.bottom - 2) {
-                xRight -= groupW + gap;
+                xRight -= groupW + cardGap;
                 y = listTop;
             }
             placed = true;
             const D2D1_RECT_F card = D2D1::RectF(xRight - groupW, y, xRight, y + h);
-            rd_.FillRound(card, 8, Alpha(col::panel, 0.92f));
-            rd_.StrokeRound(card, 8, Alpha(col::cyan, 0.35f), 1.1f);
-            rd_.Text(g.title, D2D1::RectF(card.left + 6, card.top + 3, card.right - 6, card.top + 3 + headH),
-                     rd_.fMonoSmall.Get(), col::cyan, DWRITE_TEXT_ALIGNMENT_TRAILING, DWRITE_PARAGRAPH_ALIGNMENT_CENTER);
-            float iy = card.top + 4 + headH;
+            const wchar_t* groupBlurbs[] = {
+                L"The boot service and the global flag that hold the chosen timer resolution, plus the resolution Windows is using right now.",
+                L"Each processor power setting from the CPU step. Green means the live value still matches the tune. Red means it has drifted.",
+                L"The installed graphics driver. This check does not decide whether a newer driver exists.",
+                L"Hardware-accelerated GPU scheduling, Game DVR, Game Bar, and the vendor profile.",
+                L"Whether Afterburner and RivaTuner are installed and set to start at sign-in. A green box does not by itself mean an overclock is active.",
+                L"The page file and memory compression.",
+                L"SysMain and TRIM.",
+                L"Checks that do not belong to one of the steps above.",
+            };
+            NoteTip(card, g.title, groupBlurbs[gi]);
+            rd_.FillRound(card, 12, Alpha(col::panel, 0.92f));
+            rd_.StrokeRound(card, 12, Alpha(col::cyan, 0.35f), 1.2f);
+            rd_.Text(g.title, D2D1::RectF(card.left + 8, card.top + 4, card.right - 8, card.top + 4 + headH),
+                     itemH >= 16.0f ? rd_.fSmall.Get() : rd_.fMonoSmall.Get(), col::cyan,
+                     DWRITE_TEXT_ALIGNMENT_TRAILING, DWRITE_PARAGRAPH_ALIGNMENT_CENTER);
+            float iy = card.top + 6 + headH;
             for (int index : g.items) {
                 const auto& c = rows[static_cast<size_t>(index)];
                 const bool applied = c.status == HealthStatus::Pass;
                 const D2D1_COLOR_F mark = applied ? col::green : col::red;
-                const D2D1_RECT_F box = D2D1::RectF(card.right - 16, iy + 1, card.right - 6, iy + itemH - 2);
-                rd_.Glow(D2D1::Point2F((box.left + box.right) * 0.5f, (box.top + box.bottom) * 0.5f), 7, mark, 0.4f);
-                rd_.FillRound(box, 2, mark);
-                rd_.Text(c.name, D2D1::RectF(card.left + 4, iy, box.left - 4, iy + itemH), rd_.fMonoSmall.Get(), col::text,
+                const D2D1_RECT_F row = D2D1::RectF(card.left + 4, iy, card.right - 4, iy + itemH);
+                std::wstring about = c.explanation.empty() ? std::wstring(L"This check only reads the live value.") : c.explanation;
+                about += L"\n\nStatus: ";
+                about += HealthStatusText(c.status);
+                if (!c.observed.empty()) about += L"\nLive: " + c.observed;
+                if (!c.expected.empty()) about += L"\nExpected: " + c.expected;
+                NoteTip(row, c.name, about);
+                const float box = std::max(8.0f, itemH - 6.0f);
+                const D2D1_RECT_F markR = D2D1::RectF(card.right - 8 - box, iy + (itemH - box) * 0.5f, card.right - 8,
+                                                     iy + (itemH + box) * 0.5f);
+                rd_.Glow(D2D1::Point2F((markR.left + markR.right) * 0.5f, (markR.top + markR.bottom) * 0.5f), box, mark, 0.35f);
+                rd_.FillRound(markR, 2, mark);
+                rd_.Text(c.name, D2D1::RectF(card.left + 8, iy, markR.left - 6, iy + itemH),
+                         itemH >= 16.0f ? rd_.fSmall.Get() : rd_.fMonoSmall.Get(), col::text,
                          DWRITE_TEXT_ALIGNMENT_TRAILING, DWRITE_PARAGRAPH_ALIGNMENT_CENTER);
                 iy += itemH;
             }
-            y += h + gap;
+            y += h + cardGap;
         }
+        DrawGuide(D2D1::RectF(centerL, B.top, centerR, B.bottom));
     }
 
     void DrawWelcome(const D2D1_RECT_F& R, float dt) {
-        const float houseX = (R.left + R.right) * 0.5f;
-        const D2D1_RECT_F house = D2D1::RectF(houseX - 20, R.top + 6, houseX + 20, R.top + 46);
-        if (Button(250, house, L"", col::cyan, false, true, dt)) OpenHome();
-        DrawHouse(D2D1::RectF(house.left + 6, house.top + 4, house.right - 6, house.bottom - 4), col::cyan);
         const float cx = (R.left + R.right) / 2;
-        const float cardW = std::min(780.0f, W(R) - 40);
+        const float cardW = std::min(820.0f, W(R) - 40);
         const D2D1_RECT_F card = D2D1::RectF(cx - cardW / 2, R.top + 8, cx + cardW / 2, R.bottom);
         rd_.FillRound(card, 16, Alpha(col::panel, 0.92f));
         rd_.StrokeRound(card, 16, Alpha(col::cyan, 0.22f), 1.4f);
-        rd_.Glow(D2D1::Point2F(cx, card.top + 72), 200, col::cyan, 0.18f + 0.08f * (0.5f + 0.5f * std::sin(time_ * 1.4f)));
-        rd_.Glow(D2D1::Point2F(cx, card.top + 72), 260, col::violet, 0.10f);
+        const float etchHalf = std::min(250.0f, (W(card) - 80.0f) * 0.5f);
+        if (DrawEtchedHome(D2D1::RectF(cx - etchHalf, card.top + 2, cx + etchHalf, card.top + 58), dt)) OpenHome();
+        rd_.Glow(D2D1::Point2F(cx, card.top + 118), 180, col::cyan, 0.16f + 0.08f * (0.5f + 0.5f * std::sin(time_ * 1.4f)));
+        rd_.Glow(D2D1::Point2F(cx, card.top + 118), 240, col::violet, 0.08f);
 
-        float y = card.top + 10;
+        float y = card.top + 62;
         if (rd_.Mark()) {
             const D2D1_SIZE_F sz = rd_.Mark()->GetSize();
             const float lh = 88.0f;
@@ -4593,6 +4721,8 @@ private:
 
     D2D1_POINT_2F mouse_ = D2D1::Point2F(-1, -1), clickPos_ = D2D1::Point2F(-1, -1);
     bool mouseDown_ = false, clickPending_ = false, enterPending_ = false, hoverButton_ = false;
+    std::wstring tipTitle_;
+    std::wstring tipBody_;
     std::vector<ButtonRec> buttons_;
 };
 
