@@ -3357,6 +3357,117 @@ private:
         return acted;
     }
 
+    void DrawHouse(const D2D1_RECT_F& r, D2D1_COLOR_F c) {
+        const float left = r.left + 1;
+        const float right = r.right - 1;
+        const float top = r.top + 1;
+        const float bottom = r.bottom - 1;
+        const float cx = (left + right) * 0.5f;
+        const float eave = top + (bottom - top) * 0.40f;
+        rd_.Line(D2D1::Point2F(left, eave), D2D1::Point2F(cx, top), c, 2.0f);
+        rd_.Line(D2D1::Point2F(cx, top), D2D1::Point2F(right, eave), c, 2.0f);
+        rd_.Line(D2D1::Point2F(left + 3, eave), D2D1::Point2F(left + 3, bottom), c, 2.0f);
+        rd_.Line(D2D1::Point2F(right - 3, eave), D2D1::Point2F(right - 3, bottom), c, 2.0f);
+        rd_.Line(D2D1::Point2F(left + 3, bottom), D2D1::Point2F(right - 3, bottom), c, 2.0f);
+        const float doorW = (right - left) * 0.22f;
+        rd_.FillRound(D2D1::RectF(cx - doorW, bottom - (bottom - eave) * 0.55f, cx + doorW, bottom), 1.2f, c);
+    }
+
+    void LoadHomeLattice() {
+        homeLoaded_ = true;
+        homeHas_ = false;
+        homeLat_.assign(static_cast<size_t>(kLat) * kLat, {});
+        homeCol_.assign(kLat, {});
+        WIN32_FIND_DATAW fd{};
+        const HANDLE find = FindFirstFileW((host_.dataDir + L"\\benchmark-*.csv").c_str(), &fd);
+        if (find == INVALID_HANDLE_VALUE) return;
+        std::wstring best;
+        unsigned long long bestTime = 0;
+        do {
+            if (fd.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY) continue;
+            const unsigned long long stamp = (static_cast<unsigned long long>(fd.ftLastWriteTime.dwHighDateTime) << 32) |
+                                             fd.ftLastWriteTime.dwLowDateTime;
+            if (stamp >= bestTime) {
+                bestTime = stamp;
+                best = fd.cFileName;
+            }
+        } while (FindNextFileW(find, &fd));
+        FindClose(find);
+        if (best.empty()) return;
+        const std::wstring path = host_.dataDir + L"\\" + best;
+        const HANDLE file = CreateFileW(path.c_str(), GENERIC_READ, FILE_SHARE_READ, nullptr, OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, nullptr);
+        if (file == INVALID_HANDLE_VALUE) return;
+        const DWORD size = GetFileSize(file, nullptr);
+        std::string bytes(size ? size : 1, '\0');
+        DWORD got = 0;
+        ReadFile(file, bytes.data(), size, &got, nullptr);
+        CloseHandle(file);
+        bytes.resize(got);
+        auto deposit = [&](float latePct, float mean, float stdev, int n, bool idle) {
+            if (n <= 0) return;
+            const int blobs = std::min(n, 40);
+            const float sigma = std::max(0.02f, stdev);
+            for (int i = 0; i < blobs; ++i) {
+                const float z = ((i + 0.5f) / blobs - 0.5f) * 2.4f;
+                const int ix = MapLateX(latePct);
+                const int iy = MapLatY(mean + z * sigma);
+                LatCell& cell = homeLat_[static_cast<size_t>(iy) * kLat + ix];
+                const int add = std::max(1, n / blobs);
+                const int room = 65535 - cell.n;
+                const int put = std::min(add, room);
+                cell.n = static_cast<uint16_t>(cell.n + put);
+                if (idle) cell.idle = static_cast<uint16_t>(std::min(65535, cell.idle + put));
+                else cell.loop = static_cast<uint16_t>(std::min(65535, cell.loop + put));
+                if (latePct > 0.5f) cell.late = static_cast<uint16_t>(std::min(65535, cell.late + put / 2));
+            }
+            const int ix = MapLateX(latePct);
+            ColStat& col = homeCol_[static_cast<size_t>(ix)];
+            col.loopU = LatYU(mean);
+            col.idleU = LatYU(mean);
+            col.p99U = LatYU(mean + stdev);
+            col.stdevU = stdev / (2.0f - kHistMin) * 0.80f;
+            col.late01 = latePct / 100.0f;
+            col.present = 1.0f;
+        };
+        size_t pos = 0;
+        bool header = true;
+        bool any = false;
+        while (pos < bytes.size()) {
+            size_t end = bytes.find('\n', pos);
+            if (end == std::string::npos) end = bytes.size();
+            std::string line = bytes.substr(pos, end - pos);
+            if (!line.empty() && line.back() == '\r') line.pop_back();
+            pos = end + 1;
+            if (line.empty()) continue;
+            if (header) {
+                header = false;
+                continue;
+            }
+            std::vector<std::string> fields;
+            size_t a = 0;
+            while (a <= line.size()) {
+                const size_t b = line.find(',', a);
+                fields.push_back(line.substr(a, (b == std::string::npos ? line.size() : b) - a));
+                if (b == std::string::npos) break;
+                a = b + 1;
+            }
+            if (fields.size() < 24 || fields[0] != "sweep") continue;
+            const int loopN = std::atoi(fields[4].c_str());
+            const float loopMean = static_cast<float>(std::atof(fields[6].c_str()));
+            const float loopStd = static_cast<float>(std::atof(fields[7].c_str()));
+            const float loopLate = static_cast<float>(std::atof(fields[12].c_str()));
+            const int idleN = std::atoi(fields[15].c_str());
+            const float idleMean = static_cast<float>(std::atof(fields[17].c_str()));
+            const float idleStd = static_cast<float>(std::atof(fields[18].c_str()));
+            const float idleLate = static_cast<float>(std::atof(fields[23].c_str()));
+            deposit(loopLate, loopMean, loopStd, loopN, false);
+            deposit(idleLate, idleMean, idleStd, idleN, true);
+            any = true;
+        }
+        homeHas_ = any;
+        homeScanLabel_ = best;
+    }
+
     void DrawHome(const D2D1_RECT_F& B, float dt) {
         rd_.Text(L"Synchronus", D2D1::RectF(B.left, B.top, B.left + W(B) * 0.42f, B.top + 36), rd_.fTitle.Get(), col::text);
         rd_.Text(L"Choose a function. The list shows whether each tweak is live.",
@@ -3474,8 +3585,10 @@ private:
     }
 
     void DrawWelcome(const D2D1_RECT_F& R, float dt) {
-        if (Button(250, D2D1::RectF(R.right - 112, R.top + 8, R.right - 8, R.top + 36), L"Home", col::cyan, false, true, dt))
-            OpenHome();
+        const float houseX = (R.left + R.right) * 0.5f;
+        const D2D1_RECT_F house = D2D1::RectF(houseX - 20, R.top + 6, houseX + 20, R.top + 46);
+        if (Button(250, house, L"", col::cyan, false, true, dt)) OpenHome();
+        DrawHouse(D2D1::RectF(house.left + 6, house.top + 4, house.right - 6, house.bottom - 4), col::cyan);
         const float cx = (R.left + R.right) / 2;
         const float cardW = std::min(780.0f, W(R) - 40);
         const D2D1_RECT_F card = D2D1::RectF(cx - cardW / 2, R.top + 8, cx + cardW / 2, R.bottom);
