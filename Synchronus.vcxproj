@@ -76,9 +76,11 @@
     <ClCompile Include="Gui.cpp" />
     <ClCompile Include="GpuDriver.cpp" />
     <ClCompile Include="Update.cpp" />
+    <ClCompile Include="Health.cpp" />
   </ItemGroup>
   <ItemGroup>
     <ClInclude Include="Gui.h" />
+    <ClInclude Include="Health.h" />
   </ItemGroup>
   <ItemGroup>
     <ResourceCompile Include="Synchronus.rc" />

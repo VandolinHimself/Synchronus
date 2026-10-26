@@ -1,6 +1,14 @@
 # Changelog
 
-Current release: **1.12.8**.
+Current release: **2.0.0**.
+
+## 2.0.0 — 2026-10-26
+
+- Synchronus stays in the system tray after you close the window. Exit is a separate tray command. A second launch brings the existing window back.
+- Health checks read the live timer service, timer flag, power-plan values, GPU scheduling, Game DVR, display-driver version, Afterburner, RivaTuner, pagefile, memory compression, storage power settings, SysMain, and TRIM. A previous "applied" flag is not treated as proof.
+- Passing, needs attention, informational, unknown, and inaccessible are separate. Repairs call the existing apply steps and then recheck. Routine scans do not change the machine.
+- Start with Windows and notifications are off until you turn them on from the tray menu. The default background check is every six hours.
+- `Synchronus.exe --health` prints a read-only report. `Synchronus.exe --self-test` checks the status rules without touching the system.
 
 ## 1.12.8 — 2026-10-25
 

@@ -25,6 +25,7 @@
 #include <winioctl.h>
 
 #include "Gui.h"
+#include "Health.h"
 
 #include <algorithm>
 #include <cmath>
@@ -69,7 +70,7 @@ gui::MeasurePlan gui::MeasurePlanFor(int fidelity) {
 
 namespace {
 
-constexpr wchar_t kVersion[] = L"1.12.8";
+constexpr wchar_t kVersion[] = L"2.0.0";
 constexpr wchar_t kProduct[] = L"Synchronus";
 constexpr wchar_t kCompany[] = L"Lucius And Wayne Systems LLC";
 constexpr wchar_t kCompanyUrl[] = L"https://luciuswayne.com";
@@ -2699,6 +2700,11 @@ bool UninstallService() {
                        installPath.c_str(), GetLastError()));
         }
     }
+    HKEY run = nullptr;
+    if (RegOpenKeyExW(HKEY_CURRENT_USER, L"Software\\Microsoft\\Windows\\CurrentVersion\\Run", 0, KEY_SET_VALUE, &run) == ERROR_SUCCESS) {
+        RegDeleteValueW(run, L"Synchronus");
+        RegCloseKey(run);
+    }
     return ok;
 }
 
@@ -3305,6 +3311,8 @@ void PrintHelp() {
         L"      [--resolution N]                 Ctrl+C (default: kernel fastest). One-off,\n"
         L"                                       nothing is installed.\n"
         L"  Synchronus.exe --status              Show installed/current resolution state.\n"
+        L"  Synchronus.exe --health              Read-only check of applied settings.\n"
+        L"  Synchronus.exe --self-test           Check the health-status rules. Changes nothing.\n"
         L"  Synchronus.exe --stop                Stop the service (keeps it installed).\n"
         L"  Synchronus.exe --start               Start the installed service.\n"
         L"  Synchronus.exe --uninstall           Remove the service and restore tweaks.\n"
@@ -3378,8 +3386,10 @@ bool ParseOptions(const std::vector<std::wstring>& args, Options& opts) {
         ULONG v = 0;
         if (a == L"--benchmark" || a == L"--install" || a == L"--apply" ||
             a == L"--status" || a == L"--stop" || a == L"--start" ||
-            a == L"--uninstall" || a == L"--service") {
+            a == L"--uninstall" || a == L"--service" || a == L"--health") {
             opts.command = a.substr(2);
+        } else if (a == L"--self-test") {
+            opts.command = L"self-test";
         } else if (a == L"--apply-ppm") {
             opts.command = L"ppm";
         } else if (a == L"--apply-gpu") {
@@ -4028,6 +4038,18 @@ int RunCli(const Options& opts, const std::vector<std::wstring>& args) {
         } else if (opts.command == L"storage") {
             g_ppmDwell = !opts.noPause;
             exitCode = ApplyStorageTweaks() ? 0 : 1;
+        } else if (opts.command == L"health") {
+            const auto checks = gui::RunHealth(nullptr);
+            const gui::HealthSummary sum = gui::Summarize(checks);
+            Out(sum.headline);
+            for (const auto& c : checks) {
+                Out(Format(L"  [%s] %s — %s — %s", gui::HealthStatusText(c.status), c.category.c_str(), c.name.c_str(),
+                           c.observed.c_str()));
+            }
+            exitCode = 0;
+        } else if (opts.command == L"self-test") {
+            exitCode = gui::SelfTestHealth();
+            Out(exitCode == 0 ? L"Health self-test passed." : L"Health self-test failed.");
         }
     }
 
@@ -4182,10 +4204,10 @@ int RunGui(const Options& opts, const std::vector<std::wstring>&) {
     CleanupUpdateBackups();
     HANDLE mutex = CreateMutexW(nullptr, FALSE, L"Global\\Synchronus.SingleInstance");
     if (mutex && GetLastError() == ERROR_ALREADY_EXISTS) {
-        MessageBoxW(nullptr, L"Another Synchronus window is already running.", L"Synchronus",
-                    MB_ICONINFORMATION | MB_OK);
+        const UINT show = RegisterWindowMessageW(L"Synchronus.Show");
+        if (show) PostMessageW(HWND_BROADCAST, show, 0, 0);
         CloseHandle(mutex);
-        return 1;
+        return 0;
     }
 
     gui::Host host;
@@ -4357,7 +4379,7 @@ int WINAPI wWinMain(HINSTANCE, HINSTANCE, PWSTR, int) {
         return 1;
     }
 
-    const bool allowUnelevated = opts.command == L"help" || opts.command == L"version";
+    const bool allowUnelevated = opts.command == L"help" || opts.command == L"version" || opts.command == L"self-test";
     if (!allowUnelevated && !IsAdmin()) {
         if (opts.elevated) {
             if (LooksLikeCli(args, opts)) {

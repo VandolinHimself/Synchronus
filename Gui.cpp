@@ -11,6 +11,7 @@
 #define NOMINMAX
 #define WIN32_LEAN_AND_MEAN
 #include "Gui.h"
+#include "Health.h"
 #ifndef SHTDN_REASON_MAJOR_APPLICATION
 #define SHTDN_REASON_MAJOR_APPLICATION 0x00040000
 #define SHTDN_REASON_MINOR_MAINTENANCE 0x00000001
@@ -66,6 +67,18 @@
 
 namespace gui {
 namespace {
+
+using gui::AppendHealthLog;
+using gui::HealthCheck;
+using gui::HealthNeedsAttention;
+using gui::HealthStatus;
+using gui::HealthStatusText;
+using gui::HealthSummary;
+using gui::LoadMonitorPrefs;
+using gui::MonitorPrefs;
+using gui::RunHealth;
+using gui::SaveMonitorPrefs;
+using gui::Summarize;
 
 using Microsoft::WRL::ComPtr;
 
@@ -1328,7 +1341,8 @@ enum class Stage {
     AfterburnerPrompt, AfterburnerApplying, AfterburnerDone, AfterburnerFailed,
     MemoryPrompt, MemoryApplying, MemoryDone, MemoryFailed,
     StoragePrompt, StorageApplying, StorageDone, StorageFailed,
-    Review
+    Review,
+    Monitor
 };
 
 constexpr int kStepCount = 10;
@@ -1385,6 +1399,9 @@ StepMeta Meta(Stage s) {
         case Stage::StorageFailed:
             return {9, L"Storage", L"SSD, PCIe, USB, TRIM"};
         case Stage::Review:
+            return {10, L"Review", L"BIOS, then restart"};
+        case Stage::Monitor:
+            return {0, L"Health", L"live settings"};
         default:
             return {10, L"Review", L"BIOS, then restart"};
     }
@@ -1418,6 +1435,7 @@ bool IsTuneStage(Stage s) {
         case Stage::StorageDone:
         case Stage::StorageFailed:
         case Stage::Review:
+        case Stage::Monitor:
             return true;
         default:
             return false;
@@ -1497,7 +1515,13 @@ public:
             CoUninitialize();
             return 1;
         }
-        ShowWindow(hwnd_, SW_SHOW);
+        prefs_ = LoadMonitorPrefs();
+        showMsg_ = RegisterWindowMessageW(L"Synchronus.Show");
+        AddTray();
+        ShowWindow(hwnd_, prefs_.startMinimized && !host_.autoInstall ? SW_HIDE : SW_SHOW);
+        SetTimer(hwnd_, 7, 60 * 1000, nullptr);
+        nextScanAt_ = GetTickCount64() + static_cast<unsigned long long>(prefs_.scanHours) * 3600ull * 1000ull;
+        if (!prefs_.paused) StartHealthScan();
         // The measurement thread takes realtime priority; keep the UI thread
         // well below it so rendering never delays a Sleep(1) wake-up.
         SetThreadPriority(GetCurrentThread(), THREAD_PRIORITY_BELOW_NORMAL);
@@ -1528,7 +1552,7 @@ public:
                 DispatchMessageW(&msg);
             }
             if (!running_) break;
-            if (IsIconic(hwnd_)) {
+            if (IsIconic(hwnd_) || !IsWindowVisible(hwnd_)) {
                 WaitMessage();
                 continue;
             }
@@ -1539,6 +1563,8 @@ public:
         updateStop_.store(true);
         state_.Cancel();
         if (updateThread_.joinable()) updateThread_.join();
+        healthStop_.store(true);
+        if (healthThread_.joinable()) healthThread_.join();
         JoinWorker();
         if (serviceStopped_ && !installedThisSession_ && !relaunch_.load()) host_.restartService();
         CoUninitialize();
@@ -1615,12 +1641,43 @@ private:
                 ValidateRect(hwnd_, nullptr);
                 return 0;
             case WM_CLOSE:
+                if (!exitRequested_ && prefs_.closeToTray) {
+                    ShowWindow(hwnd_, SW_HIDE);
+                    return 0;
+                }
                 DestroyWindow(hwnd_);
                 return 0;
             case WM_DESTROY:
+                RemoveTray();
                 PostQuitMessage(0);
                 return 0;
+            case WM_TIMER:
+                if (wp == 7) OnScanTimer();
+                return 0;
+            case WM_MOUSEWHEEL:
+                if (stage_.load() == Stage::Monitor) {
+                    const int delta = GET_WHEEL_DELTA_WPARAM(wp);
+                    healthScroll_ = std::max(0, healthScroll_ - delta / 120);
+                }
+                return 0;
             default:
+                if (showMsg_ && msg == showMsg_) {
+                    ShowWindow(hwnd_, SW_SHOW);
+                    SetForegroundWindow(hwnd_);
+                    return 0;
+                }
+                if (msg == WM_APP + 42) {
+                    OnTray(lp);
+                    return 0;
+                }
+                if (msg == WM_APP + 43) {
+                    OnHealthReady();
+                    return 0;
+                }
+                if (msg == WM_APP + 44) {
+                    MaybeNotify();
+                    return 0;
+                }
                 break;
         }
         return DefWindowProcW(hwnd_, msg, wp, lp);
@@ -2768,6 +2825,270 @@ private:
         DrawResultBanner(B, dt, stage);
     }
 
+    void AddTray() {
+        nid_.cbSize = sizeof(nid_);
+        nid_.hWnd = hwnd_;
+        nid_.uID = 1;
+        nid_.uFlags = NIF_MESSAGE | NIF_ICON | NIF_TIP;
+        nid_.uCallbackMessage = WM_APP + 42;
+        nid_.hIcon = LoadIconW(GetModuleHandleW(nullptr), MAKEINTRESOURCEW(101));
+        if (!nid_.hIcon) nid_.hIcon = LoadIconW(nullptr, IDI_APPLICATION);
+        wcscpy_s(nid_.szTip, L"Synchronus");
+        Shell_NotifyIconW(NIM_ADD, &nid_);
+        trayOn_ = true;
+    }
+
+    void RemoveTray() {
+        if (!trayOn_) return;
+        Shell_NotifyIconW(NIM_DELETE, &nid_);
+        trayOn_ = false;
+    }
+
+    void UpdateTray() {
+        if (!trayOn_) return;
+        HealthSummary sum;
+        {
+            std::lock_guard<std::mutex> g(healthM_);
+            sum = Summarize(checks_);
+        }
+        const bool bad = sum.attention > 0;
+        nid_.hIcon = LoadIconW(nullptr, bad ? IDI_WARNING : IDI_APPLICATION);
+        HICON app = LoadIconW(GetModuleHandleW(nullptr), MAKEINTRESOURCEW(101));
+        if (!bad && app) nid_.hIcon = app;
+        nid_.uFlags = NIF_ICON | NIF_TIP;
+        const std::wstring tip = bad ? (L"Synchronus — " + sum.headline) : L"Synchronus — nothing needs attention";
+        wcsncpy_s(nid_.szTip, tip.c_str(), _TRUNCATE);
+        Shell_NotifyIconW(NIM_MODIFY, &nid_);
+    }
+
+    void OnTray(LPARAM lp) {
+        if (lp == WM_LBUTTONDBLCLK || lp == WM_LBUTTONUP) {
+            ShowWindow(hwnd_, SW_SHOW);
+            SetForegroundWindow(hwnd_);
+            if (stage_.load() == Stage::Welcome) OpenHealth();
+            return;
+        }
+        if (lp == NIN_BALLOONUSERCLICK) {
+            ShowWindow(hwnd_, SW_SHOW);
+            SetForegroundWindow(hwnd_);
+            OpenHealth();
+            return;
+        }
+        if (lp != WM_RBUTTONUP) return;
+        HMENU menu = CreatePopupMenu();
+        AppendMenuW(menu, MF_STRING, 4100, L"Open Synchronus");
+        AppendMenuW(menu, MF_STRING, 4101, L"Run health check");
+        AppendMenuW(menu, MF_STRING, 4102, prefs_.paused ? L"Resume monitoring" : L"Pause monitoring");
+        AppendMenuW(menu, MF_STRING, 4103, L"Settings");
+        AppendMenuW(menu, MF_STRING, 4105, prefs_.launchAtLogin ? L"Start with Windows: on" : L"Start with Windows: off");
+        AppendMenuW(menu, MF_STRING, 4106, prefs_.notify ? L"Notifications: on" : L"Notifications: off");
+        AppendMenuW(menu, MF_SEPARATOR, 0, nullptr);
+        AppendMenuW(menu, MF_STRING, 4104, L"Exit");
+        POINT pt{};
+        GetCursorPos(&pt);
+        SetForegroundWindow(hwnd_);
+        const int cmd = TrackPopupMenu(menu, TPM_RETURNCMD | TPM_RIGHTBUTTON, pt.x, pt.y, 0, hwnd_, nullptr);
+        DestroyMenu(menu);
+        if (cmd == 4100) {
+            ShowWindow(hwnd_, SW_SHOW);
+            SetForegroundWindow(hwnd_);
+        } else if (cmd == 4101) {
+            ShowWindow(hwnd_, SW_SHOW);
+            OpenHealth();
+            StartHealthScan();
+        } else if (cmd == 4102) {
+            prefs_.paused = !prefs_.paused;
+            SaveMonitorPrefs(prefs_);
+        } else if (cmd == 4103) {
+            ShowWindow(hwnd_, SW_SHOW);
+            OpenHealth();
+        } else if (cmd == 4105) {
+            prefs_.launchAtLogin = !prefs_.launchAtLogin;
+            SaveMonitorPrefs(prefs_);
+        } else if (cmd == 4106) {
+            prefs_.notify = !prefs_.notify;
+            SaveMonitorPrefs(prefs_);
+        } else if (cmd == 4104) {
+            exitRequested_ = true;
+            DestroyWindow(hwnd_);
+        }
+    }
+
+    void OnScanTimer() {
+        if (prefs_.paused || healthBusy_.load()) return;
+        if (GetTickCount64() < nextScanAt_) return;
+        StartHealthScan();
+    }
+
+    void OpenHealth() {
+        stage_ = Stage::Monitor;
+        state_.Phase(L"HEALTH", L"read-only check of applied settings");
+        if (checks_.empty() && !healthBusy_.load()) StartHealthScan();
+    }
+
+    void StartHealthScan() {
+        if (healthBusy_.load()) return;
+        if (healthThread_.joinable()) healthThread_.join();
+        healthStop_.store(false);
+        healthBusy_.store(true);
+        healthThread_ = std::thread([this] {
+            const auto found = RunHealth(&healthStop_);
+            std::vector<std::wstring> fresh;
+            {
+                std::lock_guard<std::mutex> g(healthM_);
+                for (const auto& c : found) {
+                    if (!HealthNeedsAttention(c.status)) continue;
+                    bool seen = false;
+                    for (const auto& id : noted_) {
+                        if (id == c.id) seen = true;
+                    }
+                    if (!seen) fresh.push_back(c.id + L"|" + c.name);
+                }
+                checks_ = found;
+                noted_.clear();
+                for (const auto& c : checks_) {
+                    if (HealthNeedsAttention(c.status)) noted_.push_back(c.id);
+                }
+                lastScanAt_ = GetTickCount64();
+            }
+            nextScanAt_ = GetTickCount64() + static_cast<unsigned long long>(prefs_.scanHours) * 3600ull * 1000ull;
+            healthBusy_.store(false);
+            if (prefs_.notify && !fresh.empty()) PostMessageW(hwnd_, WM_APP + 44, 0, 0);
+            PostMessageW(hwnd_, WM_APP + 43, 0, 0);
+        });
+    }
+
+    void OnHealthReady() { UpdateTray(); }
+
+    void MaybeNotify() {
+        if (!prefs_.notify || !trayOn_) return;
+        std::wstring text;
+        {
+            std::lock_guard<std::mutex> g(healthM_);
+            for (const auto& c : checks_) {
+                if (!HealthNeedsAttention(c.status)) continue;
+                text = c.name + L" — " + c.observed;
+                break;
+            }
+        }
+        if (text.empty()) return;
+        const unsigned long long now = GetTickCount64();
+        if (now - lastNotifyAt_ < 30ull * 60ull * 1000ull) return;
+        lastNotifyAt_ = now;
+        nid_.uFlags = NIF_INFO;
+        wcsncpy_s(nid_.szInfoTitle, L"Synchronus", _TRUNCATE);
+        wcsncpy_s(nid_.szInfo, text.c_str(), _TRUNCATE);
+        nid_.dwInfoFlags = NIIF_WARNING;
+        Shell_NotifyIconW(NIM_MODIFY, &nid_);
+        nid_.uFlags = NIF_MESSAGE | NIF_ICON | NIF_TIP;
+    }
+
+    void StartRepair(const std::wstring& kind) {
+        if (kind.empty() || healthBusy_.load()) return;
+        const int answer = MessageBoxW(hwnd_,
+                                        L"This changes the selected Windows setting using the existing Synchronus step. "
+                                        L"It does not install a driver unless you chose the graphics or Afterburner repair.",
+                                        L"Synchronus", MB_ICONWARNING | MB_OKCANCEL);
+        if (answer != IDOK) return;
+        if (healthThread_.joinable()) healthThread_.join();
+        healthBusy_.store(true);
+        healthThread_ = std::thread([this, kind] {
+            int rc = 1;
+            if (kind == L"ppm" && host_.applyPpm) rc = host_.applyPpm(state_);
+            else if (kind == L"gpu" && host_.applyGpu) rc = host_.applyGpu(state_);
+            else if (kind == L"memory" && host_.applyMemory) rc = host_.applyMemory(state_);
+            else if (kind == L"storage" && host_.applyStorage) rc = host_.applyStorage(state_);
+            else if (kind == L"afterburner" && host_.applyAfterburner) rc = host_.applyAfterburner(state_);
+            else if (kind == L"timer" && host_.install && host_.system) {
+                const unsigned units = host_.system().serviceResolution;
+                if (units) rc = host_.install(units, state_);
+            }
+            AppendHealthLog(rc == 0 ? (L"repair " + kind + L" finished") : (L"repair " + kind + L" failed"));
+            const auto found = RunHealth(&healthStop_);
+            {
+                std::lock_guard<std::mutex> g(healthM_);
+                checks_ = found;
+                lastScanAt_ = GetTickCount64();
+            }
+            healthBusy_.store(false);
+            PostMessageW(hwnd_, WM_APP + 43, 0, 0);
+        });
+    }
+
+    void DrawMonitor(const D2D1_RECT_F& B, float dt) {
+        std::vector<HealthCheck> rows;
+        HealthSummary sum;
+        bool busy = healthBusy_.load();
+        {
+            std::lock_guard<std::mutex> g(healthM_);
+            sum = Summarize(checks_);
+            for (const auto& c : checks_) {
+                if (healthFilter_ == 1 && !HealthNeedsAttention(c.status)) continue;
+                if (healthFilter_ == 2 && c.status != HealthStatus::Pass) continue;
+                rows.push_back(c);
+            }
+        }
+        rd_.Text(L"Health", D2D1::RectF(B.left, B.top + 6, B.right, B.top + 28), rd_.fPhase.Get(), col::cyan,
+                 DWRITE_TEXT_ALIGNMENT_CENTER);
+        const std::wstring head = busy ? L"Checking the live settings. Nothing is being changed." : sum.headline;
+        rd_.Text(head, D2D1::RectF(B.left + 8, B.top + 28, B.right - 8, B.top + 48), rd_.fSmall.Get(), col::muted,
+                 DWRITE_TEXT_ALIGNMENT_CENTER);
+        rd_.Text(Fmt(L"%d passing   %d attention   %d other", sum.pass, sum.attention, sum.info + sum.other),
+                 D2D1::RectF(B.left + 8, B.top + 46, B.right - 8, B.top + 64), rd_.fMonoSmall.Get(), col::dim,
+                 DWRITE_TEXT_ALIGNMENT_CENTER);
+        const float gap = 6;
+        const float bw = (W(B) - 24 - gap * 2) / 3;
+        auto chip = [&](int id, float x, const wchar_t* label, bool on) {
+            return Button(id, D2D1::RectF(x, B.top + 66, x + bw, B.top + 88), label, col::cyan, on, !busy, dt);
+        };
+        if (chip(60, B.left + 8, L"All", healthFilter_ == 0)) healthFilter_ = 0;
+        if (chip(61, B.left + 8 + bw + gap, L"Attention", healthFilter_ == 1)) healthFilter_ = 1;
+        if (chip(62, B.left + 8 + (bw + gap) * 2, L"Passing", healthFilter_ == 2)) healthFilter_ = 2;
+
+        const float listTop = B.top + 96;
+        const float listBottom = B.bottom - 78;
+        const float rowH = 36;
+        const int visible = std::max(1, static_cast<int>((listBottom - listTop) / rowH));
+        if (healthScroll_ > std::max(0, static_cast<int>(rows.size()) - visible)) {
+            healthScroll_ = std::max(0, static_cast<int>(rows.size()) - visible);
+        }
+        for (int i = 0; i < visible; ++i) {
+            const int idx = healthScroll_ + i;
+            if (idx < 0 || idx >= static_cast<int>(rows.size())) break;
+            const auto& c = rows[static_cast<size_t>(idx)];
+            const float y = listTop + i * rowH;
+            const bool on = idx == healthSelected_;
+            const D2D1_RECT_F row = D2D1::RectF(B.left + 8, y, B.right - 8, y + rowH - 4);
+            if (Button(80 + i, row, L"", on ? col::cyan : col::muted, on, true, dt)) healthSelected_ = idx;
+            D2D1_COLOR_F mark = col::dim;
+            if (c.status == HealthStatus::Pass) mark = col::green;
+            else if (HealthNeedsAttention(c.status)) mark = col::amber;
+            else if (c.status == HealthStatus::Error || c.status == HealthStatus::Inaccessible) mark = col::red;
+            rd_.FillRound(D2D1::RectF(row.left + 6, y + 12, row.left + 16, y + 22), 5, mark);
+            rd_.Text(c.name, D2D1::RectF(row.left + 22, y + 2, row.right - 8, y + 18), rd_.fSmall.Get(), col::text);
+            rd_.Text(HealthStatusText(c.status) + std::wstring(L"  ·  ") + c.observed,
+                     D2D1::RectF(row.left + 22, y + 16, row.right - 8, y + 32), rd_.fMonoSmall.Get(), col::muted);
+        }
+        if (healthSelected_ >= 0 && healthSelected_ < static_cast<int>(rows.size())) {
+            const auto& c = rows[static_cast<size_t>(healthSelected_)];
+            rd_.Text(c.explanation, D2D1::RectF(B.left + 8, B.bottom - 76, B.right - 8, B.bottom - 44), rd_.fSmall.Get(),
+                     col::text);
+            const float cx = (B.left + B.right) / 2;
+            if (Button(70, D2D1::RectF(B.left + 8, B.bottom - 38, cx - 4, B.bottom - 6), L"Check again", col::cyan, false,
+                       !busy, dt))
+                StartHealthScan();
+            const bool canFix = !c.repair.empty() && HealthNeedsAttention(c.status);
+            if (Button(71, D2D1::RectF(cx + 4, B.bottom - 38, B.right - 8, B.bottom - 6),
+                       canFix ? L"Repair this" : L"No repair", canFix ? col::green : col::muted, false, canFix && !busy, dt) &&
+                canFix)
+                StartRepair(c.repair);
+        } else if (Button(70, D2D1::RectF(B.left + 8, B.bottom - 38, B.right - 8, B.bottom - 6), L"Run health check", col::cyan,
+                          true, !busy, dt)) {
+            StartHealthScan();
+        }
+        (void)dt;
+    }
+
     void RestartComputer() {
         HANDLE token = nullptr;
         if (OpenProcessToken(GetCurrentProcess(), TOKEN_ADJUST_PRIVILEGES | TOKEN_QUERY, &token)) {
@@ -2954,7 +3275,7 @@ private:
         const D2D1_RECT_F btnA = D2D1::RectF(cx - bw - 8, card.bottom - 46, cx - 8, card.bottom - 12);
         const D2D1_RECT_F btnB = D2D1::RectF(cx + 8, card.bottom - 46, cx + 8 + bw, card.bottom - 12);
         if (Button(2, btnA, L"Begin", col::cyan, true, canBegin, dt, canBegin, canBegin)) BeginWorkflow();
-        if (Button(4, btnB, L"Close", col::muted, false, true, dt)) PostMessageW(hwnd_, WM_CLOSE, 0, 0);
+        if (Button(3, btnB, L"Health", col::violet, false, true, dt)) OpenHealth();
     }
 
     void DrawResultBanner(const D2D1_RECT_F& B, float dt, Stage stage) {
@@ -3179,6 +3500,9 @@ private:
                 break;
             case Stage::Review:
                 DrawReview(B, dt);
+                break;
+            case Stage::Monitor:
+                DrawMonitor(B, dt);
                 break;
             case Stage::Failed:
             case Stage::Cancelled: {
@@ -3738,6 +4062,23 @@ private:
     int fidelity_ = 1;
     bool restartConfirm_ = false;
     bool running_ = true;
+    bool exitRequested_ = false;
+    bool trayOn_ = false;
+    NOTIFYICONDATAW nid_{};
+    UINT showMsg_ = 0;
+    MonitorPrefs prefs_{};
+    std::mutex healthM_;
+    std::vector<HealthCheck> checks_;
+    std::vector<std::wstring> noted_;
+    std::thread healthThread_;
+    std::atomic<bool> healthStop_{false};
+    std::atomic<bool> healthBusy_{false};
+    unsigned long long lastScanAt_ = 0;
+    unsigned long long nextScanAt_ = 0;
+    unsigned long long lastNotifyAt_ = 0;
+    int healthFilter_ = 0;
+    int healthScroll_ = 0;
+    int healthSelected_ = -1;
 
     double lastFrame_ = 0;
     float time_ = 0, introT_ = 0, revealT_ = 0, installT_ = 0, spinner_ = 0, progress_ = 0, yMax_ = 0.6f, activeX_ = -1;
