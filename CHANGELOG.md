@@ -1,6 +1,12 @@
 # Changelog
 
-Current release: **2.3.0**.
+Current release: **2.4.0**.
+
+## 2.4.0 — 2026-10-27
+
+- Full tune runs the selected steps together. It asks only before a graphics-driver install and before Afterburner.
+- Each step that is actually running, or waiting for that choice, gets its own pane. A step is not started unless a pane is free to show it.
+- Steps that share the clock, the power plan, the disk, or the graphics driver still wait. Opening one tool on its own still asks before that tool runs.
 
 ## 2.3.0 — 2026-10-26
 

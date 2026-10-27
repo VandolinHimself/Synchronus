@@ -1351,7 +1351,8 @@ enum class Stage {
     StoragePrompt, StorageApplying, StorageDone, StorageFailed,
     Review,
     Monitor,
-    Home
+    Home,
+    Fleet
 };
 
 constexpr int kStepCount = 10;
@@ -1411,6 +1412,8 @@ StepMeta Meta(Stage s) {
             return {10, L"Review", L"BIOS, then restart"};
         case Stage::Monitor:
             return {0, L"Health", L"live settings"};
+        case Stage::Fleet:
+            return {0, L"Full tune", L"selected steps, together"};
         case Stage::Home:
             return {0, L"Home", L"functions and live tweaks"};
         default:
@@ -2287,27 +2290,25 @@ private:
         MarkSetupComplete();
         chainAuto_ = false;
         hubReturn_ = false;
-        deferGpu_ = Want(kWantGpuClean) && (Want(kWantGpu) || Want(kWantAfterburner));
-        if (Want(kWantPrepare)) StartPrepare(false);
-        if (Want(kWantMeasure)) StartBenchmark(false);
-        if (Want(kWantHold)) StartInstall(false);
-        if (Want(kWantCpu)) StartPpm(false);
-        if (Want(kWantGpuClean)) BeginGpuLookup();
-        if (!deferGpu_) {
-            if (Want(kWantGpu)) StartGpu(false);
-            if (Want(kWantAfterburner)) StartAfterburner(false);
+        deferGpu_ = false;
+        fleet_ = true;
+        afterburnerPrompt_ = false;
+        afterburnerSkipped_ = false;
+        for (int i = 0; i < static_cast<int>(JobId::Count); ++i) {
+            if (JobBusy(static_cast<JobId>(i))) continue;
+            const int phase = jobs_[i].phase.load();
+            if (phase == static_cast<int>(JobPhase::Done) || phase == static_cast<int>(JobPhase::Failed) ||
+                phase == static_cast<int>(JobPhase::Cancelled))
+                jobs_[i].phase.store(static_cast<int>(JobPhase::Idle));
         }
-        if (Want(kWantMemory)) StartMemory(false);
-        if (Want(kWantStorage)) StartStorage(false);
-        if (Want(kWantMeasure)) stage_ = Stage::Running;
-        else if (Want(kWantPrepare)) stage_ = Stage::PrepareApplying;
-        else if (Want(kWantCpu)) stage_ = Stage::PpmApplying;
-        else if (Want(kWantGpuClean)) stage_ = Stage::GpuClean;
-        else if (Want(kWantGpu)) stage_ = Stage::GpuApplying;
-        else if (Want(kWantAfterburner)) stage_ = Stage::AfterburnerApplying;
-        else if (Want(kWantMemory)) stage_ = Stage::MemoryApplying;
-        else if (Want(kWantStorage)) stage_ = Stage::StorageApplying;
-        else OpenHome();
+        if (!JobBusy(JobId::GpuClean)) {
+            std::lock_guard<std::mutex> g(gpuM_);
+            gpuPhase_ = GpuDl::Idle;
+            gpuOffer_ = {};
+        }
+        driverSettled_ = !Want(kWantGpuClean);
+        gpuStop_.store(false);
+        stage_ = Stage::Fleet;
     }
 
     void ApplySavedChoices() {
@@ -2438,6 +2439,291 @@ private:
         if (show) stage_ = Stage::StorageApplying;
     }
 
+    bool PhaseIdle(JobId id) const {
+        return jobs_[static_cast<int>(id)].phase.load() == static_cast<int>(JobPhase::Idle);
+    }
+
+    GpuDl GpuPhase() const {
+        std::lock_guard<std::mutex> g(gpuM_);
+        return gpuPhase_;
+    }
+
+    bool VolumeBusy() const {
+        return JobBusy(JobId::Prepare) || JobBusy(JobId::Memory) || GpuPhase() == GpuDl::Installing;
+    }
+    bool PowerBusy() const { return JobBusy(JobId::Cpu) || JobBusy(JobId::Storage); }
+    bool TimerBusy() const { return JobBusy(JobId::Measure) || JobBusy(JobId::Hold); }
+    bool GpuResourceBusy() const {
+        return JobBusy(JobId::Gpu) || JobBusy(JobId::Afterburner) || GpuPhase() == GpuDl::Installing;
+    }
+
+    bool DriverSettled() const {
+        if (!Want(kWantGpuClean) || driverSettled_) return true;
+        return GpuPhase() == GpuDl::Done;
+    }
+
+    bool DriverNeedsChoice() const {
+        if (!Want(kWantGpuClean) || driverSettled_ || JobBusy(JobId::GpuClean)) return false;
+        const GpuDl phase = GpuPhase();
+        return phase == GpuDl::Offer || phase == GpuDl::Ready || phase == GpuDl::Manual || phase == GpuDl::Failed;
+    }
+
+    bool HoldReady() const {
+        if (!Want(kWantHold) || !PhaseIdle(JobId::Hold) || TimerBusy()) return false;
+        if (Want(kWantMeasure) && jobs_[static_cast<int>(JobId::Measure)].phase.load() != static_cast<int>(JobPhase::Done))
+            return false;
+        unsigned units = 0;
+        {
+            std::lock_guard<std::mutex> g(resultM_);
+            units = result_.winner;
+        }
+        if (!units) units = host_.pinnedResolution;
+        return units != 0;
+    }
+
+    bool JobSettled(JobId id) const {
+        if (id == JobId::GpuClean && DriverSettled()) return true;
+        if (id == JobId::Afterburner && afterburnerSkipped_) return true;
+        if (id == JobId::Hold && Want(kWantMeasure)) {
+            const int measure = jobs_[static_cast<int>(JobId::Measure)].phase.load();
+            if (measure == static_cast<int>(JobPhase::Failed) || measure == static_cast<int>(JobPhase::Cancelled))
+                return true;
+        }
+        if (id == JobId::Hold && !Want(kWantMeasure) && !JobBusy(JobId::Hold) && PhaseIdle(JobId::Hold)) {
+            unsigned units = 0;
+            {
+                std::lock_guard<std::mutex> g(resultM_);
+                units = result_.winner;
+            }
+            if (!units && !host_.pinnedResolution) return true;
+        }
+        const int phase = jobs_[static_cast<int>(id)].phase.load();
+        return phase == static_cast<int>(JobPhase::Done) || phase == static_cast<int>(JobPhase::Failed) ||
+               phase == static_cast<int>(JobPhase::Cancelled);
+    }
+
+    bool FleetComplete() const {
+        const JobId ids[] = {JobId::Prepare, JobId::Measure, JobId::Hold, JobId::Cpu, JobId::GpuClean,
+                             JobId::Gpu, JobId::Afterburner, JobId::Memory, JobId::Storage};
+        const int wants[] = {kWantPrepare, kWantMeasure, kWantHold, kWantCpu, kWantGpuClean,
+                             kWantGpu, kWantAfterburner, kWantMemory, kWantStorage};
+        for (int i = 0; i < kWantCount; ++i) {
+            if (!Want(wants[i])) continue;
+            if (!JobSettled(ids[i])) return false;
+        }
+        return !afterburnerPrompt_ && !DriverNeedsChoice();
+    }
+
+    int OccupiedSlots() const {
+        int n = 0;
+        for (int i = 0; i < static_cast<int>(JobId::Count); ++i) {
+            if (JobBusy(static_cast<JobId>(i))) ++n;
+        }
+        if (DriverNeedsChoice()) ++n;
+        if (afterburnerPrompt_ && !JobBusy(JobId::Afterburner)) ++n;
+        return n;
+    }
+
+    int FleetCapacity(float w, float h) const {
+        const float gap = 12.0f;
+        const float minW = 300.0f;
+        const float minH = 196.0f;
+        const int cols = std::max(1, static_cast<int>(std::floor((w + gap) / (minW + gap))));
+        const int rows = std::max(1, static_cast<int>(std::floor((h + gap) / (minH + gap))));
+        return std::min(4, cols) * std::min(3, rows);
+    }
+
+    bool StartNextSafe() {
+        if (Want(kWantPrepare) && PhaseIdle(JobId::Prepare) && !VolumeBusy()) {
+            StartPrepare(false);
+            return true;
+        }
+        if (Want(kWantMeasure) && PhaseIdle(JobId::Measure) && !TimerBusy()) {
+            StartBenchmark(false);
+            return true;
+        }
+        if (Want(kWantCpu) && PhaseIdle(JobId::Cpu) && !PowerBusy()) {
+            StartPpm(false);
+            return true;
+        }
+        if (Want(kWantMemory) && PhaseIdle(JobId::Memory) && !VolumeBusy()) {
+            StartMemory(false);
+            return true;
+        }
+        if (Want(kWantStorage) && PhaseIdle(JobId::Storage) && !PowerBusy()) {
+            StartStorage(false);
+            return true;
+        }
+        if (HoldReady()) {
+            StartInstall(false);
+            return true;
+        }
+        if (Want(kWantGpuClean) && !driverSettled_ && GpuPhase() == GpuDl::Idle && !JobBusy(JobId::GpuClean)) {
+            BeginGpuLookup();
+            return JobBusy(JobId::GpuClean);
+        }
+        if (Want(kWantGpu) && PhaseIdle(JobId::Gpu) && DriverSettled() && !GpuResourceBusy()) {
+            StartGpu(false);
+            return true;
+        }
+        return false;
+    }
+
+    bool ShouldOfferAfterburner() const {
+        if (!Want(kWantAfterburner) || afterburnerSkipped_ || afterburnerPrompt_) return false;
+        if (!PhaseIdle(JobId::Afterburner) || JobBusy(JobId::Afterburner)) return false;
+        if (!DriverSettled() || GpuResourceBusy()) return false;
+        if (Want(kWantGpu) && PhaseIdle(JobId::Gpu)) return false;
+        return true;
+    }
+
+    void PumpFleet(int capacity) {
+        if (!fleet_ || stage_.load() != Stage::Fleet) return;
+        if (capacity < 1) capacity = 1;
+        while (OccupiedSlots() < capacity) {
+            if (!StartNextSafe()) break;
+        }
+        if (ShouldOfferAfterburner() && OccupiedSlots() < capacity) afterburnerPrompt_ = true;
+        if (FleetComplete()) {
+            fleet_ = false;
+            afterburnerPrompt_ = false;
+            stage_ = Stage::Review;
+            state_.Phase(L"REVIEW", L"set BIOS, then restart");
+        }
+    }
+
+    void FleetSkipDriver() {
+        gpuStop_.store(true);
+        CancelJob(JobId::GpuClean);
+        {
+            std::lock_guard<std::mutex> g(gpuM_);
+            gpuPhase_ = GpuDl::Idle;
+        }
+        driverSettled_ = true;
+    }
+
+    void DrawFleet(const D2D1_RECT_F& B, float dt) {
+        struct Pane {
+            int kind;
+            JobId id;
+        };
+        Pane panes[9];
+        int n = 0;
+        auto push = [&](int kind, JobId id) {
+            if (n < 9) panes[n++] = Pane{kind, id};
+        };
+        for (int i = 0; i < static_cast<int>(JobId::Count); ++i) {
+            const auto id = static_cast<JobId>(i);
+            if (JobBusy(id)) push(0, id);
+        }
+        if (DriverNeedsChoice()) push(1, JobId::GpuClean);
+        if (afterburnerPrompt_ && !JobBusy(JobId::Afterburner)) push(2, JobId::Afterburner);
+        if (n == 0) {
+            rd_.Text(L"Starting the selected steps.", D2D1::RectF(B.left, B.top, B.right, B.top + 40), rd_.fPhase.Get(),
+                     col::cyan, DWRITE_TEXT_ALIGNMENT_CENTER);
+            return;
+        }
+
+        const float gap = 12.0f;
+        int cols = 1;
+        while (cols < n && (cols + 1) * 300.0f + cols * gap <= W(B)) ++cols;
+        const int rows = (n + cols - 1) / cols;
+        const float pw = (W(B) - gap * static_cast<float>(cols - 1)) / static_cast<float>(cols);
+        const float ph = (H(B) - gap * static_cast<float>(rows - 1)) / static_cast<float>(rows);
+        for (int i = 0; i < n; ++i) {
+            const float x = B.left + static_cast<float>(i % cols) * (pw + gap);
+            const float y = B.top + static_cast<float>(i / cols) * (ph + gap);
+            const D2D1_RECT_F pane = D2D1::RectF(x, y, x + pw, y + ph);
+            DrawFleetPane(pane, panes[i].kind, panes[i].id, dt, 300 + i * 4);
+        }
+        if (FleetComplete()) {
+            fleet_ = false;
+            afterburnerPrompt_ = false;
+            stage_ = Stage::Review;
+            state_.Phase(L"REVIEW", L"set BIOS, then restart");
+        }
+    }
+
+    void DrawFleetPane(const D2D1_RECT_F& pane, int kind, JobId id, float dt, int idBase) {
+        rd_.FillRound(pane, 14, Alpha(col::panel, 0.9f));
+        rd_.StrokeRound(pane, 14, Alpha(col::cyan, 0.28f), 1.2f);
+        const wchar_t* title = kind == 2 ? L"Afterburner" : JobLabel(id);
+        rd_.Text(title, D2D1::RectF(pane.left + 14, pane.top + 10, pane.right - 100, pane.top + 36), rd_.fPhase.Get(),
+                 col::cyan);
+        if (kind == 0 && JobBusy(id)) {
+            if (Button(idBase, D2D1::RectF(pane.right - 86, pane.top + 10, pane.right - 12, pane.top + 36), L"Stop",
+                       col::red, false, true, dt))
+                CancelJob(id);
+            Snapshot job;
+            jobs_[static_cast<int>(id)].feed.Snap(job);
+            const bool waiting = jobs_[static_cast<int>(id)].phase.load() == static_cast<int>(JobPhase::Waiting);
+            rd_.Text(waiting ? L"Waiting" : L"Running",
+                     D2D1::RectF(pane.left + 14, pane.top + 38, pane.right - 14, pane.top + 58), rd_.fSmall.Get(),
+                     waiting ? col::amber : col::text);
+            std::wstring detail = job.detail.empty() ? job.phase : job.detail;
+            if (detail.empty()) detail = job.narrateBody.empty() ? job.narrateTitle : job.narrateBody;
+            rd_.Text(detail, D2D1::RectF(pane.left + 14, pane.top + 60, pane.right - 14, pane.bottom - 28), rd_.fBody.Get(),
+                     col::muted);
+            if (job.progress > 0.001) {
+                const D2D1_RECT_F bar = D2D1::RectF(pane.left + 14, pane.bottom - 18, pane.right - 14, pane.bottom - 10);
+                rd_.FillRound(bar, 3, col::panel2);
+                const float fx = bar.left + W(bar) * static_cast<float>(std::min(1.0, job.progress));
+                if (fx > bar.left + 2) rd_.FillRound(D2D1::RectF(bar.left, bar.top, fx, bar.bottom), 3, col::cyan);
+            }
+            return;
+        }
+        if (kind == 1) {
+            GpuDriverOffer offer;
+            GpuDl phase;
+            {
+                std::lock_guard<std::mutex> g(gpuM_);
+                offer = gpuOffer_;
+                phase = gpuPhase_;
+            }
+            std::wstring headline = L"Choose whether to install the graphics driver.";
+            if (phase == GpuDl::Manual)
+                headline = offer.error.empty() ? L"No vendor package can be installed from here." : offer.error;
+            else if (phase == GpuDl::Failed)
+                headline = offer.error.empty() ? L"The driver step failed." : offer.error;
+            else if (!offer.gpuName.empty())
+                headline = offer.gpuName;
+            rd_.Text(headline, D2D1::RectF(pane.left + 14, pane.top + 40, pane.right - 14, pane.top + 88), rd_.fSmall.Get(),
+                     col::text);
+            std::wstring sub = offer.version.empty() ? L"Installs the graphics driver only." : offer.version;
+            rd_.Text(sub, D2D1::RectF(pane.left + 14, pane.top + 90, pane.right - 14, pane.bottom - 48), rd_.fBody.Get(),
+                     col::muted);
+            const D2D1_RECT_F yes = D2D1::RectF(pane.left + 14, pane.bottom - 40, pane.left + W(pane) * 0.62f, pane.bottom - 10);
+            const D2D1_RECT_F no = D2D1::RectF(yes.right + 8, pane.bottom - 40, pane.right - 12, pane.bottom - 10);
+            if (phase == GpuDl::Offer && offer.canDownload) {
+                if (Button(idBase, yes, L"Download driver", col::cyan, true, true, dt)) BeginGpuDownload();
+            } else if (phase == GpuDl::Ready) {
+                if (Button(idBase, yes, L"Install driver", col::green, true, true, dt)) BeginGpuInstall();
+            } else if (phase == GpuDl::Failed) {
+                if (Button(idBase, yes, L"Retry", col::cyan, true, true, dt)) {
+                    if (offer.fail == 2 && !offer.file.empty()) BeginGpuInstall();
+                    else if (offer.ok && offer.canDownload) BeginGpuDownload();
+                    else BeginGpuLookup();
+                }
+            } else if (phase == GpuDl::Manual) {
+                if (Button(idBase, yes, L"Continue", col::cyan, true, true, dt)) driverSettled_ = true;
+            }
+            if (Button(idBase + 1, no, L"Skip", col::muted, false, true, dt)) FleetSkipDriver();
+            return;
+        }
+        rd_.Text(L"Afterburner downloads, scans the GPU, and saves the curve. This takes about 30 minutes.",
+                 D2D1::RectF(pane.left + 14, pane.top + 44, pane.right - 14, pane.bottom - 52), rd_.fBody.Get(), col::muted);
+        const D2D1_RECT_F yes = D2D1::RectF(pane.left + 14, pane.bottom - 40, pane.left + W(pane) * 0.62f, pane.bottom - 10);
+        const D2D1_RECT_F no = D2D1::RectF(yes.right + 8, pane.bottom - 40, pane.right - 12, pane.bottom - 10);
+        if (Button(idBase, yes, L"Start Afterburner", col::violet, true, true, dt)) {
+            afterburnerPrompt_ = false;
+            StartAfterburner(false);
+        }
+        if (Button(idBase + 1, no, L"Skip", col::muted, false, true, dt)) {
+            afterburnerPrompt_ = false;
+            afterburnerSkipped_ = true;
+        }
+    }
+
     void ReleaseGpuFollowers() {
         if (!deferGpu_) return;
         deferGpu_ = false;
@@ -2477,7 +2763,32 @@ private:
             snap_.narrateBody = job.narrateBody;
             return;
         }
-        if (stage == Stage::Home) {
+        if (stage == Stage::Fleet) {
+            int wanted = 0;
+            int settled = 0;
+            const JobId ids[] = {JobId::Prepare, JobId::Measure, JobId::Hold, JobId::Cpu, JobId::GpuClean,
+                                 JobId::Gpu, JobId::Afterburner, JobId::Memory, JobId::Storage};
+            const int wants[] = {kWantPrepare, kWantMeasure, kWantHold, kWantCpu, kWantGpuClean,
+                                 kWantGpu, kWantAfterburner, kWantMemory, kWantStorage};
+            for (int i = 0; i < kWantCount; ++i) {
+                if (!Want(wants[i])) continue;
+                ++wanted;
+                if (JobSettled(ids[i])) ++settled;
+            }
+            std::wstring detail = JobBanner();
+            std::wstring finished;
+            for (int i = 0; i < static_cast<int>(JobId::Count); ++i) {
+                if (jobs_[i].phase.load() != static_cast<int>(JobPhase::Done)) continue;
+                if (!finished.empty()) finished += L", ";
+                finished += JobLabel(static_cast<JobId>(i));
+            }
+            if (!finished.empty()) {
+                if (!detail.empty()) detail += L"    ";
+                detail += L"Finished: " + finished;
+            }
+            state_.Phase(L"FULL TUNE", detail.empty() ? L"running the selected steps" : detail);
+            state_.Progress(wanted ? static_cast<double>(settled) / static_cast<double>(wanted) : 0, 0, 0);
+        } else if (stage == Stage::Home) {
             const std::wstring banner = JobBanner();
             state_.Phase(L"HOME", banner.empty() ? L"choose a function" : banner);
         } else if (stage == Stage::Monitor) {
@@ -2489,7 +2800,7 @@ private:
         state_.Snap(shell);
         snap_.phase = shell.phase;
         snap_.detail = shell.detail;
-        snap_.progress = 0;
+        snap_.progress = stage == Stage::Fleet ? shell.progress : 0;
         snap_.elapsed = 0;
         snap_.remaining = 0;
     }
@@ -2582,7 +2893,7 @@ private:
         time_ += dt;
 
         PollJobs();
-        const Stage stage = stage_.load();
+        Stage stage = stage_.load();
         PublishSnap(stage);
         if (revealT_ > 0) revealT_ = std::min(1.0f, revealT_ + dt * 0.8f);
         if (installT_ > 0) installT_ = std::min(1.0f, installT_ + dt * 1.2f);
@@ -2601,6 +2912,11 @@ private:
         const D2D1_RECT_F bar = D2D1::RectF(pad, header.bottom + 8, w - pad, header.bottom + 14);
         const D2D1_RECT_F footer = D2D1::RectF(pad, h - pad - 28, w - pad, h - pad);
         const D2D1_RECT_F body = D2D1::RectF(pad, bar.bottom + 14, w - pad, footer.top - 10);
+        if (stage == Stage::Fleet) {
+            PumpFleet(FleetCapacity(W(body), H(body)));
+            stage = stage_.load();
+            PublishSnap(stage);
+        }
 
         if (stage != Stage::Welcome && snap_.lat.size() == static_cast<size_t>(kLat) * kLat &&
             snap_.col.size() == static_cast<size_t>(kLat)) {
@@ -2611,6 +2927,9 @@ private:
         DrawBackground(w, h);
         if (stage == Stage::Welcome) {
             DrawWelcome(D2D1::RectF(pad, pad, w - pad, footer.top - 10), dt);
+        } else if (stage == Stage::Fleet) {
+            DrawHeader(header, bar, stage, dt);
+            DrawFleet(body, dt);
         } else if (stage == Stage::Home || stage == Stage::Monitor) {
             DrawHeader(header, bar, stage, dt);
             if (stage == Stage::Home) DrawHome(body, dt);
@@ -2732,7 +3051,7 @@ private:
                                                   (stage == Stage::Running ? static_cast<float>(snap_.progress) : 1.0f)) /
                                                      static_cast<float>(kStepCount)
                                                : 0.0f;
-        const bool reportProgress = stage == Stage::Running || (liveJob && snap_.progress > 0);
+        const bool reportProgress = stage == Stage::Running || stage == Stage::Fleet || (liveJob && snap_.progress > 0);
         progress_ = Approach(progress_, reportProgress ? static_cast<float>(snap_.progress) : stepFrac, 0.016f, 6.0f);
         rd_.FillRound(bar, 3, col::panel2);
         const float fx = bar.left + W(bar) * Clamp01(progress_);
@@ -3931,7 +4250,7 @@ private:
         const wchar_t* labels[] = {L"Full tune", L"Health", L"Measure timing", L"CPU power", L"GPU driver",
                                    L"GPU settings", L"Afterburner", L"Memory", L"Storage", L"Restart notes"};
         const wchar_t* blurbs[] = {
-            L"Starts every selected step together. Each one keeps running if you leave its screen. Steps that would clash wait for each other.",
+            L"Runs the selected steps together, one pane for each one on screen. It asks only before a driver install or Afterburner.",
             L"Opens the health screen. It reads the live settings and lists anything that has drifted. Nothing changes until you choose a repair.",
             L"Times Sleep(1) across timer resolutions and saves a scan. The heatmap on this screen uses the newest of those scans.",
             L"Writes the processor power plan. Core parking and throttling are turned off, and the plan asks the CPU to stay at a high, steady state.",
@@ -3961,7 +4280,7 @@ private:
             NoteTip(cell, labels[i], blurbs[i]);
             if (!Button(200 + i, cell, labels[i], col::cyan, i == 0, true, dt, false, false, rd_.fHomeBtn.Get())) continue;
             if (i == 0) {
-                stage_ = Stage::Welcome;
+                stage_ = fleet_ ? Stage::Fleet : Stage::Welcome;
             } else if (i == 1) {
                 OpenHealth();
             } else if (i == 2) {
@@ -4185,7 +4504,7 @@ private:
         rd_.Text(company, D2D1::RectF(x0, y, x0 + nameW + 8, y + 22), rd_.fSub.Get(), col::cyan,
                  DWRITE_TEXT_ALIGNMENT_LEADING, DWRITE_PARAGRAPH_ALIGNMENT_CENTER);
         y += 36;
-        rd_.Text(L"Timer resolution, CPU power, GPU, memory, and storage. Low-level settings are tuned to harden the machine for a more responsive, lower-latency configuration, without unneeded versatility or fluff. Perfect for gamers and HPC. Uncheck any step you want to skip. Begin starts the selected steps together, and each one keeps running if you open another.",
+        rd_.Text(L"Timer resolution, CPU power, GPU, memory, and storage. Low-level settings are tuned to harden the machine for a more responsive, lower-latency configuration, without unneeded versatility or fluff. Perfect for gamers and HPC. Uncheck any step you want to skip. Begin runs the selected steps together and asks only before a driver install or Afterburner.",
                  D2D1::RectF(card.left + 48, y, card.right - 48, y + 108), rd_.fBody.Get(), col::muted,
                  DWRITE_TEXT_ALIGNMENT_CENTER);
         y += 116;
@@ -5081,6 +5400,10 @@ private:
     std::mutex timerMu_, powerMu_, gpuMu_, volumeMu_;
     bool chainAuto_ = false;
     bool deferGpu_ = false;
+    bool fleet_ = false;
+    bool driverSettled_ = false;
+    bool afterburnerSkipped_ = false;
+    bool afterburnerPrompt_ = false;
     std::atomic<bool> replayGpu_{false};
     std::atomic<bool> afterburnerStale_{false};
     int repairJob_ = -1;
@@ -5098,12 +5421,12 @@ private:
     std::atomic<bool> updateBusy_{false};
     std::atomic<bool> updateStop_{false};
     std::atomic<bool> relaunch_{false};
-    std::mutex resultM_;
+    mutable std::mutex resultM_;
     ResultView result_;
     std::mutex probeM_;
     CpuProbeView probe_{};
     bool probeReady_ = false;
-    std::mutex gpuM_;
+    mutable std::mutex gpuM_;
     GpuProbeView gpu_{};
     bool gpuReady_ = false;
     GpuDl gpuPhase_ = GpuDl::Idle;
