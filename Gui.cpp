@@ -1466,6 +1466,29 @@ enum {
     kWantCount
 };
 
+enum class JobId : int {
+    Prepare = 0,
+    Measure,
+    Hold,
+    Cpu,
+    GpuClean,
+    Gpu,
+    Afterburner,
+    Memory,
+    Storage,
+    Count
+};
+
+enum class JobPhase : int { Idle = 0, Waiting, Running, Done, Failed, Cancelled };
+
+struct JobSlot {
+    std::thread thread;
+    SharedState feed;
+    std::atomic<int> phase{static_cast<int>(JobPhase::Idle)};
+    std::atomic<bool> cancel{false};
+    int code = 0;
+};
+
 struct Particle {
     float x, y, vx, vy, life, maxLife, size;
     D2D1_COLOR_F c;
@@ -1539,6 +1562,7 @@ public:
 
         state_.System(host_.system());
         lastFrame_ = state_.Now();
+        chainAuto_ = host_.autoInstall;
         if (host_.autoInstall && host_.pinnedResolution) {
             {
                 std::lock_guard<std::mutex> g(resultM_);
@@ -1588,10 +1612,11 @@ public:
         gpuStop_ = true;
         updateStop_.store(true);
         state_.Cancel();
+        CancelAllJobs();
         if (updateThread_.joinable()) updateThread_.join();
         healthStop_.store(true);
         if (healthThread_.joinable()) healthThread_.join();
-        JoinWorker();
+        JoinJobs();
         if (serviceStopped_ && !installedThisSession_ && !relaunch_.load()) host_.restartService();
         CoUninitialize();
         return relaunch_.load() ? 2 : 0;
@@ -1713,9 +1738,193 @@ private:
         return DefWindowProcW(hwnd_, msg, wp, lp);
     }
 
-    // ---- worker control ----
-    void JoinWorker() {
-        if (worker_.joinable()) worker_.join();
+    // ---- one worker per tool ----
+    static bool JobBusyPhase(int phase) {
+        return phase == static_cast<int>(JobPhase::Waiting) || phase == static_cast<int>(JobPhase::Running);
+    }
+
+    bool JobBusy(JobId id) const {
+        if (id == JobId::Count) return false;
+        return JobBusyPhase(jobs_[static_cast<int>(id)].phase.load());
+    }
+
+    const wchar_t* JobTitle(JobId id) const {
+        switch (id) {
+            case JobId::Prepare: return L"PREPARE";
+            case JobId::Measure: return L"MEASURE";
+            case JobId::Hold: return L"INSTALLING";
+            case JobId::Cpu: return L"CPU TUNE";
+            case JobId::GpuClean: return L"GPU CLEAN";
+            case JobId::Gpu: return L"GPU CONFIG";
+            case JobId::Afterburner: return L"AFTERBURNER";
+            case JobId::Memory: return L"MEMORY";
+            case JobId::Storage: return L"STORAGE";
+            default: return L"SYNCHRONUS";
+        }
+    }
+
+    const wchar_t* JobLabel(JobId id) const {
+        switch (id) {
+            case JobId::Prepare: return L"Restore point";
+            case JobId::Measure: return L"Measure";
+            case JobId::Hold: return L"Timer service";
+            case JobId::Cpu: return L"CPU power";
+            case JobId::GpuClean: return L"GPU driver";
+            case JobId::Gpu: return L"GPU settings";
+            case JobId::Afterburner: return L"Afterburner";
+            case JobId::Memory: return L"Memory";
+            case JobId::Storage: return L"Storage";
+            default: return L"";
+        }
+    }
+
+    JobId StageJob(Stage stage) const {
+        switch (stage) {
+            case Stage::PreparePrompt:
+            case Stage::PrepareApplying:
+            case Stage::PrepareDone:
+            case Stage::PrepareFailed: return JobId::Prepare;
+            case Stage::Running:
+            case Stage::Result:
+            case Stage::Failed:
+            case Stage::Cancelled: return JobId::Measure;
+            case Stage::Installing:
+            case Stage::Installed:
+            case Stage::InstallFailed: return JobId::Hold;
+            case Stage::PpmPrompt:
+            case Stage::PpmApplying:
+            case Stage::PpmDone:
+            case Stage::PpmFailed: return JobId::Cpu;
+            case Stage::GpuClean: return JobId::GpuClean;
+            case Stage::GpuPrompt:
+            case Stage::GpuApplying:
+            case Stage::GpuDone:
+            case Stage::GpuFailed: return JobId::Gpu;
+            case Stage::AfterburnerPrompt:
+            case Stage::AfterburnerApplying:
+            case Stage::AfterburnerDone:
+            case Stage::AfterburnerFailed: return JobId::Afterburner;
+            case Stage::MemoryPrompt:
+            case Stage::MemoryApplying:
+            case Stage::MemoryDone:
+            case Stage::MemoryFailed: return JobId::Memory;
+            case Stage::StoragePrompt:
+            case Stage::StorageApplying:
+            case Stage::StorageDone:
+            case Stage::StorageFailed: return JobId::Storage;
+            default: return JobId::Count;
+        }
+    }
+
+    void CancelJob(JobId id) {
+        if (id == JobId::Count) return;
+        auto& job = jobs_[static_cast<int>(id)];
+        job.cancel.store(true);
+        job.feed.Cancel();
+        if (id == JobId::GpuClean) gpuStop_.store(true);
+    }
+
+    void CancelAllJobs() {
+        for (int i = 0; i < static_cast<int>(JobId::Count); ++i) CancelJob(static_cast<JobId>(i));
+    }
+
+    void JoinJobs() {
+        for (auto& job : jobs_) {
+            if (job.thread.joinable()) job.thread.join();
+        }
+    }
+
+    struct HeldLock {
+        std::mutex* m = nullptr;
+        ~HeldLock() {
+            if (m) m->unlock();
+        }
+    };
+
+    bool AcquireGate(JobId self, std::mutex& gate, const wchar_t* why, SharedState& feed, HeldLock& held) {
+        auto& slot = jobs_[static_cast<int>(self)];
+        if (!gate.try_lock()) {
+            feed.Phase(JobTitle(self), std::wstring(L"waiting, ") + why);
+            slot.phase.store(static_cast<int>(JobPhase::Waiting));
+            while (!gate.try_lock()) {
+                if (slot.cancel.load() || feed.Cancelled()) return false;
+                Sleep(40);
+            }
+        }
+        if (slot.cancel.load() || feed.Cancelled()) {
+            gate.unlock();
+            return false;
+        }
+        slot.phase.store(static_cast<int>(JobPhase::Running));
+        held.m = &gate;
+        return true;
+    }
+
+    void LaunchJob(JobId id, std::function<int(SharedState&)> work) {
+        if (JobBusy(id)) return;
+        auto& job = jobs_[static_cast<int>(id)];
+        if (job.thread.joinable()) job.thread.join();
+        job.cancel.store(false);
+        job.code = 0;
+        job.feed.Reset();
+        if (host_.system) job.feed.System(host_.system());
+        job.phase.store(static_cast<int>(JobPhase::Running));
+        job.thread = std::thread([this, id, work = std::move(work)] {
+            auto& slot = jobs_[static_cast<int>(id)];
+            int rc = 1;
+            try {
+                rc = work(slot.feed);
+            } catch (...) {
+                rc = 1;
+            }
+            slot.code = rc;
+            if (rc == 0)
+                slot.phase.store(static_cast<int>(JobPhase::Done));
+            else if (slot.cancel.load() || slot.feed.Cancelled())
+                slot.phase.store(static_cast<int>(JobPhase::Cancelled));
+            else
+                slot.phase.store(static_cast<int>(JobPhase::Failed));
+        });
+    }
+
+    std::wstring JobBanner() {
+        std::wstring run, wait, bad;
+        auto add = [](std::wstring& dest, const wchar_t* name) {
+            if (!dest.empty()) dest += L", ";
+            dest += name;
+        };
+        for (int i = 0; i < static_cast<int>(JobId::Count); ++i) {
+            const auto id = static_cast<JobId>(i);
+            const int phase = jobs_[i].phase.load();
+            if (phase == static_cast<int>(JobPhase::Running)) add(run, JobLabel(id));
+            else if (phase == static_cast<int>(JobPhase::Waiting)) add(wait, JobLabel(id));
+            else if (phase == static_cast<int>(JobPhase::Failed) || phase == static_cast<int>(JobPhase::Cancelled))
+                add(bad, JobLabel(id));
+        }
+        if (deferGpu_) {
+            GpuDl phase;
+            {
+                std::lock_guard<std::mutex> g(gpuM_);
+                phase = gpuPhase_;
+            }
+            if (phase == GpuDl::Offer || phase == GpuDl::Ready) add(wait, L"GPU driver choice");
+        }
+        std::wstring out;
+        if (!run.empty()) out = L"Running: " + run;
+        if (!wait.empty()) {
+            if (!out.empty()) out += L"    ";
+            out += L"Waiting: " + wait;
+        }
+        if (!bad.empty()) {
+            if (!out.empty()) out += L"    ";
+            out += L"Stopped: " + bad;
+        }
+        return out;
+    }
+
+    void OpenTool(JobId id, Stage prompt, Stage applying) {
+        hubReturn_ = true;
+        stage_ = JobBusy(id) ? applying : prompt;
     }
 
     void StartUpdateCheck() {
@@ -1836,84 +2045,97 @@ private:
         if (answer == IDYES) StartApply(std::move(offer));
     }
 
-    void StartBenchmark() {
-        JoinWorker();
-        state_.Reset();
-        {
-            std::lock_guard<std::mutex> g(resultM_);
-            result_ = ResultView{};
+    void StartBenchmark(bool show = true) {
+        if (!JobBusy(JobId::Measure)) {
+            const int fidelity = fidelity_;
+            revealT_ = 0;
+            installT_ = 0;
+            particles_.clear();
+            LaunchJob(JobId::Measure, [this, fidelity](SharedState& feed) {
+                HeldLock clock;
+                if (!AcquireGate(JobId::Measure, timerMu_, L"the timer service install is using the clock", feed, clock))
+                    return 1;
+                {
+                    std::lock_guard<std::mutex> g(resultM_);
+                    result_ = ResultView{};
+                }
+                ResultView r = host_.benchmark(feed, fidelity);
+                {
+                    std::lock_guard<std::mutex> g(resultM_);
+                    result_ = r;
+                }
+                if (r.stoppedService && !JobBusy(JobId::Hold)) {
+                    if (host_.restartService) host_.restartService();
+                    serviceStopped_ = false;
+                } else if (r.stoppedService) {
+                    serviceStopped_ = true;
+                }
+                if (feed.Cancelled()) return 1;
+                if (r.winner == 0) {
+                    feed.Phase(L"FAILED", r.failure.empty() ? L"the measurement did not produce a resolution" : r.failure);
+                    return 1;
+                }
+                feed.Progress(1.0, 0, 0);
+                feed.Phase(L"RESULT", Fmt(L"%.4f ms selected after verification", Ms(r.winner)));
+                return 0;
+            });
         }
-        {
-            std::lock_guard<std::mutex> g(probeM_);
-            probe_ = CpuProbeView{};
-            probeReady_ = false;
-        }
-        {
-            std::lock_guard<std::mutex> g(gpuM_);
-            gpu_ = GpuProbeView{};
-            gpuReady_ = false;
-        }
-        gpuSkipped_ = false;
-        stage_ = Stage::Running;
-        revealT_ = 0;
-        installT_ = 0;
-        particles_.clear();
-        worker_ = std::thread([this] {
-            ResultView r = host_.benchmark(state_, fidelity_);
-            {
-                std::lock_guard<std::mutex> g(resultM_);
-                result_ = r;
-            }
-            if (r.stoppedService) serviceStopped_ = true;
-            if (state_.Cancelled()) {
-                stage_ = Stage::Cancelled;
-                return;
-            }
-            if (r.winner == 0) {
-                state_.Phase(L"FAILED", r.failure);
-                stage_ = Stage::Failed;
-                return;
-            }
-            state_.Progress(1.0, 0, 0);
-            state_.Phase(L"RESULT", Fmt(L"%.4f ms selected after verification", Ms(r.winner)));
-            stage_ = Stage::Result;
-            if (host_.autoInstall) InstallNow();
-        });
+        if (show) stage_ = Stage::Running;
     }
 
-    void InstallNow() {
-        unsigned units = 0;
-        {
-            std::lock_guard<std::mutex> g(resultM_);
-            units = result_.winner;
+    void StartInstall(bool show = true, unsigned unitsOverride = 0) {
+        if (!JobBusy(JobId::Hold)) {
+            LaunchJob(JobId::Hold, [this, unitsOverride](SharedState& feed) {
+                auto& slot = jobs_[static_cast<int>(JobId::Hold)];
+                unsigned units = unitsOverride;
+                if (!units) {
+                    while (JobBusy(JobId::Measure)) {
+                        if (slot.cancel.load() || feed.Cancelled()) return 1;
+                        feed.Phase(L"INSTALLING", L"waiting for the timer measurement to finish");
+                        slot.phase.store(static_cast<int>(JobPhase::Waiting));
+                        Sleep(40);
+                    }
+                    slot.phase.store(static_cast<int>(JobPhase::Running));
+                    {
+                        std::lock_guard<std::mutex> g(resultM_);
+                        units = result_.winner;
+                    }
+                    if (!units) units = host_.pinnedResolution;
+                }
+                if (!units) {
+                    feed.Phase(L"INSTALL FAILED", L"measure a timer resolution first");
+                    return 1;
+                }
+                HeldLock clock;
+                if (!AcquireGate(JobId::Hold, timerMu_, L"the timer measurement is using the clock", feed, clock))
+                    return 1;
+                if (!unitsOverride) {
+                    std::lock_guard<std::mutex> g(resultM_);
+                    if (result_.winner) units = result_.winner;
+                }
+                feed.Phase(L"INSTALLING", L"copying the executable, writing the registry, starting the service");
+                const int rc = host_.install ? host_.install(units, feed) : 1;
+                if (rc == 2) {
+                    PostMessageW(hwnd_, WM_CLOSE, 0, 0);
+                    return 0;
+                }
+                if (host_.system) feed.System(host_.system());
+                if (rc == 0) {
+                    installedThisSession_ = true;
+                    feed.Phase(L"INSTALLED", Fmt(L"the service holds %.4f ms now and at every boot", Ms(units)));
+                    if (host_.probeCpu) {
+                        CpuProbeView p = host_.probeCpu();
+                        std::lock_guard<std::mutex> g(probeM_);
+                        probe_ = p;
+                        probeReady_ = true;
+                    }
+                    return 0;
+                }
+                feed.Phase(L"INSTALL FAILED", L"see the log for details");
+                return 1;
+            });
         }
-        stage_ = Stage::Installing;
-        state_.Phase(L"INSTALLING", L"copying the executable, writing the registry, starting the service");
-        const int rc = host_.install(units, state_);
-        if (rc == 2) {
-            PostMessageW(hwnd_, WM_CLOSE, 0, 0);
-            return;
-        }
-        state_.System(host_.system());
-        if (rc == 0) {
-            installedThisSession_ = true;
-            state_.Phase(L"INSTALLED", Fmt(L"the service holds %.4f ms now and at every boot", Ms(units)));
-            if (host_.probeCpu) {
-                CpuProbeView p = host_.probeCpu();
-                std::lock_guard<std::mutex> g(probeM_);
-                probe_ = p;
-                probeReady_ = true;
-            }
-            stage_ = Stage::Installed;
-        } else {
-            state_.Phase(L"INSTALL FAILED", L"see the log for details");
-            stage_ = Stage::InstallFailed;
-        }
-    }
-
-    void StartInstall() {
-        JoinWorker();
-        worker_ = std::thread([this] { InstallNow(); });
+        if (show) stage_ = Stage::Installing;
     }
 
     CpuProbeView ProbeCopy() {
@@ -1948,11 +2170,6 @@ private:
     }
 
     void StartAtOrAfter(int index) {
-        if (hubReturn_) {
-            hubReturn_ = false;
-            OpenHome();
-            return;
-        }
         for (int i = index; i < kWantCount; ++i) {
             if (!want_[i]) continue;
             if (host_.autoInstall && i == kWantGpuClean) continue;
@@ -2068,8 +2285,29 @@ private:
         choices.storage = Want(kWantStorage);
         SaveStepChoices(choices);
         MarkSetupComplete();
+        chainAuto_ = false;
         hubReturn_ = false;
-        StartAtOrAfter(kWantPrepare);
+        deferGpu_ = Want(kWantGpuClean) && (Want(kWantGpu) || Want(kWantAfterburner));
+        if (Want(kWantPrepare)) StartPrepare(false);
+        if (Want(kWantMeasure)) StartBenchmark(false);
+        if (Want(kWantHold)) StartInstall(false);
+        if (Want(kWantCpu)) StartPpm(false);
+        if (Want(kWantGpuClean)) BeginGpuLookup();
+        if (!deferGpu_) {
+            if (Want(kWantGpu)) StartGpu(false);
+            if (Want(kWantAfterburner)) StartAfterburner(false);
+        }
+        if (Want(kWantMemory)) StartMemory(false);
+        if (Want(kWantStorage)) StartStorage(false);
+        if (Want(kWantMeasure)) stage_ = Stage::Running;
+        else if (Want(kWantPrepare)) stage_ = Stage::PrepareApplying;
+        else if (Want(kWantCpu)) stage_ = Stage::PpmApplying;
+        else if (Want(kWantGpuClean)) stage_ = Stage::GpuClean;
+        else if (Want(kWantGpu)) stage_ = Stage::GpuApplying;
+        else if (Want(kWantAfterburner)) stage_ = Stage::AfterburnerApplying;
+        else if (Want(kWantMemory)) stage_ = Stage::MemoryApplying;
+        else if (Want(kWantStorage)) stage_ = Stage::StorageApplying;
+        else OpenHome();
     }
 
     void ApplySavedChoices() {
@@ -2104,80 +2342,231 @@ private:
         stage_ = next;
     }
 
-    void StartPpm() {
-        JoinWorker();
-        stage_ = Stage::PpmApplying;
-        worker_ = std::thread([this] {
-            state_.Phase(L"PPM", L"writing power-plan settings");
-            const int rc = host_.applyPpm(state_);
-            if (rc == 0) {
-                state_.Phase(L"PPM APPLIED", L"every processor power setting written");
-                stage_ = Stage::PpmDone;
-            } else {
-                state_.Phase(L"PPM FAILED", L"see the log for details");
-                stage_ = Stage::PpmFailed;
+    void StartPpm(bool show = true) {
+        if (!JobBusy(JobId::Cpu)) {
+            LaunchJob(JobId::Cpu, [this](SharedState& feed) {
+                HeldLock power;
+                if (!AcquireGate(JobId::Cpu, powerMu_, L"storage settings are writing the power plan", feed, power))
+                    return 1;
+                feed.Phase(L"CPU TUNE", L"writing power-plan settings");
+                const int rc = host_.applyPpm ? host_.applyPpm(feed) : 1;
+                feed.Phase(rc == 0 ? L"PPM APPLIED" : L"PPM FAILED",
+                           rc == 0 ? L"every processor power setting written" : L"see the log for details");
+                return rc;
+            });
+        }
+        if (show) stage_ = Stage::PpmApplying;
+    }
+
+    void StartGpu(bool show = true) {
+        if (!JobBusy(JobId::Gpu)) {
+            gpuSkipped_ = false;
+            LaunchJob(JobId::Gpu, [this](SharedState& feed) {
+                HeldLock gpu;
+                if (!AcquireGate(JobId::Gpu, gpuMu_, L"the driver install or Afterburner is using the graphics driver", feed, gpu))
+                    return 1;
+                feed.Phase(L"GPU CONFIG", L"writing driver / Windows graphics settings");
+                const int rc = host_.applyGpu ? host_.applyGpu(feed) : 1;
+                feed.Phase(L"GPU CONFIG", rc == 0 ? L"HAGS, overlays, NVIDIA/AMD profile" : L"see the log for details");
+                return rc;
+            });
+        }
+        if (show) stage_ = Stage::GpuApplying;
+    }
+
+    void StartAfterburner(bool show = true) {
+        if (!JobBusy(JobId::Afterburner)) {
+            afterburnerStale_.store(false);
+            LaunchJob(JobId::Afterburner, [this](SharedState& feed) {
+                HeldLock gpu;
+                if (!AcquireGate(JobId::Afterburner, gpuMu_, L"the driver install or GPU settings are using the graphics driver", feed, gpu))
+                    return 1;
+                feed.Phase(L"AFTERBURNER", L"installing Afterburner and RivaTuner");
+                const int rc = host_.applyAfterburner ? host_.applyAfterburner(feed) : 1;
+                feed.Phase(L"AFTERBURNER", rc == 0 ? L"overclock applies at every logon" : L"see the log for details");
+                return rc;
+            });
+        }
+        if (show) stage_ = Stage::AfterburnerApplying;
+    }
+
+    void StartPrepare(bool show = true) {
+        if (!JobBusy(JobId::Prepare)) {
+            LaunchJob(JobId::Prepare, [this](SharedState& feed) {
+                HeldLock volume;
+                if (!AcquireGate(JobId::Prepare, volumeMu_, L"a driver install is using the disk", feed, volume))
+                    return 1;
+                feed.Phase(L"PREPARE", L"creating a System Restore point");
+                const int rc = host_.applyPrepare ? host_.applyPrepare(feed) : 1;
+                feed.Phase(rc == 0 ? L"PREPARE" : L"PREPARE FAILED",
+                           rc == 0 ? L"restore point created" : L"see the log for details");
+                return rc;
+            });
+        }
+        if (show) stage_ = Stage::PrepareApplying;
+    }
+
+    void StartMemory(bool show = true) {
+        if (!JobBusy(JobId::Memory)) {
+            LaunchJob(JobId::Memory, [this](SharedState& feed) {
+                HeldLock volume;
+                if (!AcquireGate(JobId::Memory, volumeMu_, L"a restore point or driver install is using the disk", feed, volume))
+                    return 1;
+                feed.Phase(L"MEMORY", L"pagefile and memory compression");
+                const int rc = host_.applyMemory ? host_.applyMemory(feed) : 1;
+                feed.Phase(rc == 0 ? L"MEMORY" : L"MEMORY FAILED",
+                           rc == 0 ? L"pagefile and compression updated" : L"see the log for details");
+                return rc;
+            });
+        }
+        if (show) stage_ = Stage::MemoryApplying;
+    }
+
+    void StartStorage(bool show = true) {
+        if (!JobBusy(JobId::Storage)) {
+            LaunchJob(JobId::Storage, [this](SharedState& feed) {
+                HeldLock power;
+                if (!AcquireGate(JobId::Storage, powerMu_, L"CPU power settings are writing the power plan", feed, power))
+                    return 1;
+                feed.Phase(L"STORAGE", L"SSD, PCIe, USB, TRIM");
+                const int rc = host_.applyStorage ? host_.applyStorage(feed) : 1;
+                feed.Phase(rc == 0 ? L"STORAGE" : L"STORAGE FAILED",
+                           rc == 0 ? L"storage settings written" : L"see the log for details");
+                return rc;
+            });
+        }
+        if (show) stage_ = Stage::StorageApplying;
+    }
+
+    void ReleaseGpuFollowers() {
+        if (!deferGpu_) return;
+        deferGpu_ = false;
+        if (Want(kWantGpu)) StartGpu(false);
+        if (Want(kWantAfterburner)) StartAfterburner(false);
+    }
+
+    void PollGpuFollowers() {
+        if (!deferGpu_) return;
+        GpuDl phase;
+        {
+            std::lock_guard<std::mutex> g(gpuM_);
+            phase = gpuPhase_;
+        }
+        if (JobBusy(JobId::GpuClean)) return;
+        if (phase == GpuDl::Looking || phase == GpuDl::Downloading || phase == GpuDl::Installing ||
+            phase == GpuDl::Offer || phase == GpuDl::Ready)
+            return;
+        ReleaseGpuFollowers();
+    }
+
+    void PublishSnap(Stage stage) {
+        const JobId focus = StageJob(stage);
+        jobs_[static_cast<int>(JobId::Measure)].feed.Snap(snap_);
+        if (focus == JobId::Measure) return;
+        if (focus != JobId::Count) {
+            Snapshot job;
+            jobs_[static_cast<int>(focus)].feed.Snap(job);
+            snap_.phase = job.phase;
+            snap_.detail = job.detail;
+            snap_.progress = job.progress;
+            snap_.elapsed = job.elapsed;
+            snap_.remaining = job.remaining;
+            snap_.log = std::move(job.log);
+            snap_.ppm = std::move(job.ppm);
+            snap_.narrateTitle = job.narrateTitle;
+            snap_.narrateBody = job.narrateBody;
+            return;
+        }
+        if (stage == Stage::Home) {
+            const std::wstring banner = JobBanner();
+            state_.Phase(L"HOME", banner.empty() ? L"choose a function" : banner);
+        } else if (stage == Stage::Monitor) {
+            state_.Phase(L"HEALTH", L"read-only check of applied settings");
+        } else if (stage == Stage::Review) {
+            state_.Phase(L"REVIEW", L"set BIOS, then restart");
+        }
+        Snapshot shell;
+        state_.Snap(shell);
+        snap_.phase = shell.phase;
+        snap_.detail = shell.detail;
+        snap_.progress = 0;
+        snap_.elapsed = 0;
+        snap_.remaining = 0;
+    }
+
+    void AdvanceChain() {
+        if (!chainAuto_) return;
+        for (int i = 0; i < static_cast<int>(JobId::Count); ++i) {
+            const int phase = jobs_[i].phase.load();
+            const int prev = chainPhase_[i];
+            chainPhase_[i] = phase;
+            if (prev == phase || phase != static_cast<int>(JobPhase::Done)) continue;
+            const auto id = static_cast<JobId>(i);
+            if (id == JobId::Prepare) StartAtOrAfter(kWantMeasure);
+            else if (id == JobId::Measure && !JobBusy(JobId::Hold) &&
+                     jobs_[static_cast<int>(JobId::Hold)].phase.load() != static_cast<int>(JobPhase::Done))
+                StartInstall(true);
+            else if (id == JobId::Hold) StartAtOrAfter(kWantCpu);
+            else if (id == JobId::Cpu) StartAtOrAfter(kWantGpuClean);
+            else if (id == JobId::Gpu) StartAtOrAfter(kWantAfterburner);
+            else if (id == JobId::Afterburner) StartAtOrAfter(kWantMemory);
+            else if (id == JobId::Memory) StartAtOrAfter(kWantStorage);
+            else if (id == JobId::Storage) {
+                stage_ = Stage::Review;
+                state_.Phase(L"REVIEW", L"set BIOS, then restart");
             }
-        });
+            return;
+        }
     }
 
-    void StartGpu() {
-        JoinWorker();
-        gpuSkipped_ = false;
-        stage_ = Stage::GpuApplying;
-        worker_ = std::thread([this] {
-            state_.Phase(L"GPU CONFIG", L"writing driver / Windows graphics settings");
-            const int rc = host_.applyGpu(state_);
-            if (rc == 0) {
-                state_.Phase(L"GPU CONFIG", L"HAGS, overlays, NVIDIA/AMD profile");
-                stage_ = Stage::GpuDone;
-            } else {
-                state_.Phase(L"GPU CONFIG", L"see the log for details");
-                stage_ = Stage::GpuFailed;
+    void PollJobs() {
+        struct Map {
+            JobId id;
+            Stage run;
+            Stage done;
+            Stage fail;
+            Stage cancel;
+        };
+        const Map maps[] = {
+            {JobId::Prepare, Stage::PrepareApplying, Stage::PrepareDone, Stage::PrepareFailed, Stage::PrepareFailed},
+            {JobId::Measure, Stage::Running, Stage::Result, Stage::Failed, Stage::Cancelled},
+            {JobId::Hold, Stage::Installing, Stage::Installed, Stage::InstallFailed, Stage::InstallFailed},
+            {JobId::Cpu, Stage::PpmApplying, Stage::PpmDone, Stage::PpmFailed, Stage::PpmFailed},
+            {JobId::Gpu, Stage::GpuApplying, Stage::GpuDone, Stage::GpuFailed, Stage::GpuFailed},
+            {JobId::Afterburner, Stage::AfterburnerApplying, Stage::AfterburnerDone, Stage::AfterburnerFailed, Stage::AfterburnerFailed},
+            {JobId::Memory, Stage::MemoryApplying, Stage::MemoryDone, Stage::MemoryFailed, Stage::MemoryFailed},
+            {JobId::Storage, Stage::StorageApplying, Stage::StorageDone, Stage::StorageFailed, Stage::StorageFailed},
+        };
+        const Stage stage = stage_.load();
+        for (const Map& map : maps) {
+            if (stage != map.run) continue;
+            const int phase = jobs_[static_cast<int>(map.id)].phase.load();
+            if (phase == static_cast<int>(JobPhase::Done)) {
+                if (map.id == JobId::Measure) revealT_ = 0.0001f;
+                if (map.id == JobId::Hold) installT_ = 0.0001f;
+                stage_ = map.done;
+            } else if (phase == static_cast<int>(JobPhase::Failed)) {
+                stage_ = map.fail;
+            } else if (phase == static_cast<int>(JobPhase::Cancelled)) {
+                stage_ = map.cancel;
             }
-        });
-    }
-
-    void StartAfterburner() {
-        JoinWorker();
-        stage_ = Stage::AfterburnerApplying;
-        worker_ = std::thread([this] {
-            state_.Phase(L"AFTERBURNER", L"installing Afterburner and RivaTuner");
-            const int rc = host_.applyAfterburner ? host_.applyAfterburner(state_) : 1;
-            if (rc == 0) {
-                state_.Phase(L"AFTERBURNER", L"overclock applies at every logon");
-                stage_ = Stage::AfterburnerDone;
-            } else {
-                state_.Phase(L"AFTERBURNER", L"see the log for details");
-                stage_ = Stage::AfterburnerFailed;
+        }
+        if (replayGpu_.exchange(false)) StartGpu(false);
+        PollGpuFollowers();
+        if (repairJob_ >= 0 && !JobBusy(static_cast<JobId>(repairJob_))) {
+            const int phase = jobs_[repairJob_].phase.load();
+            if (phase == static_cast<int>(JobPhase::Done) || phase == static_cast<int>(JobPhase::Failed) ||
+                phase == static_cast<int>(JobPhase::Cancelled)) {
+                AppendHealthLog(phase == static_cast<int>(JobPhase::Done) ? L"repair finished" : L"repair failed");
+                repairJob_ = -1;
+                repairRescan_ = true;
             }
-        });
-    }
-
-    void StartPrepare() {
-        JoinWorker();
-        stage_ = Stage::PrepareApplying;
-        worker_ = std::thread([this] {
-            const int rc = host_.applyPrepare ? host_.applyPrepare(state_) : 1;
-            stage_ = (rc == 0) ? Stage::PrepareDone : Stage::PrepareFailed;
-        });
-    }
-
-    void StartMemory() {
-        JoinWorker();
-        stage_ = Stage::MemoryApplying;
-        worker_ = std::thread([this] {
-            const int rc = host_.applyMemory ? host_.applyMemory(state_) : 1;
-            stage_ = (rc == 0) ? Stage::MemoryDone : Stage::MemoryFailed;
-        });
-    }
-
-    void StartStorage() {
-        JoinWorker();
-        stage_ = Stage::StorageApplying;
-        worker_ = std::thread([this] {
-            const int rc = host_.applyStorage ? host_.applyStorage(state_) : 1;
-            stage_ = (rc == 0) ? Stage::StorageDone : Stage::StorageFailed;
-        });
+        }
+        if (repairRescan_ && !healthBusy_.load()) {
+            repairRescan_ = false;
+            StartHealthScan();
+        }
+        AdvanceChain();
     }
 
     // ---- frame ----
@@ -2192,26 +2581,9 @@ private:
         lastFrame_ = now;
         time_ += dt;
 
-        state_.Snap(snap_);
-        if (stage_.load() != lastStage_) {
-            const Stage entered = stage_.load();
-            if (entered == Stage::Result) revealT_ = 0.0001f;
-            if (entered == Stage::Installed) {
-                installT_ = 0.0001f;
-                StartAtOrAfter(kWantCpu);
-            }
-            if (entered == Stage::PrepareDone) StartAtOrAfter(kWantMeasure);
-            if (entered == Stage::PpmDone) StartAtOrAfter(kWantGpuClean);
-            if (entered == Stage::GpuDone) StartAtOrAfter(kWantAfterburner);
-            if (entered == Stage::AfterburnerDone) StartAtOrAfter(kWantMemory);
-            if (entered == Stage::MemoryDone) StartAtOrAfter(kWantStorage);
-            if (entered == Stage::StorageDone) {
-                stage_ = Stage::Review;
-                state_.Phase(L"REVIEW", L"set BIOS, then restart");
-            }
-            lastStage_ = stage_.load();
-        }
+        PollJobs();
         const Stage stage = stage_.load();
+        PublishSnap(stage);
         if (revealT_ > 0) revealT_ = std::min(1.0f, revealT_ + dt * 0.8f);
         if (installT_ > 0) installT_ = std::min(1.0f, installT_ + dt * 1.2f);
         introT_ = std::min(1.0f, introT_ + dt * 1.4f);
@@ -2347,7 +2719,8 @@ private:
                  pr, rd_.fPhase.Get(), Alpha(phaseColor, stage == Stage::Running ? pulse : 1.0f),
                  DWRITE_TEXT_ALIGNMENT_TRAILING);
         std::wstring detail = snap_.detail;
-        if (stage == Stage::Running && snap_.elapsed > 0) {
+        const bool liveJob = JobBusy(StageJob(stage));
+        if ((stage == Stage::Running || liveJob) && snap_.elapsed > 0) {
             detail += Fmt(L"   elapsed %s", Duration(snap_.elapsed).c_str());
             if (snap_.remaining > 0) detail += Fmt(L"  |  remaining ~%s", Duration(snap_.remaining).c_str());
         }
@@ -2359,7 +2732,8 @@ private:
                                                   (stage == Stage::Running ? static_cast<float>(snap_.progress) : 1.0f)) /
                                                      static_cast<float>(kStepCount)
                                                : 0.0f;
-        progress_ = Approach(progress_, stage == Stage::Running ? static_cast<float>(snap_.progress) : stepFrac, 0.016f, 6.0f);
+        const bool reportProgress = stage == Stage::Running || (liveJob && snap_.progress > 0);
+        progress_ = Approach(progress_, reportProgress ? static_cast<float>(snap_.progress) : stepFrac, 0.016f, 6.0f);
         rd_.FillRound(bar, 3, col::panel2);
         const float fx = bar.left + W(bar) * Clamp01(progress_);
         if (fx > bar.left + 2) {
@@ -3210,35 +3584,36 @@ private:
     }
 
     void StartRepair(const std::wstring& kind) {
-        if (kind.empty() || healthBusy_.load()) return;
+        if (kind.empty()) return;
         const int answer = MessageBoxW(hwnd_,
                                         L"This changes the selected Windows setting using the existing Synchronus step. "
                                         L"It does not install a driver unless you chose the graphics or Afterburner repair.",
                                         L"Synchronus", MB_ICONWARNING | MB_OKCANCEL);
         if (answer != IDOK) return;
-        if (healthThread_.joinable()) healthThread_.join();
-        healthBusy_.store(true);
-        healthThread_ = std::thread([this, kind] {
-            int rc = 1;
-            if (kind == L"ppm" && host_.applyPpm) rc = host_.applyPpm(state_);
-            else if (kind == L"gpu" && host_.applyGpu) rc = host_.applyGpu(state_);
-            else if (kind == L"memory" && host_.applyMemory) rc = host_.applyMemory(state_);
-            else if (kind == L"storage" && host_.applyStorage) rc = host_.applyStorage(state_);
-            else if (kind == L"afterburner" && host_.applyAfterburner) rc = host_.applyAfterburner(state_);
-            else if (kind == L"timer" && host_.install && host_.system) {
-                const unsigned units = host_.system().serviceResolution;
-                if (units) rc = host_.install(units, state_);
-            }
-            AppendHealthLog(rc == 0 ? (L"repair " + kind + L" finished") : (L"repair " + kind + L" failed"));
-            const auto found = RunHealth(&healthStop_);
-            {
-                std::lock_guard<std::mutex> g(healthM_);
-                checks_ = found;
-                lastScanAt_ = GetTickCount64();
-            }
-            healthBusy_.store(false);
-            PostMessageW(hwnd_, WM_APP + 43, 0, 0);
-        });
+        JobId id = JobId::Count;
+        unsigned timerUnits = 0;
+        if (kind == L"ppm") id = JobId::Cpu;
+        else if (kind == L"gpu") id = JobId::Gpu;
+        else if (kind == L"memory") id = JobId::Memory;
+        else if (kind == L"storage") id = JobId::Storage;
+        else if (kind == L"afterburner") id = JobId::Afterburner;
+        else if (kind == L"timer") {
+            id = JobId::Hold;
+            if (host_.system) timerUnits = host_.system().serviceResolution;
+        } else {
+            return;
+        }
+        if (JobBusy(id)) {
+            MessageBoxW(hwnd_, L"That step is already running.", L"Synchronus", MB_ICONINFORMATION | MB_OK);
+            return;
+        }
+        repairJob_ = static_cast<int>(id);
+        if (id == JobId::Cpu) StartPpm(false);
+        else if (id == JobId::Gpu) StartGpu(false);
+        else if (id == JobId::Memory) StartMemory(false);
+        else if (id == JobId::Storage) StartStorage(false);
+        else if (id == JobId::Afterburner) StartAfterburner(false);
+        else if (id == JobId::Hold) StartInstall(false, timerUnits);
     }
 
     void DrawMonitor(const D2D1_RECT_F& B, float dt) {
@@ -3556,7 +3931,7 @@ private:
         const wchar_t* labels[] = {L"Full tune", L"Health", L"Measure timing", L"CPU power", L"GPU driver",
                                    L"GPU settings", L"Afterburner", L"Memory", L"Storage", L"Restart notes"};
         const wchar_t* blurbs[] = {
-            L"Opens the setup flow. You choose which steps to run, then Synchronus walks through them in order.",
+            L"Starts every selected step together. Each one keeps running if you leave its screen. Steps that would clash wait for each other.",
             L"Opens the health screen. It reads the live settings and lists anything that has drifted. Nothing changes until you choose a repair.",
             L"Times Sleep(1) across timer resolutions and saves a scan. The heatmap on this screen uses the newest of those scans.",
             L"Writes the processor power plan. Core parking and throttling are turned off, and the plan asks the CPU to stay at a high, steady state.",
@@ -3567,10 +3942,14 @@ private:
             L"Turns SysMain off and checks that TRIM is enabled for the system drive.",
             L"Shows the BIOS settings to change by hand, then asks you to restart. Windows cannot write those settings for you.",
         };
-        rd_.Text(L"Tools", D2D1::RectF(B.left, B.top, B.left + leftW, B.top + 32), rd_.fPhase.Get(), col::cyan);
+        rd_.Text(L"Tools", D2D1::RectF(B.left, B.top, B.left + leftW, B.top + 28), rd_.fPhase.Get(), col::cyan);
+        const std::wstring banner = JobBanner();
+        if (!banner.empty()) {
+            rd_.Text(banner, D2D1::RectF(B.left, B.top + 28, B.left + leftW, B.top + 48), rd_.fSmall.Get(), col::muted);
+        }
         const bool showUpdate = updatePulse_;
         const float heatH = std::max(200.0f, H(B) * 0.40f);
-        const float btnTop = B.top + 40;
+        const float btnTop = B.top + (banner.empty() ? 40.0f : 52.0f);
         const float btnBottom = B.bottom - heatH - (showUpdate ? 52.0f : 12.0f);
         const float btnGap = 8.0f;
         const float btnH = std::max(40.0f, (btnBottom - btnTop - 4.0f * btnGap) / 5.0f);
@@ -3586,23 +3965,29 @@ private:
             } else if (i == 1) {
                 OpenHealth();
             } else if (i == 2) {
-                hubReturn_ = true;
-                StartBenchmark();
+                if (JobBusy(JobId::Measure)) stage_ = Stage::Running;
+                else StartBenchmark(true);
             } else if (i == 3) {
-                OpenStep(Stage::PpmPrompt);
+                OpenTool(JobId::Cpu, Stage::PpmPrompt, Stage::PpmApplying);
             } else if (i == 4) {
                 hubReturn_ = true;
                 stage_ = Stage::GpuClean;
-                state_.Phase(L"GPU CLEAN", L"looking up the current driver");
-                BeginGpuLookup();
+                if (!JobBusy(JobId::GpuClean)) {
+                    GpuDl phase;
+                    {
+                        std::lock_guard<std::mutex> g(gpuM_);
+                        phase = gpuPhase_;
+                    }
+                    if (phase == GpuDl::Idle) BeginGpuLookup();
+                }
             } else if (i == 5) {
-                OpenStep(Stage::GpuPrompt);
+                OpenTool(JobId::Gpu, Stage::GpuPrompt, Stage::GpuApplying);
             } else if (i == 6) {
-                OpenStep(Stage::AfterburnerPrompt);
+                OpenTool(JobId::Afterburner, Stage::AfterburnerPrompt, Stage::AfterburnerApplying);
             } else if (i == 7) {
-                OpenStep(Stage::MemoryPrompt);
+                OpenTool(JobId::Memory, Stage::MemoryPrompt, Stage::MemoryApplying);
             } else if (i == 8) {
-                OpenStep(Stage::StoragePrompt);
+                OpenTool(JobId::Storage, Stage::StoragePrompt, Stage::StorageApplying);
             } else {
                 hubReturn_ = true;
                 stage_ = Stage::Review;
@@ -3800,10 +4185,10 @@ private:
         rd_.Text(company, D2D1::RectF(x0, y, x0 + nameW + 8, y + 22), rd_.fSub.Get(), col::cyan,
                  DWRITE_TEXT_ALIGNMENT_LEADING, DWRITE_PARAGRAPH_ALIGNMENT_CENTER);
         y += 36;
-        rd_.Text(L"Timer resolution, CPU power, GPU, memory, and storage. Low-level settings are tuned to harden the machine for a more responsive, lower-latency configuration, without unneeded versatility or fluff. Perfect for gamers and HPC. Uncheck any step you want to skip.",
-                 D2D1::RectF(card.left + 48, y, card.right - 48, y + 78), rd_.fBody.Get(), col::muted,
+        rd_.Text(L"Timer resolution, CPU power, GPU, memory, and storage. Low-level settings are tuned to harden the machine for a more responsive, lower-latency configuration, without unneeded versatility or fluff. Perfect for gamers and HPC. Uncheck any step you want to skip. Begin starts the selected steps together, and each one keeps running if you open another.",
+                 D2D1::RectF(card.left + 48, y, card.right - 48, y + 108), rd_.fBody.Get(), col::muted,
                  DWRITE_TEXT_ALIGNMENT_CENTER);
-        y += 86;
+        y += 116;
 
         rd_.Text(L"Select the steps to run  -  everything is on by default",
                  D2D1::RectF(card.left + 36, y, card.right - 220, y + 22), rd_.fSmall.Get(), col::muted,
@@ -3928,7 +4313,7 @@ private:
                              col::dim);
                 }
                 if (Button(1, D2D1::RectF(cx - 70, B.bottom - 36, cx + 70, B.bottom - 4), L"Stop", col::red, false, true, dt)) {
-                    state_.Cancel();
+                    CancelJob(JobId::Measure);
                 }
                 break;
             }
@@ -3974,7 +4359,7 @@ private:
                         rd_.Text(L"The boot service will not be installed. Continue to the next selected step.",
                                  D2D1::RectF(B.left, B.top + 108, B.right, B.top + 132), rd_.fSmall.Get(), col::muted,
                                  DWRITE_TEXT_ALIGNMENT_CENTER);
-                        if (Button(2, btnA, L"Continue", col::cyan, true, true, dt, true, true)) StartAtOrAfter(kWantCpu);
+                        if (Button(2, btnA, L"Continue", col::cyan, true, true, dt, true, true)) OpenHome();
                         if (Button(4, btnB, L"Close", col::muted, false, true, dt)) PostMessageW(hwnd_, WM_CLOSE, 0, 0);
                     }
                 } else if (stage == Stage::Installing) {
@@ -4018,7 +4403,7 @@ private:
                                L"back if a later change is unstable. This can take a minute.",
                                L"Continue  -  create restore point", col::cyan,
                                [this] { StartPrepare(); },
-                               [this] { StartAtOrAfter(kWantMeasure); });
+                               [this] { OpenHome(); });
                 break;
             case Stage::PrepareApplying:
             case Stage::PrepareDone:
@@ -4027,7 +4412,7 @@ private:
             case Stage::PrepareFailed:
                 DrawPackFail(B, dt, L"Restore point could not be created. System Protection may be off.",
                              [this] { StartPrepare(); },
-                             [this] { StartAtOrAfter(kWantMeasure); });
+                             [this] { OpenHome(); });
                 break;
             case Stage::PpmPrompt:
                 DrawPpmPrompt(B, dt);
@@ -4044,7 +4429,7 @@ private:
                          D2D1::RectF(B.left + 8, B.top + 44, B.right - 8, B.bottom - 44), rd_.fBody.Get(), col::muted,
                          DWRITE_TEXT_ALIGNMENT_CENTER);
                 if (Button(6, btnA, L"Retry PPM", col::violet, true, true, dt, true, true)) StartPpm();
-                if (Button(7, btnB, L"Skip", col::muted, false, true, dt)) StartAtOrAfter(kWantGpuClean);
+                if (Button(7, btnB, L"Skip", col::muted, false, true, dt)) OpenHome();
                 break;
             case Stage::GpuClean:
                 DrawGpuClean(B, dt);
@@ -4073,7 +4458,7 @@ private:
                                L"The curve it finds is saved as profile 1 and applied every time you log on. This step does not change the GPU driver.",
                                L"Continue  -  install and scan", col::green,
                                [this] { StartAfterburner(); },
-                               [this] { MaybeStartMemory(); });
+                               [this] { OpenHome(); });
                 break;
             case Stage::AfterburnerApplying:
             case Stage::AfterburnerDone:
@@ -4082,7 +4467,7 @@ private:
             case Stage::AfterburnerFailed:
                 DrawPackFail(B, dt, L"Afterburner failed - see the log. The GPU driver settings are unchanged.",
                              [this] { StartAfterburner(); },
-                             [this] { MaybeStartMemory(); });
+                             [this] { OpenHome(); });
                 break;
             case Stage::MemoryPrompt:
                 DrawPackPrompt(B, dt, L"Pagefile and memory compression",
@@ -4090,7 +4475,7 @@ private:
                                L"turns off memory compression so standby pages are not compressed on a CPU thread.",
                                L"Continue  -  apply memory tweaks", col::violet,
                                [this] { StartMemory(); },
-                               [this] { MaybeStartStorage(); });
+                               [this] { OpenHome(); });
                 break;
             case Stage::MemoryApplying:
             case Stage::MemoryDone:
@@ -4099,7 +4484,7 @@ private:
             case Stage::MemoryFailed:
                 DrawPackFail(B, dt, L"Memory tweaks failed - see the log. Earlier writes are still in place.",
                              [this] { StartMemory(); },
-                             [this] { MaybeStartStorage(); });
+                             [this] { OpenHome(); });
                 break;
             case Stage::StoragePrompt:
                 DrawPackPrompt(B, dt, L"SSD, PCIe, USB, TRIM",
@@ -4108,7 +4493,7 @@ private:
                                L"timestamps off. Windows Search is left running so Start-menu search still works.",
                                L"Continue  -  apply storage tweaks", col::amber,
                                [this] { StartStorage(); },
-                               [this] { stage_ = Stage::Review; });
+                               [this] { OpenHome(); });
                 break;
             case Stage::StorageApplying:
             case Stage::StorageDone:
@@ -4117,7 +4502,7 @@ private:
             case Stage::StorageFailed:
                 DrawPackFail(B, dt, L"Storage tweaks failed - see the log. Retry, or skip to Review.",
                              [this] { StartStorage(); },
-                             [this] { stage_ = Stage::Review; });
+                             [this] { OpenHome(); });
                 break;
             case Stage::Review:
                 DrawReview(B, dt);
@@ -4172,21 +4557,21 @@ private:
     }
 
     void BeginGpuLookup() {
+        if (JobBusy(JobId::GpuClean)) return;
         {
             std::lock_guard<std::mutex> g(gpuM_);
             if (gpuPhase_ == GpuDl::Looking || gpuPhase_ == GpuDl::Downloading || gpuPhase_ == GpuDl::Installing) return;
             gpuPhase_ = GpuDl::Looking;
             gpuOffer_ = {};
         }
-        gpuStop_ = false;
-        state_.Progress(0, 0, 0);
-        JoinWorker();
-        worker_ = std::thread([this] {
-            const GpuDriverOffer o = LookupGpuDriver(&state_, gpuStop_);
+        gpuStop_.store(false);
+        LaunchJob(JobId::GpuClean, [this](SharedState& feed) {
+            feed.Phase(L"GPU CLEAN", L"looking up the current driver");
+            const GpuDriverOffer o = LookupGpuDriver(&feed, gpuStop_);
             std::wstring phase = L"manual driver install";
             {
                 std::lock_guard<std::mutex> g(gpuM_);
-                if (gpuStop_ || state_.Cancelled()) return;
+                if (gpuStop_.load() || feed.Cancelled()) return 1;
                 gpuOffer_ = o;
                 if (o.ok) {
                     gpuPhase_ = GpuDl::Offer;
@@ -4195,11 +4580,13 @@ private:
                     gpuPhase_ = GpuDl::Manual;
                 }
             }
-            state_.Phase(L"GPU CLEAN", phase);
+            feed.Phase(L"GPU CLEAN", phase);
+            return 0;
         });
     }
 
     void BeginGpuDownload() {
+        if (JobBusy(JobId::GpuClean)) return;
         {
             std::lock_guard<std::mutex> g(gpuM_);
             if (gpuPhase_ != GpuDl::Offer && gpuPhase_ != GpuDl::Failed) return;
@@ -4207,20 +4594,20 @@ private:
             gpuPhase_ = GpuDl::Downloading;
             gpuOffer_.error.clear();
         }
-        state_.Progress(0, 0, 0);
-        JoinWorker();
-        gpuStop_ = false;
-        worker_ = std::thread([this] {
+        gpuStop_.store(false);
+        LaunchJob(JobId::GpuClean, [this](SharedState& feed) {
             GpuDriverOffer o;
             {
                 std::lock_guard<std::mutex> g(gpuM_);
                 o = gpuOffer_;
             }
-            const int rc = DownloadGpuDriver(state_, o, gpuStop_);
+            feed.Phase(L"GPU CLEAN", L"downloading the driver package");
+            const int rc = DownloadGpuDriver(feed, o, gpuStop_);
             std::wstring detail = L"package ready to install";
+            int code = 0;
             {
                 std::lock_guard<std::mutex> g(gpuM_);
-                if (gpuStop_ || state_.Cancelled()) return;
+                if (gpuStop_.load() || feed.Cancelled()) return 1;
                 if (rc == 0) {
                     gpuOffer_.file = o.file;
                     gpuOffer_.bytes = o.bytes;
@@ -4236,13 +4623,16 @@ private:
                     gpuOffer_.fail = 1;
                     gpuPhase_ = GpuDl::Failed;
                     detail = L"download failed";
+                    code = 1;
                 }
             }
-            state_.Phase(L"GPU CLEAN", detail);
+            feed.Phase(L"GPU CLEAN", detail);
+            return code;
         });
     }
 
     void BeginGpuInstall() {
+        if (JobBusy(JobId::GpuClean)) return;
         {
             std::lock_guard<std::mutex> g(gpuM_);
             const bool retryInstall = gpuPhase_ == GpuDl::Failed && gpuOffer_.fail == 2 && !gpuOffer_.file.empty();
@@ -4251,18 +4641,30 @@ private:
             gpuPhase_ = GpuDl::Installing;
             gpuOffer_.error.clear();
         }
-        JoinWorker();
-        worker_ = std::thread([this] {
+        gpuStop_.store(false);
+        LaunchJob(JobId::GpuClean, [this](SharedState& feed) {
+            HeldLock volume;
+            HeldLock gpu;
+            if (!AcquireGate(JobId::GpuClean, volumeMu_, L"a restore point is using the disk", feed, volume)) return 1;
+            if (!AcquireGate(JobId::GpuClean, gpuMu_, L"GPU settings or Afterburner are using the graphics driver", feed, gpu))
+                return 1;
+            const bool replayConfig = jobs_[static_cast<int>(JobId::Gpu)].phase.load() == static_cast<int>(JobPhase::Done);
+            if (jobs_[static_cast<int>(JobId::Afterburner)].phase.load() == static_cast<int>(JobPhase::Done)) {
+                afterburnerStale_.store(true);
+                jobs_[static_cast<int>(JobId::Afterburner)].feed.Log(
+                    L"A graphics driver install started after the Afterburner scan. Run Afterburner again if the curve is gone.");
+            }
             GpuDriverOffer o;
             {
                 std::lock_guard<std::mutex> g(gpuM_);
                 o = gpuOffer_;
             }
-            const int rc = InstallTrimmedGpuDriver(state_, o);
+            feed.Phase(L"GPU CLEAN", L"installing the trimmed driver");
+            const int rc = InstallTrimmedGpuDriver(feed, o);
             std::wstring err;
             {
                 std::lock_guard<std::mutex> g(gpuM_);
-                if (state_.Cancelled()) return;
+                if (feed.Cancelled()) return 1;
                 if (rc == 0) {
                     gpuOffer_.error.clear();
                     gpuOffer_.fail = 0;
@@ -4274,20 +4676,31 @@ private:
                     err = gpuOffer_.error;
                 }
             }
-            state_.Phase(L"GPU CLEAN", err.empty() ? L"trimmed driver installed" : L"driver install failed");
-            if (!err.empty()) state_.Log(err);
+            feed.Phase(L"GPU CLEAN", err.empty() ? L"trimmed driver installed" : L"driver install failed");
+            if (!err.empty()) feed.Log(err);
+            if (rc == 0 && replayConfig) replayGpu_.store(true);
+            return rc == 0 ? 0 : 1;
         });
     }
 
     void SkipGpuClean() {
-        gpuStop_ = true;
-        JoinWorker();
+        GpuDl phase;
+        {
+            std::lock_guard<std::mutex> g(gpuM_);
+            phase = gpuPhase_;
+        }
+        if (phase == GpuDl::Installing) {
+            OpenHome();
+            return;
+        }
+        gpuStop_.store(true);
+        CancelJob(JobId::GpuClean);
         {
             std::lock_guard<std::mutex> g(gpuM_);
             gpuPhase_ = GpuDl::Idle;
         }
-        state_.Phase(L"GPU CLEAN", L"driver install skipped");
-        StartAtOrAfter(kWantGpu);
+        ReleaseGpuFollowers();
+        OpenHome();
     }
 
     void DrawGpuClean(const D2D1_RECT_F& B, float dt) {
@@ -4321,7 +4734,12 @@ private:
                      L"DDU in Safe Mode is optional if an older package left leftovers.\n"
                      L"Afterburner and RivaTuner are installed by the GPU step. BIOS Resizable BAR stays manual.",
                      D2D1::RectF(B.left + 12, B.top + 78, B.right - 12, B.bottom - 52), rd_.fBody.Get(), col::text);
-            if (Button(6, btnA, L"Continue", col::cyan, true, true, dt, true, true)) StartAtOrAfter(kWantGpu);
+            if (Button(6, btnA, L"Continue", col::cyan, true, true, dt, true, true)) {
+                ReleaseGpuFollowers();
+                if (JobBusy(JobId::Gpu)) stage_ = Stage::GpuApplying;
+                else if (Want(kWantGpu)) stage_ = Stage::GpuPrompt;
+                else OpenHome();
+            }
             if (Button(7, btnB, L"Check again", col::muted, false, true, dt)) BeginGpuLookup();
             return;
         }
@@ -4414,8 +4832,12 @@ private:
             if (Button(6, btnA, L"Install trimmed driver", col::green, true, true, dt, true, true)) BeginGpuInstall();
             if (Button(7, btnB, L"Skip this step", col::muted, false, true, dt)) SkipGpuClean();
         } else if (phase == GpuDl::Done) {
-            if (Button(6, btnA, L"Continue  -  configure GPU", col::green, true, true, dt, true, true))
-                StartAtOrAfter(kWantGpu);
+            if (Button(6, btnA, L"Continue  -  configure GPU", col::green, true, true, dt, true, true)) {
+                ReleaseGpuFollowers();
+                if (JobBusy(JobId::Gpu)) stage_ = Stage::GpuApplying;
+                else if (Want(kWantGpu)) stage_ = Stage::GpuPrompt;
+                else OpenHome();
+            }
         } else if (phase == GpuDl::Failed) {
             if (Button(6, btnA, L"Retry", col::cyan, true, true, dt, true, true)) {
                 if (offer.fail == 2 && !offer.file.empty()) BeginGpuInstall();
@@ -4475,10 +4897,7 @@ private:
         if (Button(6, btnA, locked ? L"Continue  -  apply CPU tweaks" : L"Continue anyway", accent, true, true, dt,
                    true, true))
             StartPpm();
-        if (Button(7, btnB, L"Skip this step", col::muted, false, true, dt)) {
-            state_.Phase(L"CPU TUNE", L"PPM tweaks skipped");
-            StartAtOrAfter(kWantGpuClean);
-        }
+        if (Button(7, btnB, L"Skip this step", col::muted, false, true, dt)) OpenHome();
     }
 
     void DrawGpuPrompt(const D2D1_RECT_F& B, float dt) {
@@ -4505,8 +4924,7 @@ private:
         if (Button(6, btnA, L"Continue  -  apply GPU tweaks", accent, true, true, dt, true, true)) StartGpu();
         if (Button(7, btnB, L"Skip this step", col::muted, false, true, dt)) {
             gpuSkipped_ = true;
-            state_.Phase(L"GPU CONFIG", L"GPU tweaks skipped");
-            StartAtOrAfter(kWantAfterburner);
+            OpenHome();
         }
     }
 
@@ -4516,9 +4934,18 @@ private:
         const StepMeta meta = Meta(stage_.load());
         rd_.Text(done ? (skipped ? Fmt(L"%s skipped", meta.name).c_str() : Fmt(L"%s applied", meta.name).c_str())
                       : meta.title,
-                 D2D1::RectF(B.left + 8, B.top + 6, B.right - 8, B.top + 28), rd_.fPhase.Get(),
+                 D2D1::RectF(B.left + 8, B.top + 6, B.right - 110, B.top + 28), rd_.fPhase.Get(),
                  done ? col::green : col::amber, DWRITE_TEXT_ALIGNMENT_CENTER);
-        rd_.Text(done ? L"Complete." : L"Writing settings.",
+        if (!done && Button(8, D2D1::RectF(B.right - 96, B.top + 4, B.right - 8, B.top + 30), L"Stop", col::red, false, true, dt)) {
+            CancelJob(StageJob(stage_.load()));
+        }
+        const wchar_t* progressLine = L"Writing settings.";
+        if (!done && !snap_.detail.empty()) progressLine = snap_.detail.c_str();
+        std::wstring doneLine = L"Complete.";
+        if (done && stage_.load() == Stage::AfterburnerDone && afterburnerStale_.load()) {
+            doneLine = L"Complete. A later driver install may have cleared the curve. Run this step again if the overclock is gone.";
+        }
+        rd_.Text(done ? doneLine.c_str() : progressLine,
                  D2D1::RectF(B.left + 8, B.top + 28, B.right - 8, B.top + 48), rd_.fSmall.Get(), col::muted,
                  DWRITE_TEXT_ALIGNMENT_CENTER);
 
@@ -4650,7 +5077,15 @@ private:
     Renderer rd_;
     SharedState state_;
     Snapshot snap_;
-    std::thread worker_;
+    JobSlot jobs_[static_cast<int>(JobId::Count)];
+    std::mutex timerMu_, powerMu_, gpuMu_, volumeMu_;
+    bool chainAuto_ = false;
+    bool deferGpu_ = false;
+    std::atomic<bool> replayGpu_{false};
+    std::atomic<bool> afterburnerStale_{false};
+    int repairJob_ = -1;
+    bool repairRescan_ = false;
+    int chainPhase_[static_cast<int>(JobId::Count)]{};
     std::thread updateThread_;
     std::mutex updateM_;
     AppUpdate updateOffer_{};
@@ -4675,7 +5110,6 @@ private:
     GpuDriverOffer gpuOffer_{};
     std::atomic<bool> gpuStop_{false};
     std::atomic<Stage> stage_{Stage::Welcome};
-    Stage lastStage_ = Stage::Running;
     std::atomic<bool> serviceStopped_{false};
     std::atomic<bool> installedThisSession_{false};
     bool gpuSkipped_ = false;

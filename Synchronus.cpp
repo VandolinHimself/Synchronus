@@ -28,6 +28,7 @@
 #include "Health.h"
 
 #include <algorithm>
+#include <mutex>
 #include <cmath>
 #include <cstdarg>
 #include <cstdint>
@@ -70,14 +71,14 @@ gui::MeasurePlan gui::MeasurePlanFor(int fidelity) {
 
 namespace {
 
-constexpr wchar_t kVersion[] = L"2.2.0";
+constexpr wchar_t kVersion[] = L"2.3.0";
 constexpr wchar_t kProduct[] = L"Synchronus";
 constexpr wchar_t kCompany[] = L"Lucius And Wayne Systems LLC";
 constexpr wchar_t kCompanyUrl[] = L"https://luciuswayne.com";
 
-// Set while the GUI is driving a benchmark: the core streams phases,
-// progress, samples and snapshots into it (see Gui.h).
-gui::Feed* g_feed = nullptr;
+// Each tool thread sets this to its own feed. A single process-wide pointer
+// would mix progress and cancellation when two steps run at once.
+thread_local gui::Feed* g_feed = nullptr;
 
 // Console state. The binary is a GUI-subsystem executable; command-line
 // invocations attach to the parent console (or allocate one when there is
@@ -146,6 +147,8 @@ std::string ToUtf8(const std::wstring& text) {
 // (the service runs as SYSTEM, interactive runs may lack write access until
 // elevated, in which case the console copy still exists).
 void LogLine(const std::wstring& line) {
+    static std::mutex gate;
+    std::lock_guard<std::mutex> lock(gate);
     CreateDirectoryW(ProgramDataDir().c_str(), nullptr);
     HANDLE file = CreateFileW(LogFilePath().c_str(), FILE_APPEND_DATA,
                               FILE_SHARE_READ | FILE_SHARE_WRITE, nullptr,
@@ -555,7 +558,7 @@ void PublishPpm(const std::vector<gui::PpmStepView>& steps) {
     if (g_feed) g_feed->Ppm(steps);
 }
 
-bool g_ppmDwell = true;
+thread_local bool g_ppmDwell = true;
 
 void Dwell(DWORD ms) {
     if (!ms || !g_ppmDwell) return;

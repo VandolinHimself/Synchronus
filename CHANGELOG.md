@@ -1,6 +1,17 @@
 # Changelog
 
-Current release: **2.2.0**.
+Current release: **2.3.0**.
+
+## 2.3.0 — 2026-10-26
+
+- Each step has its own worker. Opening another tool, or going home, leaves the one you started running.
+- Starting a step that is already running opens it instead of starting a second copy.
+- The timer measurement and the boot-service install share the clock, so one waits.
+- CPU power and storage share the power plan, so one waits.
+- A restore point, the pagefile change, and a driver install share the disk, so one waits.
+- Driver install, GPU settings, and Afterburner share the graphics driver, so one waits. GPU settings and Afterburner stay queued until a driver install you started has finished.
+- If a driver is installed after Afterburner already scanned, that screen says to run Afterburner again. GPU settings that already ran are written again after the new driver.
+- A health repair uses that same worker, so it cannot run a second copy of a step that is already going.
 
 ## 2.2.0 — 2026-10-26
 
