@@ -4547,7 +4547,10 @@ private:
         rd_.Text(healthBusy_.load() ? L"Checking live settings" : sum.headline,
                  D2D1::RectF(rx, B.top, B.right, B.top + 28), rd_.fPhase.Get(), col::cyan, DWRITE_TEXT_ALIGNMENT_TRAILING);
         rd_.Text(Fmt(L"%d live    %d need attention    %d other", sum.pass, sum.attention, sum.info + sum.other),
-                 D2D1::RectF(rx, B.top + 30, B.right, B.top + 48), rd_.fMonoSmall.Get(), col::dim,
+                 D2D1::RectF(rx, B.top + 28, B.right, B.top + 44), rd_.fMonoSmall.Get(), col::dim,
+                 DWRITE_TEXT_ALIGNMENT_TRAILING);
+        rd_.Text(L"Not every item applies on all hardware.",
+                 D2D1::RectF(rx, B.top + 42, B.right, B.top + 58), rd_.fSmall.Get(), col::dim,
                  DWRITE_TEXT_ALIGNMENT_TRAILING);
         const wchar_t* groupNames[] = {L"Hold timer", L"CPU power", L"GPU driver", L"GPU settings",
                                        L"Afterburner", L"Memory", L"Storage"};
@@ -4567,7 +4570,7 @@ private:
             }
             groups[g].items.push_back(i);
         }
-        const float listTop = B.top + 56;
+        const float listTop = B.top + 64;
         const float availH = std::max(40.0f, B.bottom - listTop);
         float itemH = 20.0f;
         const float headH = 22.0f;

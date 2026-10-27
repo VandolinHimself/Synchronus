@@ -7,6 +7,7 @@ Current release: **2.6.1**.
 - Full tune makes the restore point first and does not start anything else until that finishes. If it fails, the other steps stay stopped until you retry or continue without one.
 - The timer measurement runs by itself, so later changes do not disturb it. CPU power and memory can then run together. Storage waits until the CPU step is finished. GPU settings and Afterburner wait until the driver choice is finished.
 - The home screen 3D chart follows a timer scan while it is running. It shows the last finished scan only when nothing is measuring.
+- Under the attention count, a short note says that not every item applies on all hardware.
 
 ## 2.5.1 — 2026-10-27
 
