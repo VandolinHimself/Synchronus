@@ -3011,7 +3011,9 @@ private:
         buttons_.clear();
         hoverButton_ = false;
         tipTitle_ = L"Home";
-        tipBody_ = L"Move the pointer over a tool, a tweak, or the house. This panel describes what it does.";
+        tipBody_ = stage == Stage::Home
+                       ? L"Move the pointer over a tool or a tweak. This panel describes what it does."
+                       : L"Move the pointer over a tool, a tweak, or the house. This panel describes what it does.";
 
         const D2D1_SIZE_F size = rd_.Size();
         const float w = size.width, h = size.height;
@@ -3368,7 +3370,8 @@ private:
         const float pulse = 0.75f + 0.25f * std::sin(time_ * 3.0f);
         const float hcx = (r.left + r.right) * 0.5f;
         const float half = std::min(270.0f, W(r) * 0.22f);
-        if (DrawEtchedHome(D2D1::RectF(hcx - half, r.top, hcx + half, r.bottom), dt) && stage != Stage::Home)
+        if (stage != Stage::Home &&
+            DrawEtchedHome(D2D1::RectF(hcx - half, r.top, hcx + half, r.bottom), dt))
             OpenHome();
         const float side = 26.0f;
         const D2D1_RECT_F settingsR = D2D1::RectF(r.right - side, r.top, r.right, r.top + side);

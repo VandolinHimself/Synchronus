@@ -1,6 +1,10 @@
 # Changelog
 
-Current release: **2.7.0**.
+Current release: **2.7.2**.
+
+## 2.7.2 — 2026-10-27
+
+- The home screen no longer shows the home control. That control remains on the other screens.
 
 ## 2.7.0 — 2026-10-27
 
