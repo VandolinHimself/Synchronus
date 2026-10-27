@@ -4,7 +4,8 @@ Current release: **2.7.0**.
 
 ## 2.7.0 — 2026-10-27
 
-- The gear beside the home control opens Settings. It saves the driver folder, the Afterburner folder, startup and tray behavior, notifications, health monitoring, automatic maintenance, and the full-tune steps.
+- The sliders at the right end of the top title open Settings. It saves the driver folder, the Afterburner folder, startup and tray behavior, notifications, health monitoring, automatic maintenance, and the full-tune steps.
+- Installing an update downloads the new build, leaves the window and the tray, replaces this copy, and opens the new one.
 - Health scans, maintenance checks, update checks, and the gap between notifications use the intervals set there. The usual values are 6 hours, 1 minute, 1 minute, and 30 minutes.
 - A measured boot service is installed on its own. Synchronus no longer asks before that install.
 

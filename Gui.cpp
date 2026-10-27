@@ -1713,10 +1713,12 @@ private:
                 ValidateRect(hwnd_, nullptr);
                 return 0;
             case WM_CLOSE:
+                if (relaunch_.load()) exitRequested_ = true;
                 if (!exitRequested_ && prefs_.closeToTray) {
                     ShowWindow(hwnd_, SW_HIDE);
                     return 0;
                 }
+                RemoveTray();
                 DestroyWindow(hwnd_);
                 return 0;
             case WM_DESTROY:
@@ -3151,24 +3153,21 @@ private:
         SaveStepChoices(choices);
     }
 
-    bool DrawGearButton(const D2D1_RECT_F& r, float dt) {
+    bool DrawSettingsButton(const D2D1_RECT_F& r, float dt) {
         const bool clicked = HitTarget(251, r, true, dt);
         const float hv = hover_.size() > 251 ? hover_[251] : 0.0f;
         NoteTip(r, L"Settings",
                 L"Driver folder, Afterburner folder, startup, notifications, and the timers Synchronus uses.");
-        rd_.FillRound(r, 8, Alpha(col::cyan, 0.08f + 0.16f * hv));
-        rd_.StrokeRound(r, 8, Alpha(col::cyan, 0.40f + 0.45f * hv), 1.2f);
-        const float cx = (r.left + r.right) * 0.5f;
-        const float cy = (r.top + r.bottom) * 0.5f;
-        const D2D1_COLOR_F c = MixC(col::cyan, col::white, 0.25f + 0.55f * hv);
-        rd_.Arc(D2D1::Point2F(cx, cy), 8.4f, 0, 6.283185f, c, 1.5f);
-        rd_.Arc(D2D1::Point2F(cx, cy), 3.1f, 0, 6.283185f, c, 1.3f);
-        for (int i = 0; i < 8; ++i) {
-            const float a = static_cast<float>(i) * 0.785398f;
-            const float cs = std::cos(a);
-            const float sn = std::sin(a);
-            rd_.Line(D2D1::Point2F(cx + cs * 6.0f, cy + sn * 6.0f), D2D1::Point2F(cx + cs * 11.2f, cy + sn * 11.2f), c,
-                     2.2f, rd_.Round());
+        if (hv > 0.02f) rd_.FillRound(r, 6, Alpha(col::cyan, 0.12f * hv));
+        const D2D1_COLOR_F c = MixC(col::cyan, col::white, 0.30f + 0.55f * hv);
+        const float left = r.left + 3.5f;
+        const float right = r.right - 3.5f;
+        const float knobs[3] = {0.76f, 0.30f, 0.54f};
+        for (int i = 0; i < 3; ++i) {
+            const float y = r.top + 5.5f + static_cast<float>(i) * ((H(r) - 8.0f) / 3.0f);
+            rd_.Line(D2D1::Point2F(left, y), D2D1::Point2F(right, y), Alpha(c, 0.9f), 1.35f, rd_.Round());
+            const float kx = left + (right - left) * knobs[i];
+            rd_.Dot(D2D1::Point2F(kx, y), 2.35f, c);
         }
         return clicked;
     }
@@ -3371,13 +3370,13 @@ private:
         const float half = std::min(270.0f, W(r) * 0.22f);
         if (DrawEtchedHome(D2D1::RectF(hcx - half, r.top, hcx + half, r.bottom), dt) && stage != Stage::Home)
             OpenHome();
-        const float gear = 36.0f;
-        const float gearY = r.top + (H(r) - gear) * 0.5f;
-        if (DrawGearButton(D2D1::RectF(hcx + 42.0f, gearY, hcx + 42.0f + gear, gearY + gear), dt)) {
+        const float side = 26.0f;
+        const D2D1_RECT_F settingsR = D2D1::RectF(r.right - side, r.top, r.right, r.top + side);
+        if (DrawSettingsButton(settingsR, dt)) {
             settingsOpen_ = !settingsOpen_;
             if (settingsOpen_) settingsScroll_ = 0;
         }
-        const D2D1_RECT_F pr = D2D1::RectF(r.left + 420, r.top + 2, r.right, r.top + 26);
+        const D2D1_RECT_F pr = D2D1::RectF(r.left + 420, r.top + 2, settingsR.left - 10.0f, r.top + 26);
         rd_.Text(meta.number ? Fmt(L"STEP %d OF %d  |  %s", meta.number, kStepCount, Upper(phase).c_str())
                              : Upper(phase),
                  pr, rd_.fPhase.Get(), Alpha(phaseColor, stage == Stage::Running ? pulse : 1.0f),
@@ -4961,7 +4960,7 @@ private:
         rd_.StrokeRound(card, 16, Alpha(col::cyan, 0.22f), 1.4f);
         const float etchHalf = std::min(250.0f, (W(card) - 80.0f) * 0.5f);
         if (DrawEtchedHome(D2D1::RectF(cx - etchHalf, card.top + 2, cx + etchHalf, card.top + 58), dt)) OpenHome();
-        if (DrawGearButton(D2D1::RectF(cx + 42.0f, card.top + 12, cx + 78.0f, card.top + 48), dt)) {
+        if (DrawSettingsButton(D2D1::RectF(card.right - 40.0f, card.top + 10.0f, card.right - 12.0f, card.top + 38.0f), dt)) {
             settingsOpen_ = !settingsOpen_;
             if (settingsOpen_) settingsScroll_ = 0;
         }
