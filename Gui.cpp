@@ -1553,6 +1553,7 @@ public:
                                 L"Synchronus  |  Lucius And Wayne Systems LLC",
                                 WS_OVERLAPPEDWINDOW, x, y, ww, wh, nullptr, nullptr, hinst, this);
         if (!hwnd_) return 1;
+        SetTaskbarIcons();
 
         BOOL dark = TRUE;
         DwmSetWindowAttribute(hwnd_, DWMWA_USE_IMMERSIVE_DARK_MODE, &dark, sizeof(dark));
@@ -1628,6 +1629,8 @@ public:
         healthStop_.store(true);
         if (healthThread_.joinable()) healthThread_.join();
         JoinJobs();
+        if (taskbarBig_) DestroyIcon(taskbarBig_);
+        if (taskbarSmall_) DestroyIcon(taskbarSmall_);
         if (serviceStopped_ && !installedThisSession_ && !relaunch_.load()) host_.restartService();
         CoUninitialize();
         return relaunch_.load() ? 2 : 0;
@@ -1657,6 +1660,7 @@ private:
             case WM_DPICHANGED: {
                 dpi_ = static_cast<float>(HIWORD(wp));
                 rd_.SetDpi(dpi_);
+                SetTaskbarIcons();
                 const RECT* r = reinterpret_cast<const RECT*>(lp);
                 SetWindowPos(hwnd_, nullptr, r->left, r->top, r->right - r->left, r->bottom - r->top,
                              SWP_NOZORDER | SWP_NOACTIVATE);
@@ -3721,8 +3725,8 @@ private:
         return px;
     }
 
-    HICON MakeTrayIcon(bool dim) {
-        const int slot = TraySlotPx();
+    HICON MakeFilledIcon(int slot, bool dim) const {
+        if (slot < 1) slot = 1;
         constexpr int kSrc = 128;
         BITMAPINFO bi{};
         bi.bmiHeader.biSize = sizeof(bi.bmiHeader);
@@ -3801,6 +3805,22 @@ private:
         DeleteDC(srcDc);
         ReleaseDC(nullptr, screen);
         return icon;
+    }
+
+    HICON MakeTrayIcon(bool dim) { return MakeFilledIcon(TraySlotPx(), dim); }
+
+    void SetTaskbarIcons() {
+        const UINT dpi = dpi_ > 0 ? static_cast<UINT>(dpi_) : 96u;
+        int bigPx = GetSystemMetricsForDpi(SM_CXICON, dpi);
+        if (bigPx < 48) bigPx = 48;
+        int smallPx = GetSystemMetricsForDpi(SM_CXSMICON, dpi);
+        if (smallPx < 24) smallPx = 24;
+        if (taskbarBig_) DestroyIcon(taskbarBig_);
+        if (taskbarSmall_) DestroyIcon(taskbarSmall_);
+        taskbarBig_ = MakeFilledIcon(bigPx, false);
+        taskbarSmall_ = MakeFilledIcon(smallPx, false);
+        if (taskbarBig_) SendMessageW(hwnd_, WM_SETICON, ICON_BIG, reinterpret_cast<LPARAM>(taskbarBig_));
+        if (taskbarSmall_) SendMessageW(hwnd_, WM_SETICON, ICON_SMALL, reinterpret_cast<LPARAM>(taskbarSmall_));
     }
 
     void AddTray() {
@@ -5648,6 +5668,8 @@ private:
     bool pulseDim_ = false;
     bool showUpdatePrompt_ = false;
     HICON trayIcon_ = nullptr;
+    HICON taskbarBig_ = nullptr;
+    HICON taskbarSmall_ = nullptr;
     bool homeLoaded_ = false;
     bool homeHas_ = false;
     std::wstring homeScanLabel_;

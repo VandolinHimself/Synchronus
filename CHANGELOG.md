@@ -1,6 +1,10 @@
 # Changelog
 
-Current release: **2.6.1**.
+Current release: **2.6.2**.
+
+## 2.6.2 — 2026-10-27
+
+- The taskbar button uses a filled mark so it matches the size of other running programs. The tray icon is unchanged.
 
 ## 2.6.1 — 2026-10-27
 
