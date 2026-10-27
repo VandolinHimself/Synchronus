@@ -2315,6 +2315,7 @@ private:
             gpuOffer_ = {};
         }
         driverSettled_ = !Want(kWantGpuClean);
+        prepareWaived_ = false;
         gpuStop_.store(false);
         stage_ = Stage::Fleet;
     }
@@ -2465,6 +2466,26 @@ private:
         return JobBusy(JobId::Gpu) || JobBusy(JobId::Afterburner) || GpuPhase() == GpuDl::Installing;
     }
 
+    bool RestoreReady() const {
+        if (!Want(kWantPrepare) || prepareWaived_) return true;
+        return jobs_[static_cast<int>(JobId::Prepare)].phase.load() == static_cast<int>(JobPhase::Done);
+    }
+
+    bool PrepareNeedsChoice() const {
+        if (!Want(kWantPrepare) || prepareWaived_ || JobBusy(JobId::Prepare)) return false;
+        const int phase = jobs_[static_cast<int>(JobId::Prepare)].phase.load();
+        return phase == static_cast<int>(JobPhase::Failed) || phase == static_cast<int>(JobPhase::Cancelled);
+    }
+
+    bool MeasureBlocking() const { return Want(kWantMeasure) && JobBusy(JobId::Measure); }
+
+    bool CpuSettled() const {
+        if (!Want(kWantCpu)) return true;
+        const int phase = jobs_[static_cast<int>(JobId::Cpu)].phase.load();
+        return phase == static_cast<int>(JobPhase::Done) || phase == static_cast<int>(JobPhase::Failed) ||
+               phase == static_cast<int>(JobPhase::Cancelled);
+    }
+
     bool DriverSettled() const {
         if (!Want(kWantGpuClean) || driverSettled_) return true;
         return GpuPhase() == GpuDl::Done;
@@ -2490,6 +2511,10 @@ private:
     }
 
     bool JobSettled(JobId id) const {
+        if (id == JobId::Prepare) {
+            if (prepareWaived_) return true;
+            return jobs_[static_cast<int>(id)].phase.load() == static_cast<int>(JobPhase::Done);
+        }
         if (id == JobId::GpuClean && DriverSettled()) return true;
         if (id == JobId::Afterburner && afterburnerSkipped_) return true;
         if (id == JobId::Hold && Want(kWantMeasure)) {
@@ -2519,7 +2544,7 @@ private:
             if (!Want(wants[i])) continue;
             if (!JobSettled(ids[i])) return false;
         }
-        return !afterburnerPrompt_ && !DriverNeedsChoice();
+        return !afterburnerPrompt_ && !DriverNeedsChoice() && !PrepareNeedsChoice();
     }
 
     int OccupiedSlots() const {
@@ -2527,6 +2552,7 @@ private:
         for (int i = 0; i < static_cast<int>(JobId::Count); ++i) {
             if (JobBusy(static_cast<JobId>(i))) ++n;
         }
+        if (PrepareNeedsChoice()) ++n;
         if (DriverNeedsChoice()) ++n;
         if (afterburnerPrompt_ && !JobBusy(JobId::Afterburner)) ++n;
         return n;
@@ -2542,14 +2568,16 @@ private:
     }
 
     bool StartNextSafe() {
-        if (Want(kWantPrepare) && PhaseIdle(JobId::Prepare) && !VolumeBusy()) {
+        if (Want(kWantPrepare) && !prepareWaived_ && PhaseIdle(JobId::Prepare) && !VolumeBusy()) {
             StartPrepare(false);
             return true;
         }
+        if (!RestoreReady()) return false;
         if (Want(kWantMeasure) && PhaseIdle(JobId::Measure) && !TimerBusy()) {
             StartBenchmark(false);
             return true;
         }
+        if (MeasureBlocking()) return false;
         if (Want(kWantCpu) && PhaseIdle(JobId::Cpu) && !PowerBusy()) {
             StartPpm(false);
             return true;
@@ -2558,7 +2586,7 @@ private:
             StartMemory(false);
             return true;
         }
-        if (Want(kWantStorage) && PhaseIdle(JobId::Storage) && !PowerBusy()) {
+        if (Want(kWantStorage) && PhaseIdle(JobId::Storage) && CpuSettled() && !PowerBusy()) {
             StartStorage(false);
             return true;
         }
@@ -2580,6 +2608,7 @@ private:
     bool ShouldOfferAfterburner() const {
         if (!Want(kWantAfterburner) || afterburnerSkipped_ || afterburnerPrompt_) return false;
         if (!PhaseIdle(JobId::Afterburner) || JobBusy(JobId::Afterburner)) return false;
+        if (!RestoreReady() || MeasureBlocking()) return false;
         if (!DriverSettled() || GpuResourceBusy()) return false;
         if (Want(kWantGpu) && PhaseIdle(JobId::Gpu)) return false;
         return true;
@@ -2624,11 +2653,13 @@ private:
             const auto id = static_cast<JobId>(i);
             if (JobBusy(id)) push(0, id);
         }
+        if (PrepareNeedsChoice()) push(3, JobId::Prepare);
         if (DriverNeedsChoice()) push(1, JobId::GpuClean);
         if (afterburnerPrompt_ && !JobBusy(JobId::Afterburner)) push(2, JobId::Afterburner);
         if (n == 0) {
-            rd_.Text(L"Starting the selected steps.", D2D1::RectF(B.left, B.top, B.right, B.top + 40), rd_.fPhase.Get(),
-                     col::cyan, DWRITE_TEXT_ALIGNMENT_CENTER);
+            rd_.Text(L"The restore point runs first. Nothing else starts until it finishes.",
+                     D2D1::RectF(B.left, B.top, B.right, B.top + 40), rd_.fPhase.Get(), col::cyan,
+                     DWRITE_TEXT_ALIGNMENT_CENTER);
             return;
         }
 
@@ -2678,6 +2709,18 @@ private:
                 const float fx = bar.left + W(bar) * static_cast<float>(std::min(1.0, job.progress));
                 if (fx > bar.left + 2) rd_.FillRound(D2D1::RectF(bar.left, bar.top, fx, bar.bottom), 3, col::cyan);
             }
+            return;
+        }
+        if (kind == 3) {
+            rd_.Text(L"The restore point did not finish. Nothing else has been changed.",
+                     D2D1::RectF(pane.left + 14, pane.top + 44, pane.right - 14, pane.bottom - 52), rd_.fBody.Get(),
+                     col::muted);
+            const D2D1_RECT_F yes = D2D1::RectF(pane.left + 14, pane.bottom - 40, pane.left + W(pane) * 0.62f, pane.bottom - 10);
+            const D2D1_RECT_F no = D2D1::RectF(yes.right + 8, pane.bottom - 40, pane.right - 12, pane.bottom - 10);
+            if (Button(idBase, yes, L"Retry restore point", col::cyan, true, true, dt)) {
+                jobs_[static_cast<int>(JobId::Prepare)].phase.store(static_cast<int>(JobPhase::Idle));
+            }
+            if (Button(idBase + 1, no, L"Continue anyway", col::amber, false, true, dt)) prepareWaived_ = true;
             return;
         }
         if (kind == 1) {
@@ -4379,7 +4422,7 @@ private:
         const wchar_t* labels[] = {L"Full tune", L"Health", L"Measure timing", L"CPU power", L"GPU driver",
                                    L"GPU settings", L"Afterburner", L"Memory", L"Storage", L"Restart notes"};
         const wchar_t* blurbs[] = {
-            L"Runs the selected steps together, one pane for each one on screen. It asks only before a driver install or Afterburner.",
+            L"Makes a restore point first, then measures timing before changing anything else. CPU, memory, and the driver lookup then run together. Storage follows the CPU step. GPU settings and Afterburner wait until the driver choice is finished.",
             L"Opens the health screen. It reads the live settings and lists anything that has drifted. Nothing changes until you choose a repair.",
             L"Times Sleep(1) across timer resolutions and saves a scan. The heatmap on this screen uses the newest of those scans.",
             L"Writes the processor power plan. Core parking and throttling are turned off, and the plan asks the CPU to stay at a high, steady state.",
@@ -4450,7 +4493,8 @@ private:
             if (Button(220, updateR, L"Install update", col::green, true, true, dt, false, false, rd_.fHomeBtn.Get(), true))
                 showUpdatePrompt_ = true;
         }
-        if (!homeLoaded_) LoadHomeLattice();
+        if (!homeLoaded_ && !JobBusy(JobId::Measure)) LoadHomeLattice();
+        if (JobBusy(JobId::Measure)) homeLoaded_ = false;
         const float maintainTop = showUpdate ? updateR.bottom + 8.0f : buttonsBottom + 10.0f;
         const D2D1_RECT_F maintainR = D2D1::RectF(B.left, maintainTop, B.left + leftW, maintainTop + 34.0f);
         NoteTip(maintainR, prefs_.maintainTiming ? L"Maintain timing: on" : L"Maintain timing: off",
@@ -4460,22 +4504,36 @@ private:
             SetMaintain(!prefs_.maintainTiming);
         const float heatTop = maintainR.bottom + 10.0f;
         const D2D1_RECT_F heat = D2D1::RectF(B.left, heatTop, B.left + leftW, B.bottom);
-        NoteTip(heat, L"Last timer scan",
-                homeHas_ ? L"This 3D chart is rebuilt from the newest saved timer-resolution scan. Brighter cells are where Sleep(1) landed. Run Measure timing to replace it."
-                         : L"No timer scan has been saved yet. Run Measure timing and this chart fills in from that result.");
+        const bool scanning = JobBusy(JobId::Measure);
+        NoteTip(heat, scanning ? L"Live timer scan" : L"Last timer scan",
+                scanning ? L"This 3D chart is the measurement that is running now. It updates as each sample lands."
+                         : (homeHas_ ? L"This 3D chart is the newest finished timer-resolution scan. Brighter cells are where Sleep(1) landed."
+                                     : L"No timer scan has been saved yet. Run Measure timing and this chart fills in from that result."));
         rd_.FillRound(heat, 16, Alpha(col::panel, 0.88f));
-        rd_.StrokeRound(heat, 16, Alpha(col::cyan, 0.28f), 1.2f);
-        rd_.Text(homeHas_ ? (L"Last timer scan  " + homeScanLabel_) : L"No timer scan saved yet",
-                 D2D1::RectF(heat.left + 12, heat.top + 8, heat.right - 12, heat.top + 30), rd_.fSmall.Get(), col::cyan);
-        if (homeHas_ && rd_.LatticeReady()) {
+        rd_.StrokeRound(heat, 16, Alpha(col::cyan, scanning ? 0.7f : 0.28f), 1.2f);
+        const std::wstring heatTitle = scanning ? L"Live timer scan" : (homeHas_ ? (L"Last timer scan  " + homeScanLabel_) : L"No timer scan saved yet");
+        rd_.Text(heatTitle, D2D1::RectF(heat.left + 12, heat.top + 8, heat.right - 12, heat.top + 30), rd_.fSmall.Get(),
+                 scanning ? col::text : col::cyan);
+        const bool liveLattice = scanning && snap_.lat.size() == static_cast<size_t>(kLat) * kLat &&
+                                 snap_.col.size() == static_cast<size_t>(kLat);
+        if (liveLattice && rd_.LatticeReady()) {
+            const D2D1_RECT_F plot = D2D1::RectF(heat.left + 10, heat.top + 34, heat.right - 10, heat.bottom - 10);
+            const float side = std::min(W(plot), H(plot));
+            const float pcx = (plot.left + plot.right) * 0.5f;
+            const float pcy = (plot.top + plot.bottom) * 0.5f;
+            rd_.DrawBitmap(rd_.Lattice(), D2D1::RectF(pcx - side * 0.5f, pcy - side * 0.5f, pcx + side * 0.5f, pcy + side * 0.5f), 1.0f);
+        } else if (!scanning && homeHas_ && rd_.LatticeReady()) {
             rd_.RenderLattice(time_, homeLat_.data(), homeCol_.data());
             const D2D1_RECT_F plot = D2D1::RectF(heat.left + 10, heat.top + 34, heat.right - 10, heat.bottom - 10);
             const float side = std::min(W(plot), H(plot));
             const float pcx = (plot.left + plot.right) * 0.5f;
             const float pcy = (plot.top + plot.bottom) * 0.5f;
             rd_.DrawBitmap(rd_.Lattice(), D2D1::RectF(pcx - side * 0.5f, pcy - side * 0.5f, pcx + side * 0.5f, pcy + side * 0.5f), 1.0f);
-        } else if (!homeHas_) {
+        } else if (!scanning && !homeHas_) {
             rd_.Text(L"Run Measure timing to draw this.",
+                     D2D1::RectF(heat.left + 8, heat.top + 28, heat.right - 8, heat.bottom - 8), rd_.fSmall.Get(), col::dim);
+        } else if (scanning) {
+            rd_.Text(L"The scan is starting.",
                      D2D1::RectF(heat.left + 8, heat.top + 28, heat.right - 8, heat.bottom - 8), rd_.fSmall.Get(), col::dim);
         }
         std::vector<HealthCheck> rows;
@@ -4640,7 +4698,7 @@ private:
         rd_.Text(company, D2D1::RectF(x0, y, x0 + nameW + 8, y + 22), rd_.fSub.Get(), col::cyan,
                  DWRITE_TEXT_ALIGNMENT_LEADING, DWRITE_PARAGRAPH_ALIGNMENT_CENTER);
         y += 36;
-        rd_.Text(L"Timer resolution, CPU power, GPU, memory, and storage. Low-level settings are tuned to harden the machine for a more responsive, lower-latency configuration, without unneeded versatility or fluff. Perfect for gamers and HPC. Uncheck any step you want to skip. Begin runs the selected steps together and asks only before a driver install or Afterburner.",
+        rd_.Text(L"Timer resolution, CPU power, GPU, memory, and storage. Low-level settings are tuned to harden the machine for a more responsive, lower-latency configuration, without unneeded versatility or fluff. Perfect for gamers and HPC. Uncheck any step you want to skip. Begin makes a restore point first, measures timing next, then runs the remaining steps in a safe order. It asks only before a driver install or Afterburner.",
                  D2D1::RectF(card.left + 48, y, card.right - 48, y + 108), rd_.fBody.Get(), col::muted,
                  DWRITE_TEXT_ALIGNMENT_CENTER);
         y += 116;
@@ -5538,6 +5596,7 @@ private:
     bool deferGpu_ = false;
     bool fleet_ = false;
     bool driverSettled_ = false;
+    bool prepareWaived_ = false;
     bool afterburnerSkipped_ = false;
     bool afterburnerPrompt_ = false;
     std::atomic<bool> replayGpu_{false};
