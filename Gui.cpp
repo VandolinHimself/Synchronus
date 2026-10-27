@@ -69,6 +69,7 @@ namespace gui {
 namespace {
 
 using gui::AppendHealthLog;
+using gui::DriftCount;
 using gui::HealthCheck;
 using gui::HealthNeedsAttention;
 using gui::HealthStatus;
@@ -81,6 +82,7 @@ using gui::MonitorPrefs;
 using gui::RunHealth;
 using gui::SaveMonitorPrefs;
 using gui::SaveStepChoices;
+using gui::SetDriftCount;
 using gui::SetupComplete;
 using gui::StepChoices;
 using gui::Summarize;
@@ -1497,6 +1499,19 @@ struct Particle {
     D2D1_COLOR_F c;
 };
 
+INT_PTR CALLBACK StartupDlgProc(HWND dlg, UINT msg, WPARAM wp, LPARAM) {
+    if (msg == WM_INITDIALOG) {
+        CheckDlgButton(dlg, 1001, BST_CHECKED);
+        return TRUE;
+    }
+    if (msg == WM_COMMAND && (LOWORD(wp) == IDOK || LOWORD(wp) == IDCANCEL)) {
+        const bool keep = LOWORD(wp) == IDCANCEL || IsDlgButtonChecked(dlg, 1001) == BST_CHECKED;
+        EndDialog(dlg, keep ? 1 : 0);
+        return TRUE;
+    }
+    return FALSE;
+}
+
 class App {
 public:
     explicit App(const Host& host) : host_(host) {
@@ -1555,7 +1570,9 @@ public:
         prefs_ = LoadMonitorPrefs();
         showMsg_ = RegisterWindowMessageW(L"Synchronus.Show");
         AddTray();
-        ShowWindow(hwnd_, prefs_.startMinimized && !host_.autoInstall ? SW_HIDE : SW_SHOW);
+        if (host_.tidyServices) host_.tidyServices();
+        const bool firstOpen = !prefs_.startupAsked && !host_.autoInstall;
+        ShowWindow(hwnd_, (!firstOpen && prefs_.startMinimized && !host_.autoInstall) ? SW_HIDE : SW_SHOW);
         SetTimer(hwnd_, 7, 60 * 1000, nullptr);
         nextScanAt_ = GetTickCount64() + static_cast<unsigned long long>(prefs_.scanHours) * 3600ull * 1000ull;
         if (!prefs_.paused) StartHealthScan();
@@ -1579,23 +1596,14 @@ public:
         } else if (!SetupComplete()) {
             stage_ = Stage::Welcome;
             state_.Phase(L"WELCOME", L"thank you for using Synchronus");
-            if (!prefs_.trayPrompted) {
-                const int answer = MessageBoxW(
-                    hwnd_,
-                    L"Keep Synchronus in the system tray and start it with Windows?\n\n"
-                    L"It watches whether your tweaks are still live and can notify you when one has changed.",
-                    L"Synchronus", MB_YESNO | MB_ICONQUESTION | MB_DEFBUTTON1);
-                prefs_.launchAtLogin = answer == IDYES;
-                prefs_.closeToTray = answer == IDYES;
-                prefs_.trayPrompted = true;
-                SaveMonitorPrefs(prefs_);
-            }
         } else {
             ApplySavedChoices();
             stage_ = Stage::Home;
             state_.Phase(L"HOME", L"choose a function");
         }
         StartUpdateCheck();
+        if (firstOpen) AskStartupChoice();
+        if (!host_.autoInstall && !prefs_.maintainAsked) AskMaintain();
 
         MSG msg{};
         while (running_) {
@@ -2877,6 +2885,21 @@ private:
             repairRescan_ = false;
             StartHealthScan();
         }
+        bool maintainFinished = false;
+        bool maintainStill = false;
+        for (int i = 0; i < static_cast<int>(JobId::Count); ++i) {
+            if (!maintainWatch_[i]) continue;
+            if (JobBusy(static_cast<JobId>(i))) {
+                maintainStill = true;
+                continue;
+            }
+            const int phase = jobs_[i].phase.load();
+            if (phase == static_cast<int>(JobPhase::Idle)) continue;
+            maintainWatch_[i] = false;
+            maintainFinished = true;
+            AppendHealthLog(phase == static_cast<int>(JobPhase::Done) ? L"automatic repair finished" : L"automatic repair failed");
+        }
+        if (maintainFinished && !maintainStill && !healthBusy_.load() && !repairRescan_) StartHealthScan();
         AdvanceChain();
     }
 
@@ -3093,25 +3116,30 @@ private:
 
     bool Button(int id, const D2D1_RECT_F& r, const std::wstring& label, D2D1_COLOR_F accent, bool primary,
                 bool enabled, float dt, bool pulse = false, bool acceptEnter = false,
-                IDWriteTextFormat* font = nullptr) {
+                IDWriteTextFormat* font = nullptr, bool flash = false) {
         if (hover_.size() <= static_cast<size_t>(id)) hover_.resize(static_cast<size_t>(id) + 1, 0.0f);
         const bool over = enabled && PtIn(mouse_, r);
         if (over) hoverButton_ = true;
         hover_[id] = Approach(hover_[id], over ? 1.0f : 0.0f, dt, 12.0f);
         const float hv = hover_[id];
         const bool pressed = over && mouseDown_;
-        const float breathe = pulse && enabled ? 0.5f + 0.5f * std::sin(time_ * 3.1f) : 0.0f;
+        const float breathe = pulse && enabled && !flash ? 0.5f + 0.5f * std::sin(time_ * 3.1f) : 0.0f;
+        const bool lit = !flash || pulseDim_;
         const D2D1_POINT_2F c = D2D1::Point2F((r.left + r.right) / 2, (r.top + r.bottom) / 2);
         if (primary) {
-            const float glowA = enabled ? (pulse ? 0.28f + 0.55f * breathe : 0.22f + 0.35f * hv) : 0.0f;
-            rd_.Glow(c, W(r) * (0.55f + 0.35f * breathe), accent, glowA);
-            if (pulse && enabled) rd_.Glow(c, W(r) * 1.15f, accent, 0.10f + 0.16f * breathe);
-            D2D1_COLOR_F fill = enabled ? MixC(accent, col::white, 0.10f * hv + 0.08f * breathe) : col::panel2;
+            const float glowA = !enabled ? 0.0f : flash ? (lit ? 0.9f : 0.06f)
+                                                        : (pulse ? 0.28f + 0.55f * breathe : 0.22f + 0.35f * hv);
+            rd_.Glow(c, W(r) * (flash ? (lit ? 0.95f : 0.35f) : (0.55f + 0.35f * breathe)), accent, glowA);
+            if (pulse && enabled && !flash) rd_.Glow(c, W(r) * 1.15f, accent, 0.10f + 0.16f * breathe);
+            D2D1_COLOR_F fill = col::panel2;
+            if (enabled && flash) fill = lit ? MixC(accent, col::white, 0.24f) : Alpha(accent, 0.16f);
+            else if (enabled) fill = MixC(accent, col::white, 0.10f * hv + 0.08f * breathe);
             if (pressed) fill = MixC(accent, col::bg, 0.25f);
             rd_.FillRound(r, 8, fill);
-            rd_.StrokeRound(r, 8, Alpha(col::white, (pulse ? 0.28f : 0.18f) + 0.25f * hv + 0.25f * breathe),
-                            pulse ? 1.6f : 1.0f);
-            rd_.Text(label, r, font ? font : rd_.fButton.Get(), enabled ? col::text : col::dim,
+            const float edge = flash ? (lit ? 0.75f : 0.12f) : ((pulse ? 0.28f : 0.18f) + 0.25f * hv + 0.25f * breathe);
+            rd_.StrokeRound(r, 8, Alpha(col::white, edge), flash && lit ? 1.8f : (pulse ? 1.6f : 1.0f));
+            rd_.Text(label, r, font ? font : rd_.fButton.Get(),
+                     enabled && lit ? col::text : Alpha(col::text, enabled ? 0.4f : 0.35f),
                      DWRITE_TEXT_ALIGNMENT_CENTER, DWRITE_PARAGRAPH_ALIGNMENT_CENTER);
         } else {
             rd_.FillRound(r, 8, Alpha(accent, enabled ? 0.08f + 0.12f * hv : 0.03f));
@@ -3800,8 +3828,10 @@ private:
         AppendMenuW(menu, MF_STRING, 4101, L"Run health check");
         AppendMenuW(menu, MF_STRING, 4102, prefs_.paused ? L"Resume monitoring" : L"Pause monitoring");
         AppendMenuW(menu, MF_STRING, 4103, L"Settings");
-        AppendMenuW(menu, MF_STRING, 4105, prefs_.launchAtLogin ? L"Start with Windows: on" : L"Start with Windows: off");
+        AppendMenuW(menu, MF_STRING, 4105,
+                    prefs_.launchAtLogin ? L"Start with Windows, minimized: on" : L"Start with Windows, minimized: off");
         AppendMenuW(menu, MF_STRING, 4106, prefs_.notify ? L"Notifications: on" : L"Notifications: off");
+        AppendMenuW(menu, MF_STRING, 4107, prefs_.maintainTiming ? L"Maintain timing: on" : L"Maintain timing: off");
         AppendMenuW(menu, MF_SEPARATOR, 0, nullptr);
         AppendMenuW(menu, MF_STRING, 4104, L"Exit");
         POINT pt{};
@@ -3823,10 +3853,14 @@ private:
             ShowMain();
         } else if (cmd == 4105) {
             prefs_.launchAtLogin = !prefs_.launchAtLogin;
+            prefs_.startMinimized = prefs_.launchAtLogin;
+            if (prefs_.launchAtLogin) prefs_.closeToTray = true;
             SaveMonitorPrefs(prefs_);
         } else if (cmd == 4106) {
             prefs_.notify = !prefs_.notify;
             SaveMonitorPrefs(prefs_);
+        } else if (cmd == 4107) {
+            SetMaintain(!prefs_.maintainTiming);
         } else if (cmd == 4104) {
             exitRequested_ = true;
             DestroyWindow(hwnd_);
@@ -3834,8 +3868,18 @@ private:
     }
 
     void OnScanTimer() {
-        if (prefs_.paused || healthBusy_.load()) return;
-        if (GetTickCount64() < nextScanAt_) return;
+        if (prefs_.paused) return;
+        const unsigned long long now = GetTickCount64();
+        if (prefs_.maintainTiming) {
+            if (healthBusy_.load() || maintainAfterScan_) return;
+            if (now < nextMaintainAt_) return;
+            nextMaintainAt_ = now + 60ull * 1000ull;
+            maintainAfterScan_ = true;
+            StartHealthScan();
+            return;
+        }
+        if (healthBusy_.load()) return;
+        if (now < nextScanAt_) return;
         StartHealthScan();
     }
 
@@ -3877,7 +3921,123 @@ private:
         });
     }
 
-    void OnHealthReady() { UpdateTray(); }
+    void OnHealthReady() {
+        UpdateTray();
+        if (!maintainAfterScan_) return;
+        maintainAfterScan_ = false;
+        if (prefs_.maintainTiming && !prefs_.paused) AutoRepairDrift();
+    }
+
+    void AskStartupChoice() {
+        const INT_PTR keep = DialogBoxParamW(GetModuleHandleW(nullptr), MAKEINTRESOURCEW(100), hwnd_, StartupDlgProc, 0);
+        const bool on = keep != 0;
+        prefs_.launchAtLogin = on;
+        prefs_.startMinimized = on;
+        prefs_.closeToTray = on;
+        prefs_.startupAsked = true;
+        prefs_.trayPrompted = true;
+        SaveMonitorPrefs(prefs_);
+    }
+
+    void AskMaintain() {
+        const int def = (prefs_.maintainTiming || !prefs_.maintainAsked) ? MB_DEFBUTTON1 : MB_DEFBUTTON2;
+        const int answer = MessageBoxW(
+            hwnd_,
+            L"Automatically maintain the timing structure?\n\n"
+            L"Once a minute, Synchronus reads the monitored settings and puts back any that have drifted. "
+            L"You can change this later from the tray menu or the home screen.",
+            L"Synchronus", MB_YESNO | MB_ICONQUESTION | def);
+        SetMaintain(answer == IDYES);
+    }
+
+    void SetMaintain(bool on) {
+        prefs_.maintainTiming = on;
+        prefs_.maintainAsked = true;
+        SaveMonitorPrefs(prefs_);
+        if (!on) return;
+        nextMaintainAt_ = GetTickCount64() + 60ull * 1000ull;
+        if (!healthBusy_.load() && !maintainAfterScan_) {
+            maintainAfterScan_ = true;
+            StartHealthScan();
+        }
+    }
+
+    void AutoRepairDrift() {
+        std::vector<std::wstring> kinds;
+        std::vector<std::wstring> harden;
+        {
+            std::lock_guard<std::mutex> g(healthM_);
+            for (const auto& c : checks_) {
+                if (c.status == HealthStatus::Pass) {
+                    SetDriftCount(c.id, 0);
+                    continue;
+                }
+                if (!HealthNeedsAttention(c.status) || c.repair.empty() || c.repair == L"afterburner") continue;
+                const int times = DriftCount(c.id) + 1;
+                SetDriftCount(c.id, times);
+                bool seen = false;
+                for (const auto& k : kinds) {
+                    if (k == c.repair) seen = true;
+                }
+                if (!seen) kinds.push_back(c.repair);
+                if (times >= 2) {
+                    bool already = false;
+                    for (const auto& k : harden) {
+                        if (k == c.repair) already = true;
+                    }
+                    if (!already) harden.push_back(c.repair);
+                }
+            }
+        }
+        for (const auto& kind : harden) {
+            if (host_.harden) host_.harden(kind);
+        }
+        for (const auto& kind : kinds) LaunchRepair(kind, false);
+    }
+
+    void LaunchRepair(const std::wstring& kind, bool ask) {
+        if (kind.empty()) return;
+        if (ask) {
+            const int answer = MessageBoxW(hwnd_,
+                                            L"This changes the selected Windows setting using the existing Synchronus step. "
+                                            L"It does not install a driver unless you chose the graphics or Afterburner repair.",
+                                            L"Synchronus", MB_ICONWARNING | MB_OKCANCEL);
+            if (answer != IDOK) return;
+        }
+        JobId id = JobId::Count;
+        unsigned timerUnits = 0;
+        if (kind == L"ppm") id = JobId::Cpu;
+        else if (kind == L"gpu") id = JobId::Gpu;
+        else if (kind == L"memory") id = JobId::Memory;
+        else if (kind == L"storage") id = JobId::Storage;
+        else if (kind == L"afterburner") id = JobId::Afterburner;
+        else if (kind == L"timer") {
+            id = JobId::Hold;
+            if (host_.system) timerUnits = host_.system().serviceResolution;
+            if (!timerUnits || JobBusy(JobId::Measure)) {
+                if (ask && !timerUnits)
+                    MessageBoxW(hwnd_, L"Measure a timer resolution before repairing the timer service.", L"Synchronus", MB_ICONINFORMATION | MB_OK);
+                return;
+            }
+        } else {
+            return;
+        }
+        if (JobBusy(id)) {
+            if (ask) MessageBoxW(hwnd_, L"That step is already running.", L"Synchronus", MB_ICONINFORMATION | MB_OK);
+            return;
+        }
+        if (ask) repairJob_ = static_cast<int>(id);
+        else {
+            maintainWatch_[static_cast<int>(id)] = true;
+            AppendHealthLog(L"automatic repair " + kind);
+        }
+        if (id == JobId::Cpu) StartPpm(false);
+        else if (id == JobId::Gpu) StartGpu(false);
+        else if (id == JobId::Memory) StartMemory(false);
+        else if (id == JobId::Storage) StartStorage(false);
+        else if (id == JobId::Afterburner) StartAfterburner(false);
+        else if (id == JobId::Hold) StartInstall(false, timerUnits);
+    }
 
     void MaybeNotify() {
         if (!prefs_.notify || !trayOn_) return;
@@ -3902,38 +4062,7 @@ private:
         nid_.uFlags = NIF_MESSAGE | NIF_ICON | NIF_TIP;
     }
 
-    void StartRepair(const std::wstring& kind) {
-        if (kind.empty()) return;
-        const int answer = MessageBoxW(hwnd_,
-                                        L"This changes the selected Windows setting using the existing Synchronus step. "
-                                        L"It does not install a driver unless you chose the graphics or Afterburner repair.",
-                                        L"Synchronus", MB_ICONWARNING | MB_OKCANCEL);
-        if (answer != IDOK) return;
-        JobId id = JobId::Count;
-        unsigned timerUnits = 0;
-        if (kind == L"ppm") id = JobId::Cpu;
-        else if (kind == L"gpu") id = JobId::Gpu;
-        else if (kind == L"memory") id = JobId::Memory;
-        else if (kind == L"storage") id = JobId::Storage;
-        else if (kind == L"afterburner") id = JobId::Afterburner;
-        else if (kind == L"timer") {
-            id = JobId::Hold;
-            if (host_.system) timerUnits = host_.system().serviceResolution;
-        } else {
-            return;
-        }
-        if (JobBusy(id)) {
-            MessageBoxW(hwnd_, L"That step is already running.", L"Synchronus", MB_ICONINFORMATION | MB_OK);
-            return;
-        }
-        repairJob_ = static_cast<int>(id);
-        if (id == JobId::Cpu) StartPpm(false);
-        else if (id == JobId::Gpu) StartGpu(false);
-        else if (id == JobId::Memory) StartMemory(false);
-        else if (id == JobId::Storage) StartStorage(false);
-        else if (id == JobId::Afterburner) StartAfterburner(false);
-        else if (id == JobId::Hold) StartInstall(false, timerUnits);
-    }
+    void StartRepair(const std::wstring& kind) { LaunchRepair(kind, true); }
 
     void DrawMonitor(const D2D1_RECT_F& B, float dt) {
         std::vector<HealthCheck> rows;
@@ -4267,9 +4396,9 @@ private:
             rd_.Text(banner, D2D1::RectF(B.left, B.top + 28, B.left + leftW, B.top + 48), rd_.fSmall.Get(), col::muted);
         }
         const bool showUpdate = updatePulse_;
-        const float heatH = std::max(200.0f, H(B) * 0.40f);
+        const float heatH = std::max(180.0f, H(B) * 0.36f);
         const float btnTop = B.top + (banner.empty() ? 40.0f : 52.0f);
-        const float btnBottom = B.bottom - heatH - (showUpdate ? 52.0f : 12.0f);
+        const float btnBottom = B.bottom - heatH - 46.0f - (showUpdate ? 52.0f : 12.0f);
         const float btnGap = 8.0f;
         const float btnH = std::max(40.0f, (btnBottom - btnTop - 4.0f * btnGap) / 5.0f);
         const float colW = (leftW - 10.0f) / 2.0f;
@@ -4318,11 +4447,18 @@ private:
         if (showUpdate) {
             NoteTip(updateR, L"Install update",
                     L"A newer Synchronus build is ready. This downloads it and starts the installer.");
-            if (Button(220, updateR, L"Install update", col::green, true, true, dt, false, false, rd_.fHomeBtn.Get()))
+            if (Button(220, updateR, L"Install update", col::green, true, true, dt, false, false, rd_.fHomeBtn.Get(), true))
                 showUpdatePrompt_ = true;
         }
         if (!homeLoaded_) LoadHomeLattice();
-        const float heatTop = showUpdate ? updateR.bottom + 10.0f : buttonsBottom + 12.0f;
+        const float maintainTop = showUpdate ? updateR.bottom + 8.0f : buttonsBottom + 10.0f;
+        const D2D1_RECT_F maintainR = D2D1::RectF(B.left, maintainTop, B.left + leftW, maintainTop + 34.0f);
+        NoteTip(maintainR, prefs_.maintainTiming ? L"Maintain timing: on" : L"Maintain timing: off",
+                L"When this is on, Synchronus reads the monitored settings once a minute and puts back any that have drifted. If the same one keeps resetting, it applies a stronger fix where that is possible.");
+        if (Button(230, maintainR, prefs_.maintainTiming ? L"Maintain timing: on" : L"Maintain timing: off",
+                   col::cyan, prefs_.maintainTiming, true, dt, false, false, rd_.fHomeBtn.Get()))
+            SetMaintain(!prefs_.maintainTiming);
+        const float heatTop = maintainR.bottom + 10.0f;
         const D2D1_RECT_F heat = D2D1::RectF(B.left, heatTop, B.left + leftW, B.bottom);
         NoteTip(heat, L"Last timer scan",
                 homeHas_ ? L"This 3D chart is rebuilt from the newest saved timer-resolution scan. Brighter cells are where Sleep(1) landed. Run Measure timing to replace it."
@@ -5408,6 +5544,9 @@ private:
     std::atomic<bool> afterburnerStale_{false};
     int repairJob_ = -1;
     bool repairRescan_ = false;
+    bool maintainAfterScan_ = false;
+    bool maintainWatch_[static_cast<int>(JobId::Count)]{};
+    unsigned long long nextMaintainAt_ = 0;
     int chainPhase_[static_cast<int>(JobId::Count)]{};
     std::thread updateThread_;
     std::mutex updateM_;

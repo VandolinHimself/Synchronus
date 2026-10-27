@@ -210,6 +210,11 @@ struct Host {
     std::function<int(Feed&)> applyMemory;
     std::function<int(Feed&)> applyStorage;
     std::function<void()> restartService;                       // undo a benchmark's service stop
+    // Stronger, repeatable protection after the same setting drifts again.
+    // Does not install a driver or run the Afterburner scan.
+    std::function<void(const std::wstring& kind)> harden;
+    // Removes leftover services from older builds. Leaves ProgramData and preferences.
+    std::function<void()> tidyServices;
     // Both empty when this launch should not look for an update.
     // checkUpdate is true only when a newer build should be offered.
     // applyUpdate returns 0 after the files are replaced (caller relaunches),

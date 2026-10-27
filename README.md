@@ -77,7 +77,12 @@ on its own worker, so leaving its screen does not stop it. Full tune runs
 the selected steps together and asks only before a driver install or
 Afterburner. Each running step has a pane, and a new step waits until a pane
 is free. Steps that share the clock, the power plan, the disk, or the
-graphics driver wait instead of writing at the same time. Health compares the
+graphics driver wait instead of writing at the same time. With automatic
+maintenance on, those same monitored settings are read once a minute and a
+drifted value is put back. If the same value keeps resetting, a stronger fix
+is applied and repeated at startup. The first time the window opens, you can
+uncheck starting with Windows minimized to the tray. After that the app
+keeps running on its own. Health compares the
 live timer, power, graphics, memory, storage, and utility state with what
 Synchronus last applied. A saved "applied" flag is not treated as proof.
 Repairs call the existing steps and then check again. The background check
@@ -129,28 +134,28 @@ Opening the window checks one address for a newer build:
 https://luciuswayne.com/synchronus/latest.json
 ```
 
-That address does not change. The request is a GET, and the query `?current=2.4.0` (the running version) can be ignored. Serve the file over HTTPS with `Cache-Control: no-store`. Plain HTTP is refused. The list may be read from `luciuswayne.com`, `www.luciuswayne.com`, or `media.luciuswayne.com`.
+That address does not change. The request is a GET, and the query `?current=2.5.1` (the running version) can be ignored. Serve the file over HTTPS with `Cache-Control: no-store`. Plain HTTP is refused. The list may be read from `luciuswayne.com`, `www.luciuswayne.com`, or `media.luciuswayne.com`.
 
 The executable must be `https://media.luciuswayne.com/Synchronus.exe` or `https://media.luciuswayne.com/Synchronus-<release>.exe`, including after a redirect. The release token is 1–64 characters of letters, numbers, `.`, `_`, and `-`, and it cannot contain `..`. This release is published as:
 
 ```
-https://media.luciuswayne.com/Synchronus-2.4.0.exe
+https://media.luciuswayne.com/Synchronus-2.5.1.exe
 ```
 
 ```json
 {
-  "version": "2.4.0",
-  "url": "https://media.luciuswayne.com/Synchronus-2.4.0.exe",
+  "version": "2.5.1",
+  "url": "https://media.luciuswayne.com/Synchronus-2.5.1.exe",
   "notes": "What changed, in plain text.",
   "sha256": "paste the 64 hex digits here",
   "size": 1234567
 }
 ```
 
-`version`, `url`, and `sha256` are required. `notes` and `size` are optional. `version` is numeric (`2.4.0` and `2.4.0.0` are the same) and must be newer than the running copy. Publish each build under its own `Synchronus-<version>.exe` name. The media host keeps files for a long time, so a new name is what makes the download a new file. `sha256` is the SHA-256 of that file:
+`version`, `url`, and `sha256` are required. `notes` and `size` are optional. `version` is numeric (`2.5.1` and `2.5.1.0` are the same) and must be newer than the running copy. Publish each build under its own `Synchronus-<version>.exe` name. The media host keeps files for a long time, so a new name is what makes the download a new file. `sha256` is the SHA-256 of that file:
 
 ```
-certutil -hashfile Synchronus-2.4.0.exe SHA256
+certutil -hashfile Synchronus-2.5.1.exe SHA256
 ```
 
 The downloaded file's `FILEVERSION` must be that same `version`. In this tree that is `Synchronus.rc` and `kVersion` in `Synchronus.cpp`. If the list is missing or the machine is offline, the window stays quiet. A rejected list is written to `%ProgramData%\Synchronus\Synchronus.log`.
@@ -209,4 +214,4 @@ Philosopher, Gruppo, and Bruno Ace SC are bundled under the
 
 ## Changelog
 
-Version history is in [CHANGELOG.md](CHANGELOG.md). The current release is 2.4.0.
+Version history is in [CHANGELOG.md](CHANGELOG.md). The current release is 2.5.1.

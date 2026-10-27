@@ -71,7 +71,7 @@ gui::MeasurePlan gui::MeasurePlanFor(int fidelity) {
 
 namespace {
 
-constexpr wchar_t kVersion[] = L"2.4.0";
+constexpr wchar_t kVersion[] = L"2.5.1";
 constexpr wchar_t kProduct[] = L"Synchronus";
 constexpr wchar_t kCompany[] = L"Lucius And Wayne Systems LLC";
 constexpr wchar_t kCompanyUrl[] = L"https://luciuswayne.com";
@@ -96,6 +96,10 @@ constexpr wchar_t kLegacyAppRegKey[] = L"SOFTWARE\\TimerResolution";
 constexpr wchar_t kKernelRegKey[] = L"SYSTEM\\CurrentControlSet\\Control\\Session Manager\\kernel";
 constexpr wchar_t kGlobalFlagName[] = L"GlobalTimerResolutionRequests";
 constexpr wchar_t kThreadDpcName[] = L"ThreadDpcEnable";
+
+void HardenRepeatedDriftImpl(const std::wstring& kind);
+void RemoveUnusedServicesImpl();
+int CmdGuard();
 
 // Resolutions are in 100-ns units throughout (10,000 == 1 ms), matching
 // NtQuery/NtSetTimerResolution. The kernel reports:
@@ -2664,6 +2668,7 @@ bool UninstallService() {
     }
 
     DeleteServiceNamed(kLegacyServiceName);
+    RunHiddenWait(L"C:\\Windows\\System32\\schtasks.exe", L"/Delete /F /TN \"Synchronus Guard\"", 15000);
     RestorePpmTweaks();
     RestoreGpuTweaks();
     RestoreMemoryTweaks();
@@ -3315,6 +3320,7 @@ void PrintHelp() {
         L"                                       nothing is installed.\n"
         L"  Synchronus.exe --status              Show installed/current resolution state.\n"
         L"  Synchronus.exe --health              Read-only check of applied settings.\n"
+        L"  Synchronus.exe --guard               Re-apply hardened settings. Used by the startup guard.\n"
         L"  Synchronus.exe --self-test           Check the health-status rules. Changes nothing.\n"
         L"  Synchronus.exe --stop                Stop the service (keeps it installed).\n"
         L"  Synchronus.exe --start               Start the installed service.\n"
@@ -3389,7 +3395,7 @@ bool ParseOptions(const std::vector<std::wstring>& args, Options& opts) {
         ULONG v = 0;
         if (a == L"--benchmark" || a == L"--install" || a == L"--apply" ||
             a == L"--status" || a == L"--stop" || a == L"--start" ||
-            a == L"--uninstall" || a == L"--service" || a == L"--health") {
+            a == L"--uninstall" || a == L"--service" || a == L"--health" || a == L"--guard") {
             opts.command = a.substr(2);
         } else if (a == L"--self-test") {
             opts.command = L"self-test";
@@ -3975,6 +3981,7 @@ int RunCli(const Options& opts, const std::vector<std::wstring>& args) {
         return 0;
     }
     if (opts.command == L"status") return CmdStatus();
+    if (opts.command == L"guard") return CmdGuard();
     if (opts.command == L"apply") return CmdApply(opts);
 
     // Remaining commands mutate the system and/or benchmark.
@@ -4319,6 +4326,8 @@ int RunGui(const Options& opts, const std::vector<std::wstring>&) {
         return ok ? 0 : 1;
     };
     host.restartService = [] { RestartInstalledService(); };
+    host.harden = [](const std::wstring& kind) { HardenRepeatedDriftImpl(kind); };
+    host.tidyServices = [] { RemoveUnusedServicesImpl(); };
     if (!opts.yes) {
         host.checkUpdate = [](gui::AppUpdate& offer, const std::atomic<bool>& stop, std::wstring& err) {
             const bool newer = gui::CheckAppUpdate(kVersion, offer, stop, err);
@@ -4486,6 +4495,185 @@ void FillTuneChecks(std::vector<gui::HealthCheck>& out, const std::atomic<bool>*
         }
     }
     nv.Close(false);
+}
+
+void PinServiceOff(const wchar_t* name) {
+    if (!name || !name[0]) return;
+    SC_HANDLE scm = OpenSCManagerW(nullptr, nullptr, SC_MANAGER_CONNECT);
+    if (!scm) return;
+    SC_HANDLE svc = OpenServiceW(scm, name, SERVICE_STOP | SERVICE_CHANGE_CONFIG | SERVICE_QUERY_STATUS);
+    if (!svc) {
+        CloseServiceHandle(scm);
+        return;
+    }
+    SERVICE_STATUS status{};
+    ControlService(svc, SERVICE_CONTROL_STOP, &status);
+    ChangeServiceConfigW(svc, SERVICE_NO_CHANGE, SERVICE_DISABLED, SERVICE_NO_CHANGE, nullptr, nullptr, nullptr, nullptr,
+                         nullptr, nullptr, nullptr);
+    SC_ACTION none{SC_ACTION_NONE, 0};
+    SERVICE_FAILURE_ACTIONSW failure{};
+    failure.cActions = 1;
+    failure.lpsaActions = &none;
+    ChangeServiceConfig2W(svc, SERVICE_CONFIG_FAILURE_ACTIONS, &failure);
+    CloseServiceHandle(svc);
+    CloseServiceHandle(scm);
+}
+
+void WriteTweaksEveryScheme(const PpmTweak* tweaks, size_t count) {
+    for (ULONG index = 0; index < 64; ++index) {
+        ULONG size = sizeof(GUID);
+        GUID scheme{};
+        if (PowerEnumerate(nullptr, nullptr, nullptr, ACCESS_SCHEME, index, reinterpret_cast<UCHAR*>(&scheme), &size) !=
+            ERROR_SUCCESS)
+            break;
+        for (size_t i = 0; i < count; ++i) {
+            WritePowerIndex(&scheme, tweaks[i].subgroup, tweaks[i].setting, true, tweaks[i].target);
+            WritePowerIndex(&scheme, tweaks[i].subgroup, tweaks[i].setting, false, tweaks[i].target);
+        }
+    }
+}
+
+void MarkGuard(const wchar_t* name) { RegSetDword(HKEY_LOCAL_MACHINE, kAppRegKey, name, 1); }
+
+void EnsureGuardTask() {
+    wchar_t path[MAX_PATH]{};
+    if (!GetModuleFileNameW(nullptr, path, MAX_PATH)) return;
+    const std::wstring tr = L"\\\"" + std::wstring(path) + L"\\\" --guard";
+    const std::wstring args = L"/Create /F /SC ONSTART /RU SYSTEM /RL HIGHEST /TN \"Synchronus Guard\" /TR \"" + tr + L"\"";
+    const DWORD code = RunHiddenWait(L"C:\\Windows\\System32\\schtasks.exe", args, 20000);
+    if (code != 0) LogLine(L"Could not create the Synchronus Guard startup task.");
+    else LogLine(L"Synchronus Guard will re-apply hardened settings at startup.");
+}
+
+void HardenTimerPersistent() {
+    SC_HANDLE scm = OpenSCManagerW(nullptr, nullptr, SC_MANAGER_CONNECT);
+    SC_HANDLE svc = scm ? OpenServiceW(scm, kServiceName, SERVICE_CHANGE_CONFIG | SERVICE_START | SERVICE_QUERY_STATUS) : nullptr;
+    if (svc) {
+        ChangeServiceConfigW(svc, SERVICE_NO_CHANGE, SERVICE_AUTO_START, SERVICE_NO_CHANGE, nullptr, nullptr, nullptr,
+                             nullptr, nullptr, nullptr, nullptr);
+        SC_ACTION actions[] = {{SC_ACTION_RESTART, 5000}, {SC_ACTION_RESTART, 5000}, {SC_ACTION_RESTART, 60000}};
+        SERVICE_FAILURE_ACTIONSW failure{};
+        failure.dwResetPeriod = 86400;
+        failure.cActions = 3;
+        failure.lpsaActions = actions;
+        ChangeServiceConfig2W(svc, SERVICE_CONFIG_FAILURE_ACTIONS, &failure);
+        SERVICE_FAILURE_ACTIONS_FLAG flag{};
+        flag.fFailureActionsOnNonCrashFailures = TRUE;
+        ChangeServiceConfig2W(svc, SERVICE_CONFIG_FAILURE_ACTIONS_FLAG, &flag);
+        if (!StartServiceW(svc, 0, nullptr) && GetLastError() != ERROR_SERVICE_ALREADY_RUNNING) {
+            LogLine(L"The timer service is set to start automatically, but it did not start this time.");
+        }
+        CloseServiceHandle(svc);
+    }
+    if (scm) CloseServiceHandle(scm);
+    MarkGuard(L"GuardTimer");
+    EnsureGuardTask();
+    LogLine(L"Timer service hardened: automatic start, restart if it stops, and a startup guard.");
+}
+
+void HardenPowerPersistent(bool storage) {
+    g_ppmDwell = false;
+    if (!storage) WriteTweaksEveryScheme(kPpmTweaks, _countof(kPpmTweaks));
+    else {
+        WriteTweaksEveryScheme(kStorageTweaks, _countof(kStorageTweaks));
+        PinServiceOff(L"SysMain");
+    }
+    MarkGuard(storage ? L"GuardStorage" : L"GuardPpm");
+    EnsureGuardTask();
+    LogLine(storage ? L"Storage settings hardened on every power plan. SysMain stays disabled."
+                   : L"CPU power settings hardened on every power plan so a plan change cannot restore the defaults.");
+}
+
+void HardenGpuPersistent() {
+    for (const auto& t : kGpuTweaks) {
+        if (t.kind == GpuTweak::Kind::Service) PinServiceOff(t.serviceName);
+    }
+    RegSetDword(HKEY_LOCAL_MACHINE, L"SOFTWARE\\Policies\\Microsoft\\Windows\\GameDVR", L"AllowGameDVR", 0);
+    MarkGuard(L"GuardGpu");
+    EnsureGuardTask();
+    LogLine(L"Graphics services that should stay off are pinned disabled, and Game DVR policy is locked off.");
+}
+
+void HardenMemoryPersistent() {
+    g_ppmDwell = false;
+    RunPowerShell(L"Disable-MMAgent -MemoryCompression -ErrorAction SilentlyContinue; exit 0", 20000);
+    RegSetDword(HKEY_LOCAL_MACHINE, kAppRegKey, L"MemCompDisabled", 1);
+    MarkGuard(L"GuardMemory");
+    EnsureGuardTask();
+    LogLine(L"Memory compression is set to stay off, including from the startup guard.");
+}
+
+void HardenRepeatedDriftImpl(const std::wstring& kind) {
+    if (kind == L"timer") HardenTimerPersistent();
+    else if (kind == L"ppm") HardenPowerPersistent(false);
+    else if (kind == L"storage") HardenPowerPersistent(true);
+    else if (kind == L"gpu") HardenGpuPersistent();
+    else if (kind == L"memory") HardenMemoryPersistent();
+}
+
+bool GuardFlag(const wchar_t* name) {
+    DWORD value = 0;
+    return RegGetDword(HKEY_LOCAL_MACHINE, kAppRegKey, name, value) && value != 0;
+}
+
+void RemoveUnusedServicesImpl() {
+    if (ServiceExistsNamed(kLegacyServiceName)) {
+        LogLine(L"Removing the unused TimerResolution service left by an older build.");
+        StopServiceNamed(kLegacyServiceName);
+        DeleteServiceNamed(kLegacyServiceName);
+    }
+    SC_HANDLE scm = OpenSCManagerW(nullptr, nullptr, SC_MANAGER_CONNECT);
+    if (!scm) return;
+    SC_HANDLE svc = OpenServiceW(scm, kServiceName, SERVICE_QUERY_CONFIG);
+    if (svc) {
+        DWORD bytes = 0;
+        QueryServiceConfigW(svc, nullptr, 0, &bytes);
+        std::vector<unsigned char> buf(bytes ? bytes : 1);
+        if (bytes && QueryServiceConfigW(svc, reinterpret_cast<QUERY_SERVICE_CONFIGW*>(buf.data()), bytes, &bytes)) {
+            std::wstring image = reinterpret_cast<QUERY_SERVICE_CONFIGW*>(buf.data())->lpBinaryPathName
+                                     ? reinterpret_cast<QUERY_SERVICE_CONFIGW*>(buf.data())->lpBinaryPathName
+                                     : L"";
+            if (image.size() >= 2 && image.front() == L'"') {
+                const size_t end = image.find(L'"', 1);
+                image = image.substr(1, end == std::wstring::npos ? std::wstring::npos : end - 1);
+            } else {
+                const size_t space = image.find(L' ');
+                if (space != std::wstring::npos) image.resize(space);
+            }
+            if (!image.empty() && GetFileAttributesW(image.c_str()) == INVALID_FILE_ATTRIBUTES) {
+                LogLine(L"Removing the Synchronus service because its program file is gone.");
+                CloseServiceHandle(svc);
+                svc = OpenServiceW(scm, kServiceName, DELETE | SERVICE_STOP | SERVICE_QUERY_STATUS);
+                if (svc) {
+                    StopServiceNamed(kServiceName);
+                    DeleteService(svc);
+                }
+            }
+        }
+        if (svc) CloseServiceHandle(svc);
+    }
+    CloseServiceHandle(scm);
+}
+
+int CmdGuard() {
+    g_ppmDwell = false;
+    LogLine(L"Startup guard");
+    if (GuardFlag(L"GuardTimer")) HardenTimerPersistent();
+    if (GuardFlag(L"GuardPpm")) WriteTweaksEveryScheme(kPpmTweaks, _countof(kPpmTweaks));
+    if (GuardFlag(L"GuardStorage")) {
+        WriteTweaksEveryScheme(kStorageTweaks, _countof(kStorageTweaks));
+        PinServiceOff(L"SysMain");
+    }
+    if (GuardFlag(L"GuardGpu")) {
+        for (const auto& t : kGpuTweaks) {
+            if (t.kind == GpuTweak::Kind::Service) PinServiceOff(t.serviceName);
+        }
+        RegSetDword(HKEY_LOCAL_MACHINE, L"SOFTWARE\\Policies\\Microsoft\\Windows\\GameDVR", L"AllowGameDVR", 0);
+    }
+    if (GuardFlag(L"GuardMemory")) {
+        RunPowerShell(L"Disable-MMAgent -MemoryCompression -ErrorAction SilentlyContinue; exit 0", 20000);
+    }
+    return 0;
 }
 
 }  // namespace

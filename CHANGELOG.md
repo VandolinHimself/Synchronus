@@ -1,6 +1,21 @@
 # Changelog
 
-Current release: **2.4.0**.
+Current release: **2.5.1**.
+
+## 2.5.1 — 2026-10-27
+
+- The first time Synchronus opens, a checked box offers to start with Windows, minimized to the tray. Uncheck it if you do not want that. After that, it keeps running on its own.
+- Older unused services, including the old TimerResolution service and a Synchronus service whose program file is gone, are removed. Saved preferences and the Synchronus data folder stay.
+- If a monitored setting keeps switching off or returning to the default, Synchronus applies a stronger fix: the timer service restarts itself, power values are written into every plan, and services that should stay off are pinned that way. A startup guard repeats those fixes. It does not install a driver or run the Afterburner scan.
+
+## 2.5.0 — 2026-10-27
+
+- Synchronus asks at startup whether to keep the timing structure maintained. The same switch is on the tray menu and the home screen.
+- While that is on, the monitored settings are read once a minute. A setting that has drifted is put back. A driver download and the Afterburner scan are not started by this pass.
+
+## 2.4.1 — 2026-10-27
+
+- The Install update button on the home screen flashes while a newer build is ready.
 
 ## 2.4.0 — 2026-10-27
 

@@ -247,6 +247,31 @@ const wchar_t* HealthStatusText(HealthStatus status) {
     return L"Unknown";
 }
 
+int DriftCount(const std::wstring& id) {
+    DWORD value = 0;
+    DWORD size = sizeof(value);
+    const std::wstring name = L"Drift_" + id;
+    if (RegGetValueW(HKEY_CURRENT_USER, L"Software\\Synchronus\\Monitor", name.c_str(), RRF_RT_REG_DWORD, nullptr, &value,
+                     &size) != ERROR_SUCCESS)
+        return 0;
+    return static_cast<int>(value);
+}
+
+void SetDriftCount(const std::wstring& id, int count) {
+    HKEY key = nullptr;
+    if (RegCreateKeyExW(HKEY_CURRENT_USER, L"Software\\Synchronus\\Monitor", 0, nullptr, 0, KEY_SET_VALUE, nullptr, &key,
+                        nullptr) != ERROR_SUCCESS)
+        return;
+    const std::wstring name = L"Drift_" + id;
+    if (count <= 0) {
+        RegDeleteValueW(key, name.c_str());
+    } else {
+        const DWORD value = static_cast<DWORD>(count);
+        RegSetValueExW(key, name.c_str(), 0, REG_DWORD, reinterpret_cast<const BYTE*>(&value), sizeof(value));
+    }
+    RegCloseKey(key);
+}
+
 bool HealthCountsAsPass(HealthStatus status) { return status == HealthStatus::Pass; }
 
 bool HealthNeedsAttention(HealthStatus status) {
@@ -292,8 +317,11 @@ MonitorPrefs LoadMonitorPrefs() {
     if (ReadDword(HKEY_CURRENT_USER, kMonitor, L"StartMinimized", v)) p.startMinimized = v != 0;
     if (ReadDword(HKEY_CURRENT_USER, kMonitor, L"LaunchAtLogin", v)) p.launchAtLogin = v != 0;
     if (ReadDword(HKEY_CURRENT_USER, kMonitor, L"TrayPrompted", v)) p.trayPrompted = v != 0;
+    if (ReadDword(HKEY_CURRENT_USER, kMonitor, L"StartupAsked", v)) p.startupAsked = v != 0;
     if (ReadDword(HKEY_CURRENT_USER, kMonitor, L"Notify", v)) p.notify = v != 0;
     if (ReadDword(HKEY_CURRENT_USER, kMonitor, L"Paused", v)) p.paused = v != 0;
+    if (ReadDword(HKEY_CURRENT_USER, kMonitor, L"MaintainTiming", v)) p.maintainTiming = v != 0;
+    if (ReadDword(HKEY_CURRENT_USER, kMonitor, L"MaintainAsked", v)) p.maintainAsked = v != 0;
     if (ReadDword(HKEY_CURRENT_USER, kMonitor, L"ScanHours", v) && v >= 1 && v <= 168) p.scanHours = static_cast<int>(v);
     return p;
 }
@@ -308,8 +336,11 @@ void SaveMonitorPrefs(const MonitorPrefs& prefs) {
     put(L"StartMinimized", prefs.startMinimized ? 1 : 0);
     put(L"LaunchAtLogin", prefs.launchAtLogin ? 1 : 0);
     put(L"TrayPrompted", prefs.trayPrompted ? 1 : 0);
+    put(L"StartupAsked", prefs.startupAsked ? 1 : 0);
     put(L"Notify", prefs.notify ? 1 : 0);
     put(L"Paused", prefs.paused ? 1 : 0);
+    put(L"MaintainTiming", prefs.maintainTiming ? 1 : 0);
+    put(L"MaintainAsked", prefs.maintainAsked ? 1 : 0);
     put(L"ScanHours", static_cast<DWORD>(prefs.scanHours < 1 ? 6 : prefs.scanHours));
     RegCloseKey(key);
     ApplyLaunchAtLogin(prefs.launchAtLogin);

@@ -43,11 +43,14 @@ struct HealthSummary {
 
 struct MonitorPrefs {
     bool closeToTray = true;
-    bool startMinimized = false;
+    bool startMinimized = true;
     bool launchAtLogin = true;
     bool trayPrompted = false;
+    bool startupAsked = false;
     bool notify = true;
     bool paused = false;
+    bool maintainTiming = false;
+    bool maintainAsked = false;
     int scanHours = 6;
 };
 
@@ -61,6 +64,9 @@ std::vector<HealthCheck> RunHealth(const std::atomic<bool>* cancelled);
 
 // Pure comparisons used by --self-test. Returns 0 when every case holds.
 int SelfTestHealth();
+
+int DriftCount(const std::wstring& id);
+void SetDriftCount(const std::wstring& id, int count);
 
 MonitorPrefs LoadMonitorPrefs();
 void SaveMonitorPrefs(const MonitorPrefs& prefs);
