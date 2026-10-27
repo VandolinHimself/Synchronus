@@ -5,8 +5,8 @@
 // and renders it at the monitor's refresh rate: the live sweep curve, an
 // oscilloscope of individual Sleep(1) wake-ups, the wake-up distribution
 // against the clock ticks, animated statistics, the verification bars and
-// finally the result / install flow. The Synchronus mark and the Lucius And
-// Wayne Systems LLC producer logo are embedded as RCDATA and drawn through
+// finally the result / install flow. The Synchronus mark and the Lucius &
+// Wayne Systems producer logo are embedded as RCDATA and drawn through
 // WIC. No other dependencies.
 #define NOMINMAX
 #define WIN32_LEAN_AND_MEAN
@@ -26,6 +26,7 @@
 #include <dxgi1_2.h>
 #include <objbase.h>
 #include <shellapi.h>
+#include <shlobj.h>
 #include <winreg.h>
 #include <wincodec.h>
 #include <wrl/client.h>
@@ -1318,7 +1319,7 @@ float4 ps(VSOut i) : SV_TARGET {
     ComPtr<ID2D1RadialGradientBrush> glowCyan_, glowMagenta_, glowViolet_, glowAmber_, glowGreen_, glowWhite_,
         glowTeal_, glowRed_;
     ComPtr<ID2D1LinearGradientBrush> titleGrad_, progressGrad_, greenGrad_;
-    ComPtr<ID2D1Bitmap> logo_;   // Lucius And Wayne producer mark (welcome only)
+    ComPtr<ID2D1Bitmap> logo_;   // Lucius & Wayne producer mark (welcome only)
     ComPtr<ID2D1Bitmap> mark_;   // Synchronus icon (header, window)
     ComPtr<ID2D1Bitmap> brand_;  // Synchronus logo (welcome masthead)
 
@@ -1550,7 +1551,7 @@ public:
         const int x = work.left + std::max(0L, (work.right - work.left - ww) / 2);
         const int y = work.top + std::max(0L, (work.bottom - work.top - wh) / 2);
         hwnd_ = CreateWindowExW(0, wc.lpszClassName,
-                                L"Synchronus  |  Lucius And Wayne Systems LLC",
+                                L"Synchronus  |  Lucius & Wayne Systems",
                                 WS_OVERLAPPEDWINDOW, x, y, ww, wh, nullptr, nullptr, hinst, this);
         if (!hwnd_) return 1;
         SetTaskbarIcons();
@@ -1569,6 +1570,10 @@ public:
             return 1;
         }
         prefs_ = LoadMonitorPrefs();
+        SetDriverStoreDir(prefs_.driverDir);
+        SetAfterburnerRoot(prefs_.afterburnerDir);
+        nextUpdateAt_ = GetTickCount64() +
+                        static_cast<unsigned long long>(std::max(1, prefs_.updateMinutes)) * 60ull * 1000ull;
         showMsg_ = RegisterWindowMessageW(L"Synchronus.Show");
         AddTray();
         if (host_.tidyServices) host_.tidyServices();
@@ -1696,7 +1701,8 @@ private:
                 break;
             case WM_KEYDOWN:
                 if (wp == VK_ESCAPE) {
-                    if (restartConfirm_) restartConfirm_ = false;
+                    if (settingsOpen_) settingsOpen_ = false;
+                    else if (restartConfirm_) restartConfirm_ = false;
                     else PostMessageW(hwnd_, WM_CLOSE, 0, 0);
                 }
                 if (wp == VK_RETURN) enterPending_ = true;
@@ -1719,7 +1725,11 @@ private:
                 return 0;
             case WM_TIMER:
                 if (wp == 7) {
-                    StartUpdateCheck();
+                    const unsigned long long now = GetTickCount64();
+                    if (now >= nextUpdateAt_) {
+                        nextUpdateAt_ = now + static_cast<unsigned long long>(std::max(1, prefs_.updateMinutes)) * 60ull * 1000ull;
+                        StartUpdateCheck();
+                    }
                     OnScanTimer();
                 }
                 if (wp == 8 && updatePulse_) {
@@ -1728,6 +1738,12 @@ private:
                 }
                 return 0;
             case WM_MOUSEWHEEL:
+                if (settingsOpen_) {
+                    const int delta = GET_WHEEL_DELTA_WPARAM(wp);
+                    settingsScroll_ = std::max(0, settingsScroll_ - delta / 120);
+                    if (settingsScroll_ > settingsMaxScroll_) settingsScroll_ = settingsMaxScroll_;
+                    return 0;
+                }
                 if (stage_.load() == Stage::Monitor || stage_.load() == Stage::Home) {
                     const int delta = GET_WHEEL_DELTA_WPARAM(wp);
                     healthScroll_ = std::max(0, healthScroll_ - delta / 120);
@@ -2007,7 +2023,7 @@ private:
         return updateLine_;
     }
 
-    // The version check starts with the window and repeats once a minute.
+    // The version check starts with the window and repeats on the Settings interval.
     // A download starts only after the user agrees. The same version is announced once.
     void PollUpdate() {
         std::wstring fail;
@@ -2959,7 +2975,15 @@ private:
             AppendHealthLog(phase == static_cast<int>(JobPhase::Done) ? L"automatic repair finished" : L"automatic repair failed");
         }
         if (maintainFinished && !maintainStill && !healthBusy_.load() && !repairRescan_) StartHealthScan();
+        KickHold();
         AdvanceChain();
+    }
+
+    void KickHold() {
+        if (!HoldReady()) return;
+        const Stage s = stage_.load();
+        const bool show = s == Stage::Running || s == Stage::Result || s == Stage::Installing;
+        StartInstall(show);
     }
 
     // ---- frame ----
@@ -3007,6 +3031,13 @@ private:
 
         rd_.Begin();
         DrawBackground(w, h);
+        const bool wasSettings = settingsOpen_;
+        const bool savedClick = clickPending_;
+        const bool savedEnter = enterPending_;
+        if (wasSettings) {
+            clickPending_ = false;
+            enterPending_ = false;
+        }
         if (stage == Stage::Welcome) {
             DrawWelcome(D2D1::RectF(pad, pad, w - pad, footer.top - 10), dt);
         } else if (stage == Stage::Fleet) {
@@ -3039,7 +3070,25 @@ private:
         UpdateParticles(dt);
         DrawParticles();
         if (introT_ < 1) rd_.Fill(D2D1::RectF(0, 0, w, h), Alpha(col::bg, 1 - EaseOutCubic(introT_)));
+        if (settingsOpen_) {
+            clickPending_ = savedClick;
+            enterPending_ = savedEnter;
+            DrawSettings(w, h, dt, wasSettings);
+        }
         if (!rd_.End()) rd_.Release();
+        if (pendingBrowse_ != 0) {
+            const int which = pendingBrowse_;
+            pendingBrowse_ = 0;
+            clickPending_ = false;
+            enterPending_ = false;
+            const std::wstring picked = PickFolder(which == 1 ? L"Choose where driver packages are stored"
+                                                              : L"Choose where MSI Afterburner is installed");
+            if (!picked.empty()) {
+                if (which == 1) prefs_.driverDir = picked;
+                else prefs_.afterburnerDir = picked;
+                CommitPrefs();
+            }
+        }
 
         clickPending_ = false;
         enterPending_ = false;
@@ -3063,6 +3112,214 @@ private:
     }
 
     // ---- header + progress ----
+    std::wstring PickFolder(const wchar_t* title) {
+        BROWSEINFOW bi{};
+        bi.hwndOwner = hwnd_;
+        bi.lpszTitle = title;
+        bi.ulFlags = BIF_RETURNONLYFSDIRS | BIF_NEWDIALOGSTYLE | BIF_EDITBOX | BIF_USENEWUI;
+        PIDLIST_ABSOLUTE pidl = SHBrowseForFolderW(&bi);
+        if (!pidl) return {};
+        wchar_t path[MAX_PATH]{};
+        std::wstring out;
+        if (SHGetPathFromIDListW(pidl, path)) out = path;
+        CoTaskMemFree(pidl);
+        if (out.size() > 200 || out.find(L'"') != std::wstring::npos) return {};
+        return out;
+    }
+
+    void CommitPrefs() {
+        prefs_.scanHours = std::clamp(prefs_.scanHours, 1, 168);
+        prefs_.maintainMinutes = std::clamp(prefs_.maintainMinutes, 1, 180);
+        prefs_.updateMinutes = std::clamp(prefs_.updateMinutes, 1, 1440);
+        prefs_.notifyMinutes = std::clamp(prefs_.notifyMinutes, 1, 1440);
+        SaveMonitorPrefs(prefs_);
+        SetDriverStoreDir(prefs_.driverDir);
+        SetAfterburnerRoot(prefs_.afterburnerDir);
+    }
+
+    void SaveCurrentChoices() {
+        StepChoices choices;
+        choices.prepare = Want(kWantPrepare);
+        choices.measure = Want(kWantMeasure);
+        choices.hold = Want(kWantHold);
+        choices.cpu = Want(kWantCpu);
+        choices.gpuClean = Want(kWantGpuClean);
+        choices.gpu = Want(kWantGpu);
+        choices.afterburner = Want(kWantAfterburner);
+        choices.memory = Want(kWantMemory);
+        choices.storage = Want(kWantStorage);
+        SaveStepChoices(choices);
+    }
+
+    bool DrawGearButton(const D2D1_RECT_F& r, float dt) {
+        const bool clicked = HitTarget(251, r, true, dt);
+        const float hv = hover_.size() > 251 ? hover_[251] : 0.0f;
+        NoteTip(r, L"Settings",
+                L"Driver folder, Afterburner folder, startup, notifications, and the timers Synchronus uses.");
+        rd_.FillRound(r, 8, Alpha(col::cyan, 0.08f + 0.16f * hv));
+        rd_.StrokeRound(r, 8, Alpha(col::cyan, 0.40f + 0.45f * hv), 1.2f);
+        const float cx = (r.left + r.right) * 0.5f;
+        const float cy = (r.top + r.bottom) * 0.5f;
+        const D2D1_COLOR_F c = MixC(col::cyan, col::white, 0.25f + 0.55f * hv);
+        rd_.Arc(D2D1::Point2F(cx, cy), 8.4f, 0, 6.283185f, c, 1.5f);
+        rd_.Arc(D2D1::Point2F(cx, cy), 3.1f, 0, 6.283185f, c, 1.3f);
+        for (int i = 0; i < 8; ++i) {
+            const float a = static_cast<float>(i) * 0.785398f;
+            const float cs = std::cos(a);
+            const float sn = std::sin(a);
+            rd_.Line(D2D1::Point2F(cx + cs * 6.0f, cy + sn * 6.0f), D2D1::Point2F(cx + cs * 11.2f, cy + sn * 11.2f), c,
+                     2.2f, rd_.Round());
+        }
+        return clicked;
+    }
+
+    void DrawSettings(float w, float h, float dt, bool interactive) {
+        if (!interactive) {
+            clickPending_ = false;
+            enterPending_ = false;
+        }
+        rd_.Fill(D2D1::RectF(0, 0, w, h), Alpha(col::bg, 0.62f));
+        const float pw = std::min(720.0f, w - 40.0f);
+        const float ph = std::min(640.0f, h - 36.0f);
+        const float left = (w - pw) * 0.5f;
+        const float top = (h - ph) * 0.5f;
+        const D2D1_RECT_F win = D2D1::RectF(left, top, left + pw, top + ph);
+        if (interactive && clickPending_ && !PtIn(clickPos_, win)) {
+            settingsOpen_ = false;
+            return;
+        }
+        rd_.FillRound(win, 14, col::panel);
+        rd_.StrokeRound(win, 14, Alpha(col::cyan, 0.55f), 1.4f);
+        rd_.Text(L"Settings", D2D1::RectF(left + 18, top + 8, left + pw - 54, top + 36), rd_.fPhase.Get(), col::text,
+                 DWRITE_TEXT_ALIGNMENT_LEADING, DWRITE_PARAGRAPH_ALIGNMENT_CENTER);
+        const D2D1_RECT_F closeR = D2D1::RectF(left + pw - 44, top + 8, left + pw - 12, top + 36);
+        if (Button(400, closeR, L"X", col::muted, false, true, dt, false, false, rd_.fSmall.Get())) settingsOpen_ = false;
+        const D2D1_RECT_F view = D2D1::RectF(left + 10, top + 46, left + pw - 10, top + ph - 12);
+        rd_.Clip(view);
+        const float x0 = view.left + 6;
+        const float x1 = view.right - 6;
+        float y = view.top - static_cast<float>(settingsScroll_) * 32.0f;
+        const float startY = y;
+        auto shown = [&](const D2D1_RECT_F& row) { return row.bottom > view.top + 1 && row.top < view.bottom - 1; };
+        auto heading = [&](const wchar_t* text) {
+            const D2D1_RECT_F row = D2D1::RectF(x0, y, x1, y + 22);
+            if (shown(row)) rd_.Text(text, row, rd_.fSmall.Get(), col::cyan);
+            y += 24;
+        };
+        heading(L"App");
+        auto toggle = [&](int id, bool on, const wchar_t* label) {
+            const D2D1_RECT_F row = D2D1::RectF(x0, y, x1, y + 30);
+            y += 32;
+            if (!shown(row)) return false;
+            return CheckRow(id, row, on, false, label, dt);
+        };
+        if (toggle(401, prefs_.launchAtLogin, L"Start with Windows, minimized to the tray")) {
+            prefs_.launchAtLogin = !prefs_.launchAtLogin;
+            prefs_.startMinimized = prefs_.launchAtLogin;
+            if (prefs_.launchAtLogin) prefs_.closeToTray = true;
+            CommitPrefs();
+        }
+        if (toggle(402, prefs_.closeToTray, L"Close the window to the tray")) {
+            prefs_.closeToTray = !prefs_.closeToTray;
+            CommitPrefs();
+        }
+        if (toggle(403, prefs_.notify, L"Notify when a monitored setting needs attention")) {
+            prefs_.notify = !prefs_.notify;
+            CommitPrefs();
+        }
+        if (toggle(404, prefs_.paused, L"Pause health monitoring")) {
+            prefs_.paused = !prefs_.paused;
+            CommitPrefs();
+        }
+        if (toggle(405, prefs_.maintainTiming, L"Maintain timing automatically")) SetMaintain(!prefs_.maintainTiming);
+        heading(L"Timers");
+        auto stepper = [&](int minusId, int plusId, const wchar_t* label, int value, int lo, int hi, int& dest, int kind) {
+            const D2D1_RECT_F row = D2D1::RectF(x0, y, x1, y + 30);
+            y += 32;
+            if (!shown(row)) return;
+            rd_.Text(label, D2D1::RectF(row.left + 10, row.top, row.right - 150, row.bottom), rd_.fSmall.Get(), col::text,
+                     DWRITE_TEXT_ALIGNMENT_LEADING, DWRITE_PARAGRAPH_ALIGNMENT_CENTER);
+            const D2D1_RECT_F minus = D2D1::RectF(row.right - 138, row.top + 2, row.right - 104, row.bottom - 2);
+            const D2D1_RECT_F plus = D2D1::RectF(row.right - 42, row.top + 2, row.right - 8, row.bottom - 2);
+            rd_.Text(std::to_wstring(value), D2D1::RectF(minus.right, row.top, plus.left, row.bottom), rd_.fSmall.Get(), col::cyan,
+                     DWRITE_TEXT_ALIGNMENT_CENTER, DWRITE_PARAGRAPH_ALIGNMENT_CENTER);
+            if (Button(minusId, minus, L"-", col::cyan, false, value > lo, dt, false, false, rd_.fSmall.Get()) && value > lo) {
+                dest = value - 1;
+                CommitPrefs();
+                if (kind == 1)
+                    nextMaintainAt_ = GetTickCount64() + static_cast<unsigned long long>(dest) * 60ull * 1000ull;
+                if (kind == 2)
+                    nextUpdateAt_ = GetTickCount64() + static_cast<unsigned long long>(dest) * 60ull * 1000ull;
+                if (kind == 3)
+                    nextScanAt_ = GetTickCount64() + static_cast<unsigned long long>(dest) * 3600ull * 1000ull;
+            }
+            if (Button(plusId, plus, L"+", col::cyan, false, value < hi, dt, false, false, rd_.fSmall.Get()) && value < hi) {
+                dest = value + 1;
+                CommitPrefs();
+                if (kind == 1)
+                    nextMaintainAt_ = GetTickCount64() + static_cast<unsigned long long>(dest) * 60ull * 1000ull;
+                if (kind == 2)
+                    nextUpdateAt_ = GetTickCount64() + static_cast<unsigned long long>(dest) * 60ull * 1000ull;
+                if (kind == 3)
+                    nextScanAt_ = GetTickCount64() + static_cast<unsigned long long>(dest) * 3600ull * 1000ull;
+            }
+        };
+        stepper(410, 411, L"Health scan, hours", prefs_.scanHours, 1, 168, prefs_.scanHours, 3);
+        stepper(412, 413, L"Maintain check, minutes", prefs_.maintainMinutes, 1, 180, prefs_.maintainMinutes, 1);
+        stepper(414, 415, L"Update check, minutes", prefs_.updateMinutes, 1, 1440, prefs_.updateMinutes, 2);
+        stepper(416, 417, L"Notification gap, minutes", prefs_.notifyMinutes, 1, 1440, prefs_.notifyMinutes, 0);
+        heading(L"Folders");
+        auto pathRow = [&](int browseId, int resetId, const wchar_t* label, const std::wstring& shownPath, bool driver) {
+            const D2D1_RECT_F row = D2D1::RectF(x0, y, x1, y + 30);
+            y += 32;
+            if (!shown(row)) return;
+            rd_.Text(label, D2D1::RectF(row.left + 10, row.top, row.left + 132, row.bottom), rd_.fSmall.Get(), col::text,
+                     DWRITE_TEXT_ALIGNMENT_LEADING, DWRITE_PARAGRAPH_ALIGNMENT_CENTER);
+            rd_.Text(shownPath, D2D1::RectF(row.left + 136, row.top, row.right - 168, row.bottom), rd_.fMonoSmall.Get(), col::muted,
+                     DWRITE_TEXT_ALIGNMENT_LEADING, DWRITE_PARAGRAPH_ALIGNMENT_CENTER);
+            const D2D1_RECT_F browse = D2D1::RectF(row.right - 160, row.top + 2, row.right - 84, row.bottom - 2);
+            const D2D1_RECT_F reset = D2D1::RectF(row.right - 78, row.top + 2, row.right - 4, row.bottom - 2);
+            if (Button(browseId, browse, L"Browse", col::cyan, false, true, dt, false, false, rd_.fSmall.Get()))
+                pendingBrowse_ = driver ? 1 : 2;
+            if (Button(resetId, reset, L"Default", col::muted, false, true, dt, false, false, rd_.fSmall.Get())) {
+                if (driver) prefs_.driverDir.clear();
+                else prefs_.afterburnerDir.clear();
+                CommitPrefs();
+            }
+        };
+        pathRow(430, 431, L"Drivers", prefs_.driverDir.empty() ? DefaultDriverStoreDir() : prefs_.driverDir, true);
+        pathRow(432, 433, L"Afterburner", prefs_.afterburnerDir.empty() ? DefaultAfterburnerRoot() : prefs_.afterburnerDir, false);
+        const D2D1_RECT_F note = D2D1::RectF(x0, y, x1, y + 32);
+        if (shown(note)) {
+            rd_.Text(L"Empty folders stay on the usual locations. RivaTuner stays in its own folder.", note, rd_.fMonoSmall.Get(),
+                     col::dim, DWRITE_TEXT_ALIGNMENT_LEADING, DWRITE_PARAGRAPH_ALIGNMENT_CENTER);
+        }
+        y += 34;
+        heading(L"Full tune steps");
+        static const wchar_t* kLabels[kWantCount] = {
+            L"Restore point", L"Timer measure", L"Boot service", L"CPU tune", L"GPU driver",
+            L"GPU settings",  L"Afterburner",   L"Memory",       L"Storage",
+        };
+        const float colW = (x1 - x0 - 10) * 0.5f;
+        for (int i = 0; i < kWantCount; ++i) {
+            const float colN = (i < 5) ? 0.0f : 1.0f;
+            const float rowN = static_cast<float>(i < 5 ? i : i - 5);
+            const float yy = y + rowN * 32.0f;
+            const D2D1_RECT_F cell = D2D1::RectF(x0 + colN * (colW + 10), yy, x0 + colN * (colW + 10) + colW, yy + 30);
+            if (!shown(cell)) continue;
+            if (CheckRow(440 + i, cell, want_[i], false, kLabels[i], dt)) {
+                want_[i] = !want_[i];
+                SaveCurrentChoices();
+            }
+        }
+        y += 5 * 32.0f;
+        rd_.Unclip();
+        const float used = (y - startY);
+        const int maxScroll = std::max(0, static_cast<int>(std::ceil((used - H(view)) / 32.0f)));
+        settingsMaxScroll_ = maxScroll;
+        if (settingsScroll_ > settingsMaxScroll_) settingsScroll_ = settingsMaxScroll_;
+    }
+
     void DrawHeader(const D2D1_RECT_F& r, const D2D1_RECT_F& bar, Stage stage, float dt) {
         float textLeft = r.left;
         if (rd_.Mark()) {
@@ -3079,7 +3336,7 @@ private:
         grad->SetOpacity(1);
         rd_.TextBrush(L"SYNCHRONUS", D2D1::RectF(textLeft, r.top, textLeft + 560, r.top + 32), rd_.fTitle.Get(),
                       grad);
-        rd_.Text(L"Lucius And Wayne Systems LLC  |  luciuswayne.com",
+        rd_.Text(L"Lucius & Wayne Systems  |  luciuswayne.com",
                  D2D1::RectF(textLeft, r.top + 32, textLeft + 560, r.top + 50), rd_.fSmall.Get(), col::cyan);
         const StepMeta meta = Meta(stage);
         rd_.Text((meta.number || stage == Stage::Home || stage == Stage::Monitor)
@@ -3114,6 +3371,12 @@ private:
         const float half = std::min(270.0f, W(r) * 0.22f);
         if (DrawEtchedHome(D2D1::RectF(hcx - half, r.top, hcx + half, r.bottom), dt) && stage != Stage::Home)
             OpenHome();
+        const float gear = 36.0f;
+        const float gearY = r.top + (H(r) - gear) * 0.5f;
+        if (DrawGearButton(D2D1::RectF(hcx + 42.0f, gearY, hcx + 42.0f + gear, gearY + gear), dt)) {
+            settingsOpen_ = !settingsOpen_;
+            if (settingsOpen_) settingsScroll_ = 0;
+        }
         const D2D1_RECT_F pr = D2D1::RectF(r.left + 420, r.top + 2, r.right, r.top + 26);
         rd_.Text(meta.number ? Fmt(L"STEP %d OF %d  |  %s", meta.number, kStepCount, Upper(phase).c_str())
                              : Upper(phase),
@@ -3926,6 +4189,7 @@ private:
             SaveMonitorPrefs(prefs_);
         } else if (cmd == 4103) {
             ShowMain();
+            settingsOpen_ = true;
         } else if (cmd == 4105) {
             prefs_.launchAtLogin = !prefs_.launchAtLogin;
             prefs_.startMinimized = prefs_.launchAtLogin;
@@ -3948,7 +4212,7 @@ private:
         if (prefs_.maintainTiming) {
             if (healthBusy_.load() || maintainAfterScan_) return;
             if (now < nextMaintainAt_) return;
-            nextMaintainAt_ = now + 60ull * 1000ull;
+            nextMaintainAt_ = now + static_cast<unsigned long long>(std::max(1, prefs_.maintainMinutes)) * 60ull * 1000ull;
             maintainAfterScan_ = true;
             StartHealthScan();
             return;
@@ -4019,8 +4283,8 @@ private:
         const int answer = MessageBoxW(
             hwnd_,
             L"Automatically maintain the timing structure?\n\n"
-            L"Once a minute, Synchronus reads the monitored settings and puts back any that have drifted. "
-            L"You can change this later from the tray menu or the home screen.",
+            L"On the interval in Settings, Synchronus reads the monitored settings and puts back any that have drifted. "
+            L"The usual interval is one minute. You can change this later from Settings, the tray menu, or the home screen.",
             L"Synchronus", MB_YESNO | MB_ICONQUESTION | def);
         SetMaintain(answer == IDYES);
     }
@@ -4030,7 +4294,7 @@ private:
         prefs_.maintainAsked = true;
         SaveMonitorPrefs(prefs_);
         if (!on) return;
-        nextMaintainAt_ = GetTickCount64() + 60ull * 1000ull;
+        nextMaintainAt_ = GetTickCount64() + static_cast<unsigned long long>(std::max(1, prefs_.maintainMinutes)) * 60ull * 1000ull;
         if (!healthBusy_.load() && !maintainAfterScan_) {
             maintainAfterScan_ = true;
             StartHealthScan();
@@ -4127,7 +4391,7 @@ private:
         }
         if (text.empty()) return;
         const unsigned long long now = GetTickCount64();
-        if (now - lastNotifyAt_ < 30ull * 60ull * 1000ull) return;
+        if (now - lastNotifyAt_ < static_cast<unsigned long long>(std::max(1, prefs_.notifyMinutes)) * 60ull * 1000ull) return;
         lastNotifyAt_ = now;
         nid_.uFlags = NIF_INFO;
         wcsncpy_s(nid_.szInfoTitle, L"Synchronus", _TRUNCATE);
@@ -4697,6 +4961,10 @@ private:
         rd_.StrokeRound(card, 16, Alpha(col::cyan, 0.22f), 1.4f);
         const float etchHalf = std::min(250.0f, (W(card) - 80.0f) * 0.5f);
         if (DrawEtchedHome(D2D1::RectF(cx - etchHalf, card.top + 2, cx + etchHalf, card.top + 58), dt)) OpenHome();
+        if (DrawGearButton(D2D1::RectF(cx + 42.0f, card.top + 12, cx + 78.0f, card.top + 48), dt)) {
+            settingsOpen_ = !settingsOpen_;
+            if (settingsOpen_) settingsScroll_ = 0;
+        }
         rd_.Glow(D2D1::Point2F(cx, card.top + 118), 180, col::cyan, 0.16f + 0.08f * (0.5f + 0.5f * std::sin(time_ * 1.4f)));
         rd_.Glow(D2D1::Point2F(cx, card.top + 118), 240, col::violet, 0.08f);
 
@@ -4717,7 +4985,7 @@ private:
                       DWRITE_TEXT_ALIGNMENT_CENTER);
         y += 32;
 
-        const std::wstring company = L"Lucius And Wayne Systems LLC";
+        const std::wstring company = L"Lucius & Wayne Systems";
         const float nameW = rd_.TextWidth(company, rd_.fSub.Get());
         float oldH = 24.0f, oldW = 0.0f;
         if (rd_.Logo()) {
@@ -4890,19 +5158,14 @@ private:
                          DWRITE_TEXT_ALIGNMENT_CENTER);
                 if (stage == Stage::Result) {
                     if (Want(kWantHold)) {
-                        rd_.Text(L"Install a boot service that holds this period at every startup.",
+                        unsigned units = Winner();
+                        if (!units) units = host_.pinnedResolution;
+                        rd_.Text(units ? L"The boot service installs on its own and holds this period at every startup."
+                                       : L"There is no measured period yet, so the boot service was not installed.",
                                  D2D1::RectF(B.left, B.top + 108, B.right, B.top + 132), rd_.fSmall.Get(), col::muted,
                                  DWRITE_TEXT_ALIGNMENT_CENTER);
-                        if (Button(2, btnA, L"Continue  -  install service", col::green, true, snap_.system.admin, dt, true,
-                                   true)) {
-                            StartInstall();
-                        }
+                        if (Button(2, btnA, L"Continue", col::cyan, true, true, dt, true, true)) OpenHome();
                         if (Button(4, btnB, L"Close", col::muted, false, true, dt)) PostMessageW(hwnd_, WM_CLOSE, 0, 0);
-                        if (!snap_.system.admin) {
-                            rd_.Text(L"installing needs administrator rights",
-                                     D2D1::RectF(B.left, B.bottom - 56, B.right, B.bottom - 42), rd_.fMonoSmall.Get(), col::red,
-                                     DWRITE_TEXT_ALIGNMENT_CENTER);
-                        }
                     } else {
                         rd_.Text(L"The boot service will not be installed. Continue to the next selected step.",
                                  D2D1::RectF(B.left, B.top + 108, B.right, B.top + 132), rd_.fSmall.Get(), col::muted,
@@ -5689,6 +5952,11 @@ private:
     std::wstring homeScanLabel_;
     std::vector<LatCell> homeLat_;
     std::vector<ColStat> homeCol_;
+    bool settingsOpen_ = false;
+    int settingsScroll_ = 0;
+    int settingsMaxScroll_ = 0;
+    int pendingBrowse_ = 0;
+    unsigned long long nextUpdateAt_ = 0;
     NOTIFYICONDATAW nid_{};
     UINT showMsg_ = 0;
     MonitorPrefs prefs_{};

@@ -71,9 +71,9 @@ gui::MeasurePlan gui::MeasurePlanFor(int fidelity) {
 
 namespace {
 
-constexpr wchar_t kVersion[] = L"2.6.3";
+constexpr wchar_t kVersion[] = L"2.7.0";
 constexpr wchar_t kProduct[] = L"Synchronus";
-constexpr wchar_t kCompany[] = L"Lucius And Wayne Systems LLC";
+constexpr wchar_t kCompany[] = L"Lucius & Wayne Systems";
 constexpr wchar_t kCompanyUrl[] = L"https://luciuswayne.com";
 
 // Each tool thread sets this to its own feed. A single process-wide pointer
@@ -3840,12 +3840,7 @@ int CmdInstall(const Options& opts, bool interactiveDefault) {
                     static_cast<DWORD>(r.winnerStats.median * 1000.0));
     }
 
-    if (interactiveDefault &&
-        !Confirm(opts, Format(L"Install the auto-start service at %.4f ms?", UnitsToMs(desired)))) {
-        Out(L"Cancelled. Nothing was changed (use --apply for a one-off session).");
-        return 0;
-    }
-
+    (void)interactiveDefault;
     if (!InstallService(desired)) {
         Err(L"Install failed; see the log for details.");
         return 1;
@@ -3959,7 +3954,7 @@ void EnsureConsole() {
     } else if (AllocConsole()) {
         g_console = true;
         g_allocatedConsole = true;
-        SetConsoleTitleW(L"Synchronus  \u00B7  Lucius And Wayne Systems LLC");
+        SetConsoleTitleW(L"Synchronus  \u00B7  Lucius & Wayne Systems");
     } else {
         return;
     }

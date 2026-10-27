@@ -52,6 +52,11 @@ struct MonitorPrefs {
     bool maintainTiming = false;
     bool maintainAsked = false;
     int scanHours = 6;
+    int maintainMinutes = 1;
+    int updateMinutes = 1;
+    int notifyMinutes = 30;
+    std::wstring driverDir;
+    std::wstring afterburnerDir;
 };
 
 const wchar_t* HealthStatusText(HealthStatus status);

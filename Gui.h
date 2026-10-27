@@ -135,6 +135,12 @@ int InstallTrimmedGpuDriver(Feed& feed, GpuDriverOffer& offer);
 // it, runs the NVIDIA OC scanner, and applies the saved settings at every logon.
 bool InstallAfterburner(Feed* feed, std::wstring& err);
 void RemoveAfterburnerStartup();
+// Empty means the usual ProgramData\Synchronus\drivers folder.
+void SetDriverStoreDir(const std::wstring& dir);
+std::wstring DefaultDriverStoreDir();
+// Empty means the usual Program Files (x86)\MSI Afterburner folder.
+void SetAfterburnerRoot(const std::wstring& dir);
+std::wstring DefaultAfterburnerRoot();
 
 // Stable address of the update list. The file there changes when a release
 // is published; the address does not. The executable is

@@ -37,6 +37,27 @@
 #pragma comment(lib, "UIAutomationCore.lib")
 
 namespace gui {
+
+std::wstring g_driverStore;
+std::wstring g_afterburnerRoot;
+
+std::wstring DefaultDriverStoreDir() {
+    wchar_t buf[MAX_PATH];
+    const DWORD n = GetEnvironmentVariableW(L"ProgramData", buf, _countof(buf));
+    std::wstring root = (n > 0 && n < _countof(buf)) ? buf : L"C:\\ProgramData";
+    return root + L"\\Synchronus\\drivers";
+}
+
+std::wstring DefaultAfterburnerRoot() {
+    wchar_t buf[MAX_PATH];
+    const DWORD n = GetEnvironmentVariableW(L"ProgramFiles(x86)", buf, _countof(buf));
+    std::wstring root = (n > 0 && n < _countof(buf)) ? buf : L"C:\\Program Files (x86)";
+    return root + L"\\MSI Afterburner";
+}
+
+void SetDriverStoreDir(const std::wstring& dir) { g_driverStore = dir; }
+void SetAfterburnerRoot(const std::wstring& dir) { g_afterburnerRoot = dir; }
+
 namespace {
 
 constexpr uint64_t kMinPackage = 32ull << 20;
@@ -134,10 +155,8 @@ bool IsUnder(const std::wstring& path, const std::wstring& root) {
 }
 
 std::wstring DriverDir() {
-    wchar_t buf[MAX_PATH];
-    const DWORD n = GetEnvironmentVariableW(L"ProgramData", buf, _countof(buf));
-    std::wstring root = (n > 0 && n < _countof(buf)) ? buf : L"C:\\ProgramData";
-    return root + L"\\Synchronus\\drivers";
+    if (!g_driverStore.empty()) return g_driverStore;
+    return DefaultDriverStoreDir();
 }
 
 void EnsureDir(const std::wstring& path) {
@@ -1366,9 +1385,37 @@ std::wstring ProgramFilesX86() {
     return L"C:\\Program Files (x86)";
 }
 
+bool FileExists(const std::wstring& path) {
+    return !path.empty() && GetFileAttributesW(path.c_str()) != INVALID_FILE_ATTRIBUTES;
+}
+
+std::wstring TrimSlash(std::wstring path) {
+    while (!path.empty() && (path.back() == L'\\' || path.back() == L'/')) path.pop_back();
+    return path;
+}
+
+std::wstring AfterburnerInstallDir() {
+    if (g_afterburnerRoot.empty() || g_afterburnerRoot.find(L'"') != std::wstring::npos) return {};
+    std::wstring root = TrimSlash(g_afterburnerRoot);
+    const size_t slash = root.find_last_of(L"\\/");
+    std::wstring leaf = slash == std::wstring::npos ? root : root.substr(slash + 1);
+    for (wchar_t& c : leaf) c = static_cast<wchar_t>(towlower(c));
+    if (leaf != L"msi afterburner") root += L"\\MSI Afterburner";
+    return root;
+}
+
 std::wstring AfterburnerExe() {
+    if (!g_afterburnerRoot.empty()) {
+        const std::wstring root = TrimSlash(g_afterburnerRoot);
+        const std::wstring direct = root + L"\\MSIAfterburner.exe";
+        if (FileExists(direct)) return direct;
+        const std::wstring nested = root + L"\\MSI Afterburner\\MSIAfterburner.exe";
+        if (FileExists(nested)) return nested;
+        const std::wstring dest = AfterburnerInstallDir();
+        if (FileExists(dest + L"\\MSIAfterburner.exe")) return dest + L"\\MSIAfterburner.exe";
+    }
     const std::wstring path = ProgramFilesX86() + L"\\MSI Afterburner\\MSIAfterburner.exe";
-    return GetFileAttributesW(path.c_str()) != INVALID_FILE_ATTRIBUTES ? path : L"";
+    return FileExists(path) ? path : L"";
 }
 
 std::wstring RtssExe() {
@@ -1941,7 +1988,12 @@ bool InstallAfterburner(Feed* feed, std::wstring& err) {
         }
         phase(L"installing MSI Afterburner and RivaTuner");
         log(L"Installing MSI Afterburner.");
-        const std::wstring scmd = L"\"" + setup + L"\" /S";
+        std::wstring scmd = L"\"" + setup + L"\" /S";
+        const std::wstring dest = AfterburnerInstallDir();
+        if (!dest.empty()) {
+            log(L"Afterburner folder: " + dest);
+            scmd += L" /D=" + dest;
+        }
         const Proc inst = RunProcess(setup, scmd, unpack, 10u * 60u * 1000u, true, true);
         if (!inst.started || inst.timedOut || inst.code != 0) {
             RemoveTree(unpack);

@@ -49,6 +49,18 @@ bool ReadDword(HKEY root, const wchar_t* key, const wchar_t* name, DWORD& value)
     return true;
 }
 
+bool ReadSz(HKEY root, const wchar_t* key, const wchar_t* name, std::wstring& value) {
+    DWORD size = 0;
+    if (RegGetValueW(root, key, name, RRF_RT_REG_SZ, nullptr, nullptr, &size) != ERROR_SUCCESS || size < sizeof(wchar_t))
+        return false;
+    std::wstring buf(size / sizeof(wchar_t), L'\0');
+    if (RegGetValueW(root, key, name, RRF_RT_REG_SZ, nullptr, buf.data(), &size) != ERROR_SUCCESS) return false;
+    while (!buf.empty() && buf.back() == L'\0') buf.pop_back();
+    if (buf.empty() || buf.size() > 200 || buf.find(L'"') != std::wstring::npos) return false;
+    value = std::move(buf);
+    return true;
+}
+
 bool FlagOn(const wchar_t* name) {
     DWORD v = 0;
     return ReadDword(HKEY_LOCAL_MACHINE, kApp, name, v) && v != 0;
@@ -323,6 +335,15 @@ MonitorPrefs LoadMonitorPrefs() {
     if (ReadDword(HKEY_CURRENT_USER, kMonitor, L"MaintainTiming", v)) p.maintainTiming = v != 0;
     if (ReadDword(HKEY_CURRENT_USER, kMonitor, L"MaintainAsked", v)) p.maintainAsked = v != 0;
     if (ReadDword(HKEY_CURRENT_USER, kMonitor, L"ScanHours", v) && v >= 1 && v <= 168) p.scanHours = static_cast<int>(v);
+    if (ReadDword(HKEY_CURRENT_USER, kMonitor, L"MaintainMinutes", v) && v >= 1 && v <= 180)
+        p.maintainMinutes = static_cast<int>(v);
+    if (ReadDword(HKEY_CURRENT_USER, kMonitor, L"UpdateMinutes", v) && v >= 1 && v <= 1440)
+        p.updateMinutes = static_cast<int>(v);
+    if (ReadDword(HKEY_CURRENT_USER, kMonitor, L"NotifyMinutes", v) && v >= 1 && v <= 1440)
+        p.notifyMinutes = static_cast<int>(v);
+    std::wstring path;
+    if (ReadSz(HKEY_CURRENT_USER, kMonitor, L"DriverDir", path)) p.driverDir = path;
+    if (ReadSz(HKEY_CURRENT_USER, kMonitor, L"AfterburnerDir", path)) p.afterburnerDir = path;
     return p;
 }
 
@@ -342,6 +363,22 @@ void SaveMonitorPrefs(const MonitorPrefs& prefs) {
     put(L"MaintainTiming", prefs.maintainTiming ? 1 : 0);
     put(L"MaintainAsked", prefs.maintainAsked ? 1 : 0);
     put(L"ScanHours", static_cast<DWORD>(prefs.scanHours < 1 ? 6 : prefs.scanHours));
+    const int maintainMinutes = prefs.maintainMinutes < 1 ? 1 : (prefs.maintainMinutes > 180 ? 180 : prefs.maintainMinutes);
+    const int updateMinutes = prefs.updateMinutes < 1 ? 1 : (prefs.updateMinutes > 1440 ? 1440 : prefs.updateMinutes);
+    const int notifyMinutes = prefs.notifyMinutes < 1 ? 1 : (prefs.notifyMinutes > 1440 ? 1440 : prefs.notifyMinutes);
+    put(L"MaintainMinutes", static_cast<DWORD>(maintainMinutes));
+    put(L"UpdateMinutes", static_cast<DWORD>(updateMinutes));
+    put(L"NotifyMinutes", static_cast<DWORD>(notifyMinutes));
+    auto putSz = [&](const wchar_t* name, const std::wstring& value) {
+        if (value.empty() || value.size() > 200 || value.find(L'"') != std::wstring::npos) {
+            RegDeleteValueW(key, name);
+            return;
+        }
+        RegSetValueExW(key, name, 0, REG_SZ, reinterpret_cast<const BYTE*>(value.c_str()),
+                       static_cast<DWORD>((value.size() + 1) * sizeof(wchar_t)));
+    };
+    putSz(L"DriverDir", prefs.driverDir);
+    putSz(L"AfterburnerDir", prefs.afterburnerDir);
     RegCloseKey(key);
     ApplyLaunchAtLogin(prefs.launchAtLogin);
 }
