@@ -1718,7 +1718,10 @@ private:
                 PostQuitMessage(0);
                 return 0;
             case WM_TIMER:
-                if (wp == 7) OnScanTimer();
+                if (wp == 7) {
+                    StartUpdateCheck();
+                    OnScanTimer();
+                }
                 if (wp == 8 && updatePulse_) {
                     pulseDim_ = !pulseDim_;
                     UpdateTray();
@@ -1943,15 +1946,24 @@ private:
     }
 
     void StartUpdateCheck() {
-        if (!host_.checkUpdate) return;
+        if (!host_.checkUpdate || updateBusy_.load() || updateChecking_.load()) return;
+        if (updateThread_.joinable()) updateThread_.join();
+        updateChecking_.store(true);
+        {
+            std::lock_guard<std::mutex> g(updateM_);
+            updateReady_ = false;
+        }
         updateThread_ = std::thread([this] {
             AppUpdate offer;
             std::wstring err;
             const bool newer = host_.checkUpdate(offer, updateStop_, err);
-            std::lock_guard<std::mutex> g(updateM_);
-            updateOffer_ = std::move(offer);
-            updateNewer_ = newer;
-            updateReady_ = true;
+            {
+                std::lock_guard<std::mutex> g(updateM_);
+                updateOffer_ = std::move(offer);
+                updateNewer_ = newer;
+                updateReady_ = true;
+            }
+            updateChecking_.store(false);
         });
     }
 
@@ -1995,8 +2007,8 @@ private:
         return updateLine_;
     }
 
-    // The version check starts with the window. Ask once, as soon as the
-    // result is in, and only download after the user agrees.
+    // The version check starts with the window and repeats once a minute.
+    // A download starts only after the user agrees. The same version is announced once.
     void PollUpdate() {
         std::wstring fail;
         {
@@ -2011,7 +2023,7 @@ private:
             clickPending_ = false;
             enterPending_ = false;
         }
-        if (updatePrompted_ || updateBusy_.load()) return;
+        if (updateBusy_.load()) return;
 
         AppUpdate offer;
         bool ready = false;
@@ -2025,10 +2037,11 @@ private:
         if (!ready) return;
         if (showUpdatePrompt_ && newer) {
             showUpdatePrompt_ = false;
-            updatePrompted_ = true;
+            updateAnnounced_ = offer.version;
+        } else if (!newer || offer.version == updateAnnounced_) {
+            return;
         } else {
-            updatePrompted_ = true;
-            if (!newer) return;
+            updateAnnounced_ = offer.version;
             updatePulse_ = true;
             SetTimer(hwnd_, 8, 450, nullptr);
             if (trayOn_) {
@@ -2041,7 +2054,6 @@ private:
             }
             return;
         }
-        if (!newer) return;
 
         std::wstring notes = offer.notes;
         if (notes.size() > 500) {
@@ -5638,8 +5650,10 @@ private:
     bool updateReady_ = false;
     bool updateNewer_ = false;
     bool updatePrompted_ = false;
+    std::wstring updateAnnounced_;
     bool updateFailed_ = false;
     std::atomic<bool> updateBusy_{false};
+    std::atomic<bool> updateChecking_{false};
     std::atomic<bool> updateStop_{false};
     std::atomic<bool> relaunch_{false};
     mutable std::mutex resultM_;

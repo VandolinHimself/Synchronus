@@ -1,6 +1,10 @@
 # Changelog
 
-Current release: **2.6.2**.
+Current release: **2.6.3**.
+
+## 2.6.3 — 2026-10-27
+
+- Synchronus checks for an update when it starts, and again once a minute in the background. The same version is announced only once.
 
 ## 2.6.2 — 2026-10-27
 
