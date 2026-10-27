@@ -551,6 +551,7 @@ struct Adapter {
     Pci pci;
     int vendor = 0;  // 1 nv, 2 amd, 3 intel
     bool discrete = false;
+    uint64_t memory = 0;
 };
 
 bool NameIs(const std::wstring& name, std::initializer_list<const wchar_t*> keys) {
@@ -592,11 +593,14 @@ std::vector<Adapter> ListAdapters() {
         if (a.vendor == 1) {
             a.discrete = NameIs(a.name, {L"GeForce", L"RTX", L"GTX", L"Quadro", L"Tesla"});
             EnrichSubsys(a.pci, L"nvlddmkm");
-        } else if (a.vendor == 2) {
+        }         else if (a.vendor == 2) {
             const bool igpu = ContainsI(a.name, L"Ryzen") || (ContainsI(a.name, L"Graphics") && !ContainsI(a.name, L"RX"));
             a.discrete = !igpu && NameIs(a.name, {L"RX", L"Radeon Pro", L"VII", L"Instinct", L"FirePro"});
             EnrichSubsys(a.pci, L"amdkmdag");
         }
+        DWORD memSize = sizeof(a.memory);
+        RegGetValueW(HKEY_LOCAL_MACHINE, key, L"HardwareInformation.qwMemorySize", RRF_RT_REG_QWORD, nullptr, &a.memory,
+                     &memSize);
         out.push_back(std::move(a));
     }
     return out;
@@ -621,6 +625,43 @@ const Adapter* Pick(const std::vector<Adapter>& all, std::wstring& other) {
     const Adapter* rest = c->vendor == 1 ? (amdD ? amdD : amd) : (nvD ? nvD : nv);
     if (rest) other = rest->name;
     return c;
+}
+
+bool IntegratedGpuName(const std::wstring& name) {
+    if (ContainsI(name, L"Arc")) return false;
+    if (ContainsI(name, L"UHD") || ContainsI(name, L"Iris") || ContainsI(name, L"HD Graphics")) return true;
+    if (ContainsI(name, L"Intel")) return true;
+    if (ContainsI(name, L"Ryzen")) return true;
+    if (ContainsI(name, L"Radeon Graphics") && !ContainsI(name, L"RX")) return true;
+    return false;
+}
+
+// The PCI-E card, not the integrated GPU. NVIDIA wins when both are present
+// because the OC scanner only programs an NVIDIA card.
+struct PciGpu {
+    std::wstring name;
+    std::wstring dev;
+    bool nvidia = false;
+};
+
+PciGpu DiscretePciGpu() {
+    PciGpu out;
+    const std::vector<Adapter> all = ListAdapters();
+    const Adapter* best = nullptr;
+    for (const Adapter& a : all) {
+        if (IntegratedGpuName(a.name)) continue;
+        const bool nvidiaCard = a.vendor == 1;
+        const bool amdCard = a.vendor == 2 && a.discrete;
+        if (!nvidiaCard && !amdCard) continue;
+        if (!best || (nvidiaCard && best->vendor != 1) ||
+            (a.vendor == best->vendor && a.memory > best->memory))
+            best = &a;
+    }
+    if (!best) return out;
+    out.name = best->name;
+    out.dev = best->pci.dev;
+    out.nvidia = best->vendor == 1;
+    return out;
 }
 
 bool Laptop() {
@@ -1667,6 +1708,92 @@ DWORD ReadDword(const void* p) {
     return v;
 }
 
+void PreferHighPerformanceGpu(const std::wstring& exePath) {
+    if (exePath.empty()) return;
+    HKEY key = nullptr;
+    if (RegCreateKeyExW(HKEY_CURRENT_USER, L"Software\\Microsoft\\DirectX\\UserGpuPreferences", 0, nullptr, 0,
+                        KEY_SET_VALUE, nullptr, &key, nullptr) != ERROR_SUCCESS)
+        return;
+    const wchar_t value[] = L"GpuPreference=2;";
+    RegSetValueExW(key, exePath.c_str(), 0, REG_SZ, reinterpret_cast<const BYTE*>(value), sizeof(value));
+    RegCloseKey(key);
+}
+
+std::wstring ComboItem(HWND combo, int index) {
+    const LRESULT n = SendMessageW(combo, CB_GETLBTEXTLEN, index, 0);
+    if (n <= 0 || n > 400) return {};
+    std::wstring text(static_cast<size_t>(n), L'\0');
+    if (SendMessageW(combo, CB_GETLBTEXT, index, reinterpret_cast<LPARAM>(text.data())) == CB_ERR) return {};
+    while (!text.empty() && text.back() == L'\0') text.pop_back();
+    return text;
+}
+
+bool DiscreteGpuLabel(const std::wstring& text) {
+    if (text.empty() || IntegratedGpuName(text)) return false;
+    return ContainsI(text, L"NVIDIA") || ContainsI(text, L"GeForce") || ContainsI(text, L"RTX") ||
+           ContainsI(text, L"GTX") || ContainsI(text, L"Quadro") || ContainsI(text, L"Radeon RX") ||
+           ContainsI(text, L"RX ") || ContainsI(text, L"Arc");
+}
+
+// 1 = the PCI-E card is selected, -1 = the list only has integrated graphics, 0 = no GPU list.
+int SelectPciGpu(HWND root, const std::wstring& name, std::wstring& chosen) {
+    if (!root) return 0;
+    struct Pick {
+        const std::wstring* want;
+        std::wstring* chosen;
+        int result;
+    } pick{&name, &chosen, 0};
+    EnumChildWindows(
+        root,
+        [](HWND hwnd, LPARAM lp) -> BOOL {
+            auto* pick = reinterpret_cast<Pick*>(lp);
+            wchar_t cls[64]{};
+            GetClassNameW(hwnd, cls, 64);
+            if (_wcsicmp(cls, L"ComboBox") != 0 && _wcsicmp(cls, L"ComboBoxEx32") != 0) return TRUE;
+            const int count = static_cast<int>(SendMessageW(hwnd, CB_GETCOUNT, 0, 0));
+            if (count <= 0 || count > 32) return TRUE;
+            int best = -1;
+            std::wstring bestText;
+            int integrated = 0;
+            int gpuItems = 0;
+            const std::wstring& want = *pick->want;
+            for (int i = 0; i < count; ++i) {
+                const std::wstring item = ComboItem(hwnd, i);
+                const bool discrete = DiscreteGpuLabel(item);
+                const bool igpu = IntegratedGpuName(item);
+                if (!discrete && !igpu) continue;
+                ++gpuItems;
+                if (igpu) {
+                    ++integrated;
+                    continue;
+                }
+                const bool named = !want.empty() && item.size() >= 4 &&
+                                   (ContainsI(item, want.c_str()) || ContainsI(want, item.c_str()));
+                if (best < 0 || named) {
+                    best = i;
+                    bestText = item;
+                    if (named) break;
+                }
+            }
+            if (gpuItems == 0) return TRUE;
+            if (best < 0) {
+                if (integrated > 0) pick->result = -1;
+                return TRUE;
+            }
+            if (static_cast<int>(SendMessageW(hwnd, CB_GETCURSEL, 0, 0)) != best) {
+                SendMessageW(hwnd, CB_SETCURSEL, best, 0);
+                const HWND parent = GetParent(hwnd);
+                SendMessageW(parent ? parent : GetAncestor(hwnd, GA_ROOT), WM_COMMAND,
+                             MAKEWPARAM(GetDlgCtrlID(hwnd), CBN_SELCHANGE), reinterpret_cast<LPARAM>(hwnd));
+            }
+            *pick->chosen = bestText;
+            pick->result = 1;
+            return FALSE;
+        },
+        reinterpret_cast<LPARAM>(&pick));
+    return pick.result;
+}
+
 HWND FindAfterburnerWindow(DWORD pid) {
     struct Hit {
         DWORD pid;
@@ -1693,7 +1820,7 @@ struct CurveApply {
     std::string gpuId;
 };
 
-CurveApply FlushScannedCurve(DWORD pid) {
+CurveApply FlushScannedCurve(DWORD pid, const std::wstring& devId) {
     CurveApply out;
     HANDLE mutex = CreateMutexW(nullptr, FALSE, L"Global\\Access_MACMSharedMemory");
     bool own = false;
@@ -1731,8 +1858,11 @@ CurveApply FlushScannedCurve(DWORD pid) {
             if (std::strncmp(id, "VEN_10DE", 8) != 0) continue;
             const DWORD points = ReadDword(gpu + kMacmPoints);
             if (!points) continue;
-            out.gpuId.assign(id, strnlen(id, 220));
-            break;
+            std::wstring wide;
+            for (size_t n = 0; id[n] && n < 220; ++n) wide.push_back(static_cast<wchar_t>(id[n]));
+            const bool match = devId.size() == 4 && ContainsI(wide, (L"DEV_" + devId).c_str());
+            if (out.gpuId.empty() || match) out.gpuId.assign(id, strnlen(id, 220));
+            if (match) break;
         }
     }
     memcpy(base + 32, &kMacmFlush, sizeof(kMacmFlush));
@@ -2024,6 +2154,13 @@ bool InstallAfterburner(Feed* feed, std::wstring& err) {
     }
 
     ConfigureAfterburner(ab);
+    const PciGpu pci = DiscretePciGpu();
+    if (!pci.name.empty()) {
+        log(L"PCI-E graphics card: " + pci.name);
+        PreferHighPerformanceGpu(ab);
+    } else {
+        log(L"No PCI-E graphics card was found. Integrated graphics will not be scanned.");
+    }
     const std::wstring rtss = RtssExe();
     if (!rtss.empty()) log(L"RivaTuner Statistics Server is installed.");
     else log(L"RivaTuner Statistics Server was not found next to Afterburner.");
@@ -2033,10 +2170,13 @@ bool InstallAfterburner(Feed* feed, std::wstring& err) {
     const std::wstring scanner = slash == std::wstring::npos
                                      ? L""
                                      : ab.substr(0, slash) + L"\\Bundle\\OCScanner\\MSIOCScanner_x64.exe";
+    if (!scanner.empty()) PreferHighPerformanceGpu(scanner);
     bool scanned = false;
     bool profileReady = false;
     std::string scannedGpuId;
-    if (!nvidia) {
+    if (!pci.nvidia) {
+        log(L"The OC scanner was not started. It runs on the PCI-E NVIDIA card, not integrated graphics.");
+    } else if (!nvidia) {
         log(L"The OC scanner targets NVIDIA. Afterburner will still apply its saved settings at logon.");
     } else if (GetFileAttributesW(scanner.c_str()) == INVALID_FILE_ATTRIBUTES) {
         log(L"The OC scanner was not in this Afterburner install. Startup apply is still configured.");
@@ -2044,15 +2184,36 @@ bool InstallAfterburner(Feed* feed, std::wstring& err) {
         phase(L"scanning a stable overclock");
         if (feed) {
             feed->Narrate(L"OC scanner",
-                          L"The Afterburner download and this scan take about 30 minutes. Leave the scanner "
-                          L"window open. The curve is saved as profile 1 and applied at every logon.");
+                          L"The Afterburner download and this scan take about 30 minutes. The scan uses the PCI-E "
+                          L"graphics card. Leave the scanner window open. The curve is saved as profile 1 and applied at every logon.");
         }
         log(L"Starting MSI Afterburner, then the OC scanner.");
         Started burner = StartShown(ab, L"");
         if (!burner.ok) {
             log(L"MSI Afterburner did not start, so the OC scanner did not run.");
         } else {
-            for (int i = 0; i < 8 && !stopped(); ++i) Sleep(500);
+            std::wstring selectedGpu;
+            int gpuPick = 0;
+            for (int i = 0; i < 16 && !stopped(); ++i) {
+                const HWND afterburner = FindAfterburnerWindow(burner.pid);
+                std::wstring which;
+                const int pick = SelectPciGpu(afterburner, pci.name, which);
+                if (pick != 0) gpuPick = pick;
+                if (pick == 1) {
+                    selectedGpu = which;
+                    break;
+                }
+                Sleep(500);
+            }
+            if (gpuPick < 0) {
+                log(L"Afterburner only listed integrated graphics. The PCI-E card was not scanned.");
+                EnumWindows(ClosePidWindow, static_cast<LPARAM>(burner.pid));
+                WaitForSingleObject(burner.process, 5000);
+                TerminateProcess(burner.process, 1);
+                CloseStarted(burner);
+            } else {
+            if (!selectedGpu.empty()) log(L"Afterburner is set to " + selectedGpu + L".");
+            else log(L"Windows is set to run Afterburner and the scanner on the PCI-E card.");
             Started scan = StartShown(scanner, L"");
             if (!scan.ok) {
                 CloseStarted(burner);
@@ -2061,6 +2222,8 @@ bool InstallAfterburner(Feed* feed, std::wstring& err) {
                 UiAuto uia;
                 HWND dlg = nullptr;
                 bool running = false;
+                bool blockedIntegrated = false;
+                bool scannerNoted = false;
                 int presses = 0;
                 ULONGLONG pressedAt = 0;
                 const ULONGLONG ready0 = GetTickCount64();
@@ -2069,6 +2232,19 @@ bool InstallAfterburner(Feed* feed, std::wstring& err) {
                     if (!dlg) {
                         Sleep(250);
                         continue;
+                    }
+                    std::wstring scannerGpu;
+                    if (!scannerNoted) {
+                        const int scannerPick = SelectPciGpu(dlg, pci.name, scannerGpu);
+                        if (scannerPick < 0) {
+                            blockedIntegrated = true;
+                            log(L"The OC scanner is aimed at integrated graphics. The PCI-E card was not scanned.");
+                            break;
+                        }
+                        if (scannerPick == 1) {
+                            scannerNoted = true;
+                            if (!scannerGpu.empty()) log(L"OC scanner target: " + scannerGpu + L".");
+                        }
                     }
                     const std::wstring report = uia.Name(dlg, L"1007");
                     const std::wstring label = ButtonLabel(dlg, 1001);
@@ -2092,7 +2268,15 @@ bool InstallAfterburner(Feed* feed, std::wstring& err) {
                     }
                     Sleep(400);
                 }
-                if (stopped()) {
+                if (blockedIntegrated) {
+                    if (dlg && IsWindow(dlg)) PostMessageW(dlg, WM_CLOSE, 0, 0);
+                    TerminateProcess(scan.process, 1);
+                    CloseStarted(scan);
+                    EnumWindows(ClosePidWindow, static_cast<LPARAM>(burner.pid));
+                    WaitForSingleObject(burner.process, 5000);
+                    TerminateProcess(burner.process, 1);
+                    CloseStarted(burner);
+                } else if (stopped()) {
                     TerminateProcess(scan.process, 1);
                     err = L"Stopped.";
                     CloseStarted(scan);
@@ -2101,8 +2285,7 @@ bool InstallAfterburner(Feed* feed, std::wstring& err) {
                     TerminateProcess(burner.process, 1);
                     CloseStarted(burner);
                     return false;
-                }
-                if (!running) {
+                } else if (!running) {
                     log(L"The OC scanner opened, but the scan did not start. The window was left open.");
                     CloseStarted(scan);
                     CloseStarted(burner);
@@ -2167,7 +2350,7 @@ bool InstallAfterburner(Feed* feed, std::wstring& err) {
                     }
                     if (scanned) {
                         log(L"The OC scanner finished and sent the curve to Afterburner.");
-                        const CurveApply applied = FlushScannedCurve(burner.pid);
+                        const CurveApply applied = FlushScannedCurve(burner.pid, pci.dev);
                         scannedGpuId = applied.gpuId;
                         if (applied.flushed) log(L"Applied the scanned curve on the GPU.");
                         else log(L"Afterburner did not confirm the apply. The exported curve is still saved if it wrote its profile.");
@@ -2199,6 +2382,7 @@ bool InstallAfterburner(Feed* feed, std::wstring& err) {
                         CloseStarted(burner);
                     }
                 }
+            }
             }
         }
     }
