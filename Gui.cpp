@@ -4726,7 +4726,7 @@ private:
             L"Writes the processor power plan. Core parking and throttling are turned off, and the plan asks the CPU to stay at a high, steady state.",
             L"Looks up the current graphics driver and can install a clean copy. This step does not install Afterburner.",
             L"Turns on hardware-accelerated GPU scheduling, turns off Game DVR and Game Bar capture, and writes the NVIDIA or AMD low-latency profile when that vendor is present.",
-            L"Installs MSI Afterburner and RivaTuner, runs the overclock scanner, and saves that curve so it applies at sign-in. The download and scan take about 30 minutes.",
+            L"Installs MSI Afterburner and RivaTuner, runs the overclock scanner on the PCI-E graphics card, and saves that curve so it applies at sign-in. The download and scan take about 30 minutes.",
             L"Sets the page file and turns memory compression off.",
             L"Turns SysMain off and checks that TRIM is enabled for the system drive.",
             L"Shows the BIOS settings to change by hand, then asks you to restart. Windows cannot write those settings for you.",

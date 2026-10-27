@@ -1,6 +1,10 @@
 # Changelog
 
-Current release: **2.7.2**.
+Current release: **2.7.3**.
+
+## 2.7.3 — 2026-10-27
+
+- The Afterburner scan uses the PCI-E graphics card. Integrated graphics are not the scan target.
 
 ## 2.7.2 — 2026-10-27
 
