@@ -193,6 +193,7 @@ struct Host {
     std::wstring logPath;
     std::wstring dataDir;
     bool autoInstall = false;                                   // --yes
+    bool showWindow = false;                                    // opened after an update; do not start hidden
     bool ppmForce = false;                                      // --ppm: apply even on turbo CPUs
     bool ppmSkip = false;                                       // --no-ppm
     bool gpuForce = false;                                      // --gpu

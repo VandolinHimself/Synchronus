@@ -12,6 +12,7 @@
 #define WIN32_LEAN_AND_MEAN
 #include "Gui.h"
 #include "Health.h"
+#include "Aggregate.h"
 #ifndef SHTDN_REASON_MAJOR_APPLICATION
 #define SHTDN_REASON_MAJOR_APPLICATION 0x00040000
 #define SHTDN_REASON_MINOR_MAINTENANCE 0x00000001
@@ -1578,7 +1579,9 @@ public:
         AddTray();
         if (host_.tidyServices) host_.tidyServices();
         const bool firstOpen = !prefs_.startupAsked && !host_.autoInstall;
-        ShowWindow(hwnd_, (!firstOpen && prefs_.startMinimized && !host_.autoInstall) ? SW_HIDE : SW_SHOW);
+        const bool openWindow = host_.showWindow || firstOpen || !prefs_.startMinimized || host_.autoInstall;
+        ShowWindow(hwnd_, openWindow ? SW_SHOW : SW_HIDE);
+        if (host_.showWindow) RevealAfterUpdate();
         SetTimer(hwnd_, 7, 60 * 1000, nullptr);
         nextScanAt_ = GetTickCount64() + static_cast<unsigned long long>(prefs_.scanHours) * 3600ull * 1000ull;
         if (!prefs_.paused) StartHealthScan();
@@ -1744,6 +1747,12 @@ private:
                     const int delta = GET_WHEEL_DELTA_WPARAM(wp);
                     settingsScroll_ = std::max(0, settingsScroll_ - delta / 120);
                     if (settingsScroll_ > settingsMaxScroll_) settingsScroll_ = settingsMaxScroll_;
+                    return 0;
+                }
+                if (stage_.load() == Stage::Home && homeTab_ == 1) {
+                    const int delta = GET_WHEEL_DELTA_WPARAM(wp);
+                    aggregateScroll_ = std::max(0, aggregateScroll_ - delta / 120);
+                    if (aggregateScroll_ > aggregateMaxScroll_) aggregateScroll_ = aggregateMaxScroll_;
                     return 0;
                 }
                 if (stage_.load() == Stage::Monitor || stage_.load() == Stage::Home) {
@@ -2375,6 +2384,21 @@ private:
         if (checks_.empty() && !healthBusy_.load()) StartHealthScan();
     }
 
+    void RevealAfterUpdate() {
+        if (!hwnd_) return;
+        ShowWindow(hwnd_, SW_SHOWNORMAL);
+        ShowWindow(hwnd_, SW_RESTORE);
+        const HWND fg = GetForegroundWindow();
+        DWORD fgThread = 0;
+        const DWORD thisThread = GetCurrentThreadId();
+        if (fg) fgThread = GetWindowThreadProcessId(fg, nullptr);
+        const bool attached = fgThread && fgThread != thisThread && AttachThreadInput(fgThread, thisThread, TRUE);
+        SetForegroundWindow(hwnd_);
+        BringWindowToTop(hwnd_);
+        SetWindowPos(hwnd_, HWND_TOP, 0, 0, 0, 0, SWP_NOMOVE | SWP_NOSIZE | SWP_SHOWWINDOW);
+        if (attached) AttachThreadInput(fgThread, thisThread, FALSE);
+    }
+
     void ShowMain() {
         ShowWindow(hwnd_, SW_SHOW);
         SetForegroundWindow(hwnd_);
@@ -2977,8 +3001,59 @@ private:
             AppendHealthLog(phase == static_cast<int>(JobPhase::Done) ? L"automatic repair finished" : L"automatic repair failed");
         }
         if (maintainFinished && !maintainStill && !healthBusy_.load() && !repairRescan_) StartHealthScan();
+        RememberFinishedJobs();
         KickHold();
         AdvanceChain();
+    }
+
+    void RememberFinishedJobs() {
+        for (int i = 0; i < static_cast<int>(JobId::Count); ++i) {
+            const int phase = jobs_[i].phase.load();
+            const int prev = jobSeen_[i];
+            jobSeen_[i] = phase;
+            if (phase != static_cast<int>(JobPhase::Done)) continue;
+            if (prev != static_cast<int>(JobPhase::Running) && prev != static_cast<int>(JobPhase::Waiting)) continue;
+            const auto id = static_cast<JobId>(i);
+            if (id == JobId::Measure) {
+                aggregateLoaded_ = false;
+                continue;
+            }
+            std::wstring kind;
+            std::wstring detail;
+            if (id == JobId::Prepare) {
+                kind = L"Restore point";
+                detail = L"Pre-tune restore point created";
+            } else if (id == JobId::Hold) {
+                unsigned units = 0;
+                {
+                    std::lock_guard<std::mutex> g(resultM_);
+                    units = result_.winner;
+                }
+                kind = L"Timer hold";
+                detail = units ? Fmt(L"Boot service holding %.4f ms", units / 10000.0) : L"Boot service installed";
+            } else if (id == JobId::Cpu) {
+                kind = L"CPU";
+                detail = L"Processor power settings applied";
+            } else if (id == JobId::GpuClean) {
+                kind = L"GPU driver";
+                detail = L"Display driver step finished";
+            } else if (id == JobId::Gpu) {
+                kind = L"GPU settings";
+                detail = L"Scheduling, capture, and the vendor profile applied";
+            } else if (id == JobId::Afterburner) {
+                kind = L"Afterburner";
+                detail = L"PCI-E card scan saved for sign-in";
+            } else if (id == JobId::Memory) {
+                kind = L"Memory";
+                detail = L"Page file and memory compression applied";
+            } else if (id == JobId::Storage) {
+                kind = L"Storage";
+                detail = L"ASPM, USB suspend, TRIM, and SysMain applied";
+            }
+            if (kind.empty()) continue;
+            NoteTuneEvent(host_.dataDir, kind, detail);
+            aggregateLoaded_ = false;
+        }
     }
 
     void KickHold() {
@@ -4706,7 +4781,150 @@ private:
         rd_.Text(tipBody_, D2D1::RectF(r.left + 22, r.top + 100, r.right - 22, r.bottom - 22), rd_.fGuide.Get(), col::text);
     }
 
-    void DrawHome(const D2D1_RECT_F& B, float dt) {
+    void EnsureAggregate() {
+        if (aggregateLoaded_) return;
+        aggregate_ = LoadAggregate(host_.dataDir);
+        aggregateLoaded_ = true;
+    }
+
+    void DrawScoreCurve(const D2D1_RECT_F& plot, bool showLatest) {
+        EnsureAggregate();
+        const auto& points = aggregate_.points;
+        if (points.size() < 2) {
+            rd_.Text(L"Run Measure timing. Each finished scan is folded into this curve by its sample count.",
+                     plot, rd_.fSmall.Get(), col::dim, DWRITE_TEXT_ALIGNMENT_CENTER, DWRITE_PARAGRAPH_ALIGNMENT_CENTER);
+            return;
+        }
+        double xmin = points.front().requested / 10000.0;
+        double xmax = xmin;
+        double ymin = 1e9;
+        double ymax = -1e9;
+        auto take = [&](double x, double y) {
+            if (!std::isfinite(y)) return;
+            xmin = std::min(xmin, x);
+            xmax = std::max(xmax, x);
+            ymin = std::min(ymin, y);
+            ymax = std::max(ymax, y);
+        };
+        for (const auto& p : points) take(p.requested / 10000.0, p.score);
+        if (showLatest) {
+            for (const auto& p : aggregate_.latest) take(p.requested / 10000.0, p.score);
+        }
+        if (!(ymax > ymin)) {
+            ymin -= 0.05;
+            ymax += 0.05;
+        }
+        const double ypad = (ymax - ymin) * 0.12;
+        ymin -= ypad;
+        ymax += ypad;
+        if (!(xmax > xmin)) xmax = xmin + 0.001;
+        const D2D1_RECT_F inner = D2D1::RectF(plot.left + 36, plot.top + 8, plot.right - 8, plot.bottom - 22);
+        auto px = [&](double x) {
+            return static_cast<float>(inner.left + (x - xmin) / (xmax - xmin) * (inner.right - inner.left));
+        };
+        auto py = [&](double y) {
+            return static_cast<float>(inner.bottom - (y - ymin) / (ymax - ymin) * (inner.bottom - inner.top));
+        };
+        rd_.Line(D2D1::Point2F(inner.left, inner.top), D2D1::Point2F(inner.left, inner.bottom), Alpha(col::border, 0.8f), 1);
+        rd_.Line(D2D1::Point2F(inner.left, inner.bottom), D2D1::Point2F(inner.right, inner.bottom), Alpha(col::border, 0.8f), 1);
+        if (showLatest && aggregate_.latest.size() > 1) {
+            for (size_t i = 1; i < aggregate_.latest.size(); ++i) {
+                const auto& a = aggregate_.latest[i - 1];
+                const auto& b = aggregate_.latest[i];
+                rd_.Line(D2D1::Point2F(px(a.requested / 10000.0), py(a.score)),
+                         D2D1::Point2F(px(b.requested / 10000.0), py(b.score)), Alpha(col::violet, 0.85f), 1.2f);
+            }
+        }
+        int best = 0;
+        for (int i = 1; i < static_cast<int>(points.size()); ++i) {
+            if (points[static_cast<size_t>(i)].score < points[static_cast<size_t>(best)].score) best = i;
+        }
+        for (size_t i = 1; i < points.size(); ++i) {
+            const auto& a = points[i - 1];
+            const auto& b = points[i];
+            rd_.Line(D2D1::Point2F(px(a.requested / 10000.0), py(a.score)),
+                     D2D1::Point2F(px(b.requested / 10000.0), py(b.score)), col::cyan, 1.8f);
+        }
+        const auto& mark = points[static_cast<size_t>(best)];
+        const D2D1_POINT_2F dot = D2D1::Point2F(px(mark.requested / 10000.0), py(mark.score));
+        rd_.Glow(dot, 10, col::green, 0.7f);
+        rd_.Dot(dot, 3.2f, col::white);
+        rd_.Text(Fmt(L"%.3f", xmin), D2D1::RectF(inner.left, inner.bottom + 2, inner.left + 48, plot.bottom),
+                 rd_.fMonoSmall.Get(), col::dim);
+        rd_.Text(Fmt(L"%.3f ms", xmax), D2D1::RectF(inner.right - 70, inner.bottom + 2, inner.right, plot.bottom),
+                 rd_.fMonoSmall.Get(), col::dim, DWRITE_TEXT_ALIGNMENT_TRAILING);
+        rd_.Text(Fmt(L"%.3f", ymax), D2D1::RectF(plot.left, inner.top - 2, inner.left - 2, inner.top + 14),
+                 rd_.fMonoSmall.Get(), col::dim, DWRITE_TEXT_ALIGNMENT_TRAILING);
+    }
+
+    void DrawAggregate(const D2D1_RECT_F& B, float dt) {
+        (void)dt;
+        EnsureAggregate();
+        const unsigned runs = aggregate_.runs;
+        const double samples = aggregate_.samples;
+        rd_.Text(runs ? Fmt(L"Aggregate  ·  %u runs  ·  %.0f samples", runs, samples)
+                      : L"Aggregate  ·  no saved runs yet",
+                 D2D1::RectF(B.left, B.top, B.right, B.top + 24), rd_.fPhase.Get(), col::cyan);
+        rd_.Text(L"Each interval is a sample-weighted mean. A new run moves it by that run's samples over the master weight.",
+                 D2D1::RectF(B.left, B.top + 24, B.right, B.top + 42), rd_.fSmall.Get(), col::dim);
+        const float gap = 12.0f;
+        const float curveW = std::max(280.0f, W(B) * 0.58f);
+        const D2D1_RECT_F curve = D2D1::RectF(B.left, B.top + 50, B.left + curveW, B.bottom);
+        const D2D1_RECT_F list = D2D1::RectF(curve.right + gap, B.top + 50, B.right, B.bottom);
+        rd_.FillRound(curve, 14, Alpha(col::panel, 0.9f));
+        rd_.StrokeRound(curve, 14, Alpha(col::cyan, 0.35f), 1.2f);
+        rd_.Text(L"Master timing curve", D2D1::RectF(curve.left + 12, curve.top + 8, curve.right - 12, curve.top + 28),
+                 rd_.fSmall.Get(), col::cyan);
+        rd_.Text(L"Cyan is the aggregate score. Violet is the newest run.",
+                 D2D1::RectF(curve.left + 12, curve.top + 28, curve.right - 12, curve.top + 46), rd_.fMonoSmall.Get(), col::dim);
+        DrawScoreCurve(D2D1::RectF(curve.left + 8, curve.top + 50, curve.right - 8, curve.bottom - 8), true);
+        if (!aggregate_.points.empty()) {
+            const AggregatePoint* best = &aggregate_.points.front();
+            for (const auto& p : aggregate_.points) {
+                if (p.score < best->score) best = &p;
+            }
+            rd_.Text(Fmt(L"Lowest aggregate score  %.4f ms at %.4f ms   weight %.0f", best->score, best->requested / 10000.0,
+                         best->scoreWeight),
+                     D2D1::RectF(curve.left + 12, curve.bottom - 28, curve.right - 12, curve.bottom - 8), rd_.fMonoSmall.Get(),
+                     col::green);
+        }
+        rd_.FillRound(list, 14, Alpha(col::panel, 0.9f));
+        rd_.StrokeRound(list, 14, Alpha(col::cyan, 0.35f), 1.2f);
+        rd_.Text(L"Tuned values over time", D2D1::RectF(list.left + 12, list.top + 8, list.right - 12, list.top + 28),
+                 rd_.fSmall.Get(), col::cyan);
+        const D2D1_RECT_F rows = D2D1::RectF(list.left + 8, list.top + 36, list.right - 8, list.bottom - 8);
+        rd_.Clip(rows);
+        const float rowH = 36.0f;
+        float y = rows.top - static_cast<float>(aggregateScroll_) * rowH;
+        if (aggregate_.events.empty()) {
+            rd_.Text(L"Timer wins, power, graphics, memory, and storage land here as each step finishes.",
+                     rows, rd_.fSmall.Get(), col::dim);
+        }
+        for (const auto& e : aggregate_.events) {
+            const D2D1_RECT_F row = D2D1::RectF(rows.left, y, rows.right, y + rowH - 4);
+            y += rowH;
+            if (row.bottom < rows.top || row.top > rows.bottom) continue;
+            rd_.Text(e.kind + L"   " + e.when, D2D1::RectF(row.left, row.top, row.right, row.top + 16), rd_.fSmall.Get(),
+                     col::text);
+            rd_.Text(e.detail, D2D1::RectF(row.left, row.top + 16, row.right, row.bottom), rd_.fMonoSmall.Get(), col::muted);
+        }
+        rd_.Unclip();
+        const int maxScroll = std::max(0, static_cast<int>(aggregate_.events.size()) - static_cast<int>(H(rows) / rowH));
+        aggregateMaxScroll_ = maxScroll;
+        if (aggregateScroll_ > aggregateMaxScroll_) aggregateScroll_ = aggregateMaxScroll_;
+    }
+
+    void DrawHome(const D2D1_RECT_F& outer, float dt) {
+        const D2D1_RECT_F tabHome = D2D1::RectF(outer.left, outer.top, outer.left + 128, outer.top + 30);
+        const D2D1_RECT_F tabAgg = D2D1::RectF(outer.left + 136, outer.top, outer.left + 292, outer.top + 30);
+        if (Button(240, tabHome, L"Home", col::cyan, homeTab_ == 0, true, dt, false, false, rd_.fSmall.Get())) homeTab_ = 0;
+        if (Button(241, tabAgg, L"Aggregate", col::cyan, homeTab_ == 1, true, dt, false, false, rd_.fSmall.Get()))
+            homeTab_ = 1;
+        if (homeTab_ == 1) {
+            DrawAggregate(D2D1::RectF(outer.left, outer.top + 38, outer.right, outer.bottom), dt);
+            return;
+        }
+        const D2D1_RECT_F B = D2D1::RectF(outer.left, outer.top + 38, outer.right, outer.bottom);
         const float gap = 14.0f;
         float leftW = std::floor(W(B) * 0.30f);
         float rightW = std::floor(W(B) * 0.42f);
@@ -4952,7 +5170,16 @@ private:
             }
             y += h + cardGap;
         }
-        DrawGuide(D2D1::RectF(centerL, B.top, centerR, B.bottom));
+        DrawGuide(D2D1::RectF(centerL, B.top, centerR, std::max(B.top + 48.0f, heat.top - 10.0f)));
+        const D2D1_RECT_F aggR = D2D1::RectF(centerL, heat.top, centerR, B.bottom);
+        NoteTip(aggR, L"Aggregate curve",
+                L"Sample-weighted mean of every finished timer scan. A new run moves each interval by its sample count over the weight already stored.");
+        rd_.FillRound(aggR, 16, Alpha(col::panel, 0.88f));
+        rd_.StrokeRound(aggR, 16, Alpha(col::cyan, 0.28f), 1.2f);
+        EnsureAggregate();
+        rd_.Text(aggregate_.runs ? Fmt(L"Aggregate curve   %u runs", aggregate_.runs) : L"Aggregate curve",
+                 D2D1::RectF(aggR.left + 12, aggR.top + 8, aggR.right - 12, aggR.top + 28), rd_.fSmall.Get(), col::cyan);
+        DrawScoreCurve(D2D1::RectF(aggR.left + 6, aggR.top + 30, aggR.right - 6, aggR.bottom - 6), false);
     }
 
     void DrawWelcome(const D2D1_RECT_F& R, float dt) {
@@ -5921,6 +6148,12 @@ private:
     std::atomic<bool> updateChecking_{false};
     std::atomic<bool> updateStop_{false};
     std::atomic<bool> relaunch_{false};
+    int homeTab_ = 0;
+    int aggregateScroll_ = 0;
+    int aggregateMaxScroll_ = 0;
+    bool aggregateLoaded_ = false;
+    AggregateView aggregate_{};
+    int jobSeen_[static_cast<int>(JobId::Count)]{};
     mutable std::mutex resultM_;
     ResultView result_;
     std::mutex probeM_;

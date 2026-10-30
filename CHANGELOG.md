@@ -1,6 +1,12 @@
 # Changelog
 
-Current release: **2.7.3**.
+Current release: **2.8.1**.
+
+## 2.8.1 — 2026-10-30
+
+- Each timer interval keeps a sample-weighted master measurement. A finished run is folded in by its sample count, so later runs move the curve less as the weight grows.
+- The home screen shows that aggregate curve beside the 3D scan. The Aggregate tab shows the full curve and the other tuned values over time.
+- After an update, the new version opens its window. Start minimized stays saved and still applies on the next normal start.
 
 ## 2.7.3 — 2026-10-27
 

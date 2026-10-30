@@ -25,6 +25,7 @@
 #include <winioctl.h>
 
 #include "Gui.h"
+#include "Aggregate.h"
 #include "Health.h"
 
 #include <algorithm>
@@ -71,7 +72,7 @@ gui::MeasurePlan gui::MeasurePlanFor(int fidelity) {
 
 namespace {
 
-constexpr wchar_t kVersion[] = L"2.7.3";
+constexpr wchar_t kVersion[] = L"2.8.1";
 constexpr wchar_t kProduct[] = L"Synchronus";
 constexpr wchar_t kCompany[] = L"Lucius & Wayne Systems";
 constexpr wchar_t kCompanyUrl[] = L"https://luciuswayne.com";
@@ -2776,6 +2777,32 @@ std::wstring CsvFileName() {
                                      st.wDay, st.wHour, st.wMinute, st.wSecond);
 }
 
+void PublishTimingAggregate(const std::vector<Candidate>& sweep, const std::vector<Candidate>& verify) {
+    std::vector<TimingSample> samples;
+    auto push = [&](const Candidate& c) {
+        if (c.loopStats.n < 2 && c.idleStats.n < 2) return;
+        TimingSample s;
+        s.requested = c.requested;
+        s.loopN = static_cast<unsigned>(c.loopStats.n);
+        s.loopMedian = c.loopStats.median;
+        s.loopMean = c.loopStats.mean;
+        s.loopStdev = c.loopStats.stdev;
+        s.loopLate = c.loopStats.latePct;
+        s.loopScore = c.loopStats.score;
+        s.idleN = static_cast<unsigned>(c.idleStats.n);
+        s.idleMedian = c.idleStats.median;
+        s.idleMean = c.idleStats.mean;
+        s.idleStdev = c.idleStats.stdev;
+        s.idleLate = c.idleStats.latePct;
+        s.idleScore = c.idleStats.score;
+        s.score = c.score;
+        samples.push_back(s);
+    };
+    for (const auto& c : sweep) push(c);
+    for (const auto& c : verify) push(c);
+    if (!samples.empty()) MergeTimingRun(ProgramDataDir(), samples);
+}
+
 void WriteCsv(const std::wstring& path, const std::vector<Candidate>& sweep,
               const std::vector<Candidate>& verify) {
     CreateDirectoryW(ProgramDataDir().c_str(), nullptr);
@@ -3067,6 +3094,7 @@ BenchmarkResult RunBenchmark(const BenchmarkConfig& cfg) {
     if (bestIdx == count) {
         result.failure = L"No candidate could be measured (another process held the clock for the whole "
                          L"run). Close it, or stop the Synchronus service, and re-run.";
+        PublishTimingAggregate(sweep, {});
         WriteCsv(result.csvPath, sweep, {});
         return result;
     }
@@ -3231,6 +3259,7 @@ BenchmarkResult RunBenchmark(const BenchmarkConfig& cfg) {
         if (chosen && c.requested == chosen->requested) note = L"<- SELECTED";
         PrintRow(c, note);
     }
+    PublishTimingAggregate(sweep, verify);
     WriteCsv(result.csvPath, sweep, verify);
 
     if (!chosen) {
@@ -3244,6 +3273,9 @@ BenchmarkResult RunBenchmark(const BenchmarkConfig& cfg) {
     result.winnerIdleStats = chosen->idleStats;
     result.winnerScore = chosen->score;
     result.margin = chosen->requested >= optimum ? chosen->requested - optimum : 0;
+    NoteTuneEvent(ProgramDataDir(), L"Timer",
+                  Format(L"winner %.4f ms, score %.4f, %u intervals", UnitsToMs(result.winner), result.winnerScore,
+                         static_cast<unsigned>(sweep.size())));
     Narrate(L"Winner chosen",
             Format(L"%.4f ms is the fastest verified resolution on this machine "
                    L"(best measured %.4f ms + %.4f ms margin).",
@@ -3371,6 +3403,7 @@ struct Options {
     bool samplesSet = false;
     bool passesSet = false;
     bool verifySet = false;
+    bool showWindow = false;
 };
 
 bool ParseOptions(const std::vector<std::wstring>& args, Options& opts) {
@@ -3479,6 +3512,8 @@ bool ParseOptions(const std::vector<std::wstring>& args, Options& opts) {
             opts.noPause = true;
         } else if (a == L"--elevated") {
             opts.elevated = true;
+        } else if (a == L"--show") {
+            opts.showWindow = true;
         } else if (a == L"--help" || a == L"-h" || a == L"/?") {
             opts.command = L"help";
         } else if (a == L"--version") {
@@ -4054,7 +4089,8 @@ int RunCli(const Options& opts, const std::vector<std::wstring>& args) {
             exitCode = 0;
         } else if (opts.command == L"self-test") {
             exitCode = gui::SelfTestHealth();
-            Out(exitCode == 0 ? L"Health self-test passed." : L"Health self-test failed.");
+            if (exitCode == 0) exitCode = SelfTestAggregate();
+            Out(exitCode == 0 ? L"Self-test passed." : L"Self-test failed.");
         }
     }
 
@@ -4095,7 +4131,9 @@ bool RelaunchUpdated() {
     std::wstring dir = exe;
     const size_t slash = dir.find_last_of(L"\\/");
     if (slash != std::wstring::npos) dir.resize(slash);
-    std::wstring cmd = L"\"" + exe + L"\"";
+    // --show is only for this relaunch. Start-minimized stays saved for the next normal start.
+    std::wstring cmd = L"\"" + exe + L"\" --show";
+    AllowSetForegroundWindow(ASFW_ANY);
     STARTUPINFOW si{};
     si.cb = sizeof(si);
     si.dwFlags = STARTF_USESHOWWINDOW;
@@ -4220,6 +4258,7 @@ int RunGui(const Options& opts, const std::vector<std::wstring>&) {
     host.logPath = LogFilePath();
     host.dataDir = ProgramDataDir();
     host.autoInstall = opts.yes;
+    host.showWindow = opts.showWindow;
     host.ppmForce = opts.ppm;
     host.ppmSkip = opts.noPpm;
     host.gpuForce = opts.gpu;
