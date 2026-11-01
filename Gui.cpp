@@ -2832,13 +2832,29 @@ private:
                     sub += Fmt(L"  \u00B7  %.4f ms", Ms(job.sweep.items[static_cast<size_t>(job.activeIdx)].requested));
             }
 
-            const float etaH = (!waiting && job.remaining > 0.5) ? 14.0f : 0.0f;
-            const float barTop = pane.bottom - 12.0f - etaH;
+            const float etaH = (!waiting && job.remaining > 0.5) ? 16.0f : 0.0f;
+            const float barTop = pane.bottom - 14.0f - etaH;
             const D2D1_RECT_F bar = D2D1::RectF(pane.left + 14, barTop, pane.right - 14, barTop + 8.0f);
-            float textBottom = barTop - 6.0f;
+            const float floorY = barTop - 8.0f;
+            float cursor = pane.top + 58.0f;
+            if (!work.empty() && cursor + 18.0f < floorY) {
+                const float workH = std::min(40.0f, floorY - cursor);
+                rd_.Text(work, D2D1::RectF(pane.left + 14, cursor, pane.right - 14, cursor + workH), rd_.fSmall.Get(),
+                         col::text);
+                cursor += workH + 4.0f;
+            }
+            if (!sub.empty() && cursor + 18.0f < floorY) {
+                const float cap = job.ppm.empty() ? (floorY - cursor) : 56.0f;
+                const float subH = std::min(cap, floorY - cursor);
+                rd_.Text(sub, D2D1::RectF(pane.left + 14, cursor, pane.right - 14, cursor + subH), rd_.fBody.Get(),
+                         col::muted);
+                cursor += subH + 6.0f;
+            }
 
-            if (!job.ppm.empty()) {
-                const int visible = std::max(1, static_cast<int>((textBottom - (pane.top + 88.0f)) / 16.0f));
+            if (!job.ppm.empty() && floorY - cursor >= 18.0f) {
+                const float listTop = cursor;
+                const float listBottom = floorY;
+                const int visible = std::max(1, static_cast<int>((listBottom - listTop) / 16.0f));
                 const int n = ppmCount;
                 int start = 0;
                 if (n > visible) {
@@ -2846,8 +2862,8 @@ private:
                     start = std::min(start, n - visible);
                 }
                 const int end = std::min(n, start + visible);
-                const float listTop = pane.top + 88.0f;
-                const float rowH = (textBottom - listTop) / std::max(1, end - start);
+                const float rowH = (listBottom - listTop) / std::max(1, end - start);
+                rd_.Clip(D2D1::RectF(pane.left + 6, listTop, pane.right - 6, listBottom));
                 for (int i = start; i < end; ++i) {
                     const auto& s = job.ppm[static_cast<size_t>(i)];
                     const float y = listTop + static_cast<float>(i - start) * rowH;
@@ -2869,14 +2885,7 @@ private:
                              D2D1::RectF(pane.left + 12, y, pane.right - 12, y + rowH), rd_.fMonoSmall.Get(), c,
                              DWRITE_TEXT_ALIGNMENT_LEADING, DWRITE_PARAGRAPH_ALIGNMENT_CENTER);
                 }
-            }
-
-            rd_.Text(work, D2D1::RectF(pane.left + 14, pane.top + 58, pane.right - 14, pane.top + 82), rd_.fSmall.Get(),
-                     col::text);
-            if (!sub.empty()) {
-                const float subTop = pane.top + 82.0f;
-                const float subBottom = job.ppm.empty() ? textBottom : (pane.top + 86.0f);
-                rd_.Text(sub, D2D1::RectF(pane.left + 14, subTop, pane.right - 14, subBottom), rd_.fBody.Get(), col::muted);
+                rd_.Unclip();
             }
 
             if (!waiting && job.remaining > 0.5) {

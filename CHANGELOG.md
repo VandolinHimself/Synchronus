@@ -1,6 +1,10 @@
 # Changelog
 
-Current release: **2.8.2**.
+Current release: **2.8.3**.
+
+## 2.8.3 — 2026-11-01
+
+- Full tune panes keep the current step and its explanation fully visible above the checklist. Those lines are no longer clipped by the step list.
 
 ## 2.8.2 — 2026-11-01
 
