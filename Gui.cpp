@@ -2697,6 +2697,51 @@ private:
         driverSettled_ = true;
     }
 
+    static int FleetActivePpmStep(const std::vector<PpmStepView>& steps) {
+        for (size_t i = 0; i < steps.size(); ++i) {
+            if (steps[i].status == 1) return static_cast<int>(i);
+        }
+        for (int i = static_cast<int>(steps.size()) - 1; i >= 0; --i) {
+            if (steps[static_cast<size_t>(i)].status == 2 || steps[static_cast<size_t>(i)].status == 3)
+                return i;
+        }
+        return -1;
+    }
+
+    static double FleetJobFraction(const Snapshot& job) {
+        if (job.progress > 0.001) return std::min(1.0, job.progress);
+        const auto& steps = job.ppm;
+        if (steps.empty()) return -1.0;
+        int done = 0;
+        int active = -1;
+        for (size_t i = 0; i < steps.size(); ++i) {
+            if (steps[i].status == 2 || steps[i].status == 3) ++done;
+            else if (steps[i].status == 1) active = static_cast<int>(i);
+        }
+        if (active >= 0) return (static_cast<double>(done) + 0.35) / static_cast<double>(steps.size());
+        if (done >= static_cast<int>(steps.size())) return 1.0;
+        return static_cast<double>(done) / static_cast<double>(steps.size());
+    }
+
+    void DrawFleetProgressBar(const D2D1_RECT_F& bar, double fraction, bool waiting) {
+        rd_.FillRound(bar, 3, col::panel2);
+        if (waiting) {
+            const float seg = W(bar) * 0.28f;
+            const float x = bar.left + (W(bar) - seg) * (0.5f + 0.5f * std::sin(time_ * 2.8f));
+            rd_.FillRound(D2D1::RectF(x, bar.top, x + seg, bar.bottom), 3, Alpha(col::amber, 0.85f));
+            return;
+        }
+        if (fraction < 0.0) {
+            const float seg = W(bar) * 0.32f;
+            const float travel = std::max(0.0f, W(bar) - seg);
+            const float x = bar.left + travel * std::fmod(time_ * 0.35f, 1.0f);
+            rd_.FillRound(D2D1::RectF(x, bar.top, x + seg, bar.bottom), 3, col::cyan);
+            return;
+        }
+        const float fx = bar.left + W(bar) * static_cast<float>(std::min(1.0, fraction));
+        if (fx > bar.left + 2) rd_.FillRound(D2D1::RectF(bar.left, bar.top, fx, bar.bottom), 3, col::cyan);
+    }
+
     void DrawFleet(const D2D1_RECT_F& B, float dt) {
         struct Pane {
             int kind;
@@ -2757,16 +2802,89 @@ private:
             rd_.Text(waiting ? L"Waiting" : L"Running",
                      D2D1::RectF(pane.left + 14, pane.top + 38, pane.right - 14, pane.top + 58), rd_.fSmall.Get(),
                      waiting ? col::amber : col::text);
-            std::wstring detail = job.detail.empty() ? job.phase : job.detail;
-            if (detail.empty()) detail = job.narrateBody.empty() ? job.narrateTitle : job.narrateBody;
-            rd_.Text(detail, D2D1::RectF(pane.left + 14, pane.top + 60, pane.right - 14, pane.bottom - 28), rd_.fBody.Get(),
-                     col::muted);
-            if (job.progress > 0.001) {
-                const D2D1_RECT_F bar = D2D1::RectF(pane.left + 14, pane.bottom - 18, pane.right - 14, pane.bottom - 10);
-                rd_.FillRound(bar, 3, col::panel2);
-                const float fx = bar.left + W(bar) * static_cast<float>(std::min(1.0, job.progress));
-                if (fx > bar.left + 2) rd_.FillRound(D2D1::RectF(bar.left, bar.top, fx, bar.bottom), 3, col::cyan);
+            const int activePpm = FleetActivePpmStep(job.ppm);
+            const int ppmCount = static_cast<int>(job.ppm.size());
+            if (ppmCount > 0) {
+                rd_.Text(Fmt(L"%d / %d", (activePpm >= 0 ? activePpm + 1 : ppmCount), ppmCount),
+                         D2D1::RectF(pane.right - 72, pane.top + 38, pane.right - 14, pane.top + 58), rd_.fMonoSmall.Get(),
+                         col::dim, DWRITE_TEXT_ALIGNMENT_TRAILING);
+            } else if (job.progress > 0.001) {
+                rd_.Text(Fmt(L"%d%%", static_cast<int>(std::lround(job.progress * 100.0))),
+                         D2D1::RectF(pane.right - 52, pane.top + 38, pane.right - 14, pane.top + 58), rd_.fMonoSmall.Get(),
+                         col::dim, DWRITE_TEXT_ALIGNMENT_TRAILING);
             }
+
+            std::wstring work = job.detail;
+            if (work.empty() && activePpm >= 0 && activePpm < ppmCount) work = job.ppm[static_cast<size_t>(activePpm)].title;
+            if (work.empty() && !job.narrateTitle.empty()) work = job.narrateTitle;
+            if (work.empty() && !job.phase.empty()) work = job.phase;
+
+            std::wstring sub;
+            if (activePpm >= 0 && activePpm < ppmCount && !job.ppm[static_cast<size_t>(activePpm)].why.empty())
+                sub = job.ppm[static_cast<size_t>(activePpm)].why;
+            else if (!job.narrateBody.empty())
+                sub = job.narrateBody;
+            else if (!job.phase.empty() && job.phase != work) sub = job.phase;
+            if (id == JobId::Measure && job.sweep.pass > 0 && job.sweep.passes > 0) {
+                sub = Fmt(L"Pass %d/%d", job.sweep.pass, job.sweep.passes);
+                if (job.sweep.items.size() > 0 && job.activeIdx >= 0 &&
+                    job.activeIdx < static_cast<int>(job.sweep.items.size()))
+                    sub += Fmt(L"  \u00B7  %.4f ms", Ms(job.sweep.items[static_cast<size_t>(job.activeIdx)].requested));
+            }
+
+            const float etaH = (!waiting && job.remaining > 0.5) ? 14.0f : 0.0f;
+            const float barTop = pane.bottom - 12.0f - etaH;
+            const D2D1_RECT_F bar = D2D1::RectF(pane.left + 14, barTop, pane.right - 14, barTop + 8.0f);
+            float textBottom = barTop - 6.0f;
+
+            if (!job.ppm.empty()) {
+                const int visible = std::max(1, static_cast<int>((textBottom - (pane.top + 88.0f)) / 16.0f));
+                const int n = ppmCount;
+                int start = 0;
+                if (n > visible) {
+                    start = std::max(0, (activePpm < 0 ? 0 : activePpm) - visible / 3);
+                    start = std::min(start, n - visible);
+                }
+                const int end = std::min(n, start + visible);
+                const float listTop = pane.top + 88.0f;
+                const float rowH = (textBottom - listTop) / std::max(1, end - start);
+                for (int i = start; i < end; ++i) {
+                    const auto& s = job.ppm[static_cast<size_t>(i)];
+                    const float y = listTop + static_cast<float>(i - start) * rowH;
+                    D2D1_COLOR_F c = col::dim;
+                    const wchar_t* mark = L"|";
+                    if (s.status == 1) {
+                        c = col::amber;
+                        mark = L"\u25B6";
+                        rd_.FillRound(D2D1::RectF(pane.left + 8, y + 1, pane.right - 8, y + rowH - 1), 4,
+                                      Alpha(col::amber, 0.14f));
+                    } else if (s.status == 2) {
+                        c = col::green;
+                        mark = L"\u2713";
+                    } else if (s.status == 3) {
+                        c = col::red;
+                        mark = L"\u00D7";
+                    }
+                    rd_.Text(Fmt(L"%s  %s", mark, s.title.c_str()),
+                             D2D1::RectF(pane.left + 12, y, pane.right - 12, y + rowH), rd_.fMonoSmall.Get(), c,
+                             DWRITE_TEXT_ALIGNMENT_LEADING, DWRITE_PARAGRAPH_ALIGNMENT_CENTER);
+                }
+            }
+
+            rd_.Text(work, D2D1::RectF(pane.left + 14, pane.top + 58, pane.right - 14, pane.top + 82), rd_.fSmall.Get(),
+                     col::text);
+            if (!sub.empty()) {
+                const float subTop = pane.top + 82.0f;
+                const float subBottom = job.ppm.empty() ? textBottom : (pane.top + 86.0f);
+                rd_.Text(sub, D2D1::RectF(pane.left + 14, subTop, pane.right - 14, subBottom), rd_.fBody.Get(), col::muted);
+            }
+
+            if (!waiting && job.remaining > 0.5) {
+                rd_.Text(Fmt(L"About %s left", Duration(job.remaining).c_str()),
+                         D2D1::RectF(pane.left + 14, barTop - 14.0f, pane.right - 14, barTop - 2.0f), rd_.fMonoSmall.Get(),
+                         col::dim, DWRITE_TEXT_ALIGNMENT_TRAILING);
+            }
+            DrawFleetProgressBar(bar, FleetJobFraction(job), waiting);
             return;
         }
         if (kind == 3) {

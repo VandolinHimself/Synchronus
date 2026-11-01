@@ -1,6 +1,10 @@
 # Changelog
 
-Current release: **2.8.1**.
+Current release: **2.8.2**.
+
+## 2.8.2 — 2026-11-01
+
+- During a full tune, each running step pane shows what it is working on, step counts where they apply, and a progress bar (including download and measurement progress).
 
 ## 2.8.1 — 2026-10-30
 

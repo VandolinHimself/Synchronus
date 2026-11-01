@@ -72,7 +72,7 @@ gui::MeasurePlan gui::MeasurePlanFor(int fidelity) {
 
 namespace {
 
-constexpr wchar_t kVersion[] = L"2.8.1";
+constexpr wchar_t kVersion[] = L"2.8.2";
 constexpr wchar_t kProduct[] = L"Synchronus";
 constexpr wchar_t kCompany[] = L"Lucius & Wayne Systems";
 constexpr wchar_t kCompanyUrl[] = L"https://luciuswayne.com";
@@ -560,7 +560,18 @@ void Narrate(const std::wstring& title, const std::wstring& body) {
 }
 
 void PublishPpm(const std::vector<gui::PpmStepView>& steps) {
-    if (g_feed) g_feed->Ppm(steps);
+    if (!g_feed) return;
+    g_feed->Ppm(steps);
+    if (steps.empty()) return;
+    int done = 0;
+    int active = -1;
+    for (size_t i = 0; i < steps.size(); ++i) {
+        if (steps[i].status == 2 || steps[i].status == 3) ++done;
+        else if (steps[i].status == 1) active = static_cast<int>(i);
+    }
+    double frac = static_cast<double>(done) / static_cast<double>(steps.size());
+    if (active >= 0) frac = (static_cast<double>(done) + 0.35) / static_cast<double>(steps.size());
+    g_feed->Progress(frac, 0, 0);
 }
 
 thread_local bool g_ppmDwell = true;
