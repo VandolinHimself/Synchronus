@@ -4989,8 +4989,8 @@ private:
         EnsureAggregate();
         const unsigned runs = aggregate_.runs;
         const double samples = aggregate_.samples;
-        rd_.Text(runs ? Fmt(L"Aggregate  ·  %u runs  ·  %.0f samples", runs, samples)
-                      : L"Aggregate  ·  no saved runs yet",
+        rd_.Text(runs ? Fmt(L"Aggregate  |  %u runs  |  %.0f samples", runs, samples)
+                      : L"Aggregate  |  no saved runs yet",
                  D2D1::RectF(B.left, B.top, B.right, B.top + 24), rd_.fPhase.Get(), col::cyan);
         rd_.Text(L"Each interval is a sample-weighted mean. A new run moves it by that run's samples over the master weight.",
                  D2D1::RectF(B.left, B.top + 24, B.right, B.top + 42), rd_.fSmall.Get(), col::dim);

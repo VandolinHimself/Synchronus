@@ -1,6 +1,10 @@
 # Changelog
 
-Current release: **2.8.3**.
+Current release: **2.8.4**.
+
+## 2.8.4 — 2026-11-01
+
+- The Aggregate page title separates runs and samples with a plain bar. The previous mark did not draw in the heading font.
 
 ## 2.8.3 — 2026-11-01
 
