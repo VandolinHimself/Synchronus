@@ -72,7 +72,7 @@ gui::MeasurePlan gui::MeasurePlanFor(int fidelity) {
 
 namespace {
 
-constexpr wchar_t kVersion[] = L"2.8.4";
+constexpr wchar_t kVersion[] = L"2.8.5";
 constexpr wchar_t kProduct[] = L"Synchronus";
 constexpr wchar_t kCompany[] = L"Lucius & Wayne Systems";
 constexpr wchar_t kCompanyUrl[] = L"https://luciuswayne.com";
@@ -890,8 +890,21 @@ void WINAPI ServiceMain(DWORD, LPWSTR*) {
     } else {
         g_serviceResolution = fastest;
     }
+    DWORD pinned = 0;
+    RegGetDword(HKEY_LOCAL_MACHINE, kAppRegKey, L"ResolutionPinned", pinned);
+    bool fromAggregate = false;
+    if (!pinned) {
+        const AggregateHold hold = AggregateHoldPick(ProgramDataDir());
+        if (hold.requested && hold.requested != g_serviceResolution) {
+            LogLine(Format(L"service: %u runs saved; timer set to %.4f ms, the lowest aggregate score (saved %.4f ms)",
+                           hold.runs, UnitsToMs(hold.requested), UnitsToMs(g_serviceResolution)));
+            g_serviceResolution = hold.requested;
+            fromAggregate = true;
+        }
+    }
     if (g_serviceResolution < fastest) g_serviceResolution = fastest;
     if (slowest != 0 && g_serviceResolution > slowest) g_serviceResolution = slowest;
+    if (fromAggregate) RegSetDword(HKEY_LOCAL_MACHINE, kAppRegKey, L"DesiredResolution", g_serviceResolution);
 
     DisablePowerThrottling();
 
@@ -944,7 +957,17 @@ bool RunServiceDispatcher() {
 // Caller must be elevated. Returns true only if the service is RUNNING and
 // has confirmed (via the AppliedResolution registry heartbeat) that it is
 // holding the requested resolution.
-bool InstallService(ULONG desired) {
+bool InstallService(ULONG desired, bool userPin = false) {
+    const ULONG requested = desired;
+    if (!userPin) {
+        const unsigned next = ResolutionToHold(ProgramDataDir(), desired, false);
+        if (next) desired = next;
+    }
+    if (requested && desired != requested) {
+        Out(Format(L"More than one run is saved. Setting the timer to %.4f ms, the lowest aggregate score, "
+                   L"instead of %.4f ms.",
+                   UnitsToMs(desired), UnitsToMs(requested)));
+    }
     ReportPhase(L"INSTALL", Format(L"holding %.4f ms from every boot", UnitsToMs(desired)));
     Narrate(L"Installing the auto-start service",
             Format(L"Registers a Windows service that requests %.4f ms at every boot. "
@@ -978,6 +1001,8 @@ bool InstallService(ULONG desired) {
     }
 
     // Persist the choice (the service reads DesiredResolution at start).
+    // A pin stays put. A measured choice can move to the aggregate lowest score.
+    RegSetDword(HKEY_LOCAL_MACHINE, kAppRegKey, L"ResolutionPinned", userPin ? 1 : 0);
     RegSetDword(HKEY_LOCAL_MACHINE, kAppRegKey, L"DesiredResolution", desired);
     RegSetString(HKEY_LOCAL_MACHINE, kAppRegKey, L"InstallPath", installPath);
 
@@ -2731,7 +2756,9 @@ bool UninstallService() {
 // ---------------------------------------------------------------- benchmark
 
 struct BenchmarkResult {
-    ULONG winner = 0;          // requested units to install (0 = no safe choice)
+    ULONG winner = 0;          // this run's verified pick (0 = no safe choice)
+    ULONG hold = 0;            // resolution to set: aggregate lowest after more than one run
+    bool fromAggregate = false;
     Stats winnerStats{};       // back-to-back pattern
     Stats winnerIdleStats{};   // idle-gap pattern
     double winnerScore = 0;
@@ -3284,13 +3311,26 @@ BenchmarkResult RunBenchmark(const BenchmarkConfig& cfg) {
     result.winnerIdleStats = chosen->idleStats;
     result.winnerScore = chosen->score;
     result.margin = chosen->requested >= optimum ? chosen->requested - optimum : 0;
-    NoteTuneEvent(ProgramDataDir(), L"Timer",
-                  Format(L"winner %.4f ms, score %.4f, %u intervals", UnitsToMs(result.winner), result.winnerScore,
-                         static_cast<unsigned>(sweep.size())));
-    Narrate(L"Winner chosen",
-            Format(L"%.4f ms is the fastest verified resolution on this machine "
-                   L"(best measured %.4f ms + %.4f ms margin).",
-                   UnitsToMs(result.winner), UnitsToMs(result.optimum), UnitsToMs(result.margin)));
+    const AggregateHold aggregate = AggregateHoldPick(ProgramDataDir());
+    result.hold = aggregate.requested ? aggregate.requested : result.winner;
+    result.fromAggregate = aggregate.requested != 0;
+    if (result.hold != result.winner) {
+        NoteTuneEvent(ProgramDataDir(), L"Timer",
+                      Format(L"this run %.4f ms, score %.4f; holding %.4f ms, lowest aggregate score across %u runs",
+                             UnitsToMs(result.winner), result.winnerScore, UnitsToMs(result.hold), aggregate.runs));
+        Narrate(L"Winner chosen",
+                Format(L"This run verified %.4f ms. %u runs are saved, so the timer is set to %.4f ms, "
+                       L"the lowest aggregate score.",
+                       UnitsToMs(result.winner), aggregate.runs, UnitsToMs(result.hold)));
+    } else {
+        NoteTuneEvent(ProgramDataDir(), L"Timer",
+                      Format(L"winner %.4f ms, score %.4f, %u intervals", UnitsToMs(result.winner), result.winnerScore,
+                             static_cast<unsigned>(sweep.size())));
+        Narrate(L"Winner chosen",
+                Format(L"%.4f ms is the fastest verified resolution on this machine "
+                       L"(best measured %.4f ms + %.4f ms margin).",
+                       UnitsToMs(result.winner), UnitsToMs(result.optimum), UnitsToMs(result.margin)));
+    }
     return result;
 }
 
@@ -3308,6 +3348,10 @@ void PrintBenchmarkSummary(const BenchmarkResult& r) {
                static_cast<unsigned long>(d.n), d.latePct));
     Out(Format(L"  = best measured resolution (%.4f ms) + %.4f ms safety margin", UnitsToMs(r.optimum),
                UnitsToMs(r.margin)));
+    if (r.hold && r.winner && r.hold != r.winner) {
+        Out(Format(L"  timer to set: %.4f ms, the lowest aggregate score (this run selected %.4f ms)",
+                   UnitsToMs(r.hold), UnitsToMs(r.winner)));
+    }
     if (r.boundary) {
         Out(Format(L"  first resolution that never missed a tick: %.4f ms", UnitsToMs(r.boundary)));
     } else {
@@ -3332,8 +3376,12 @@ void PrintHelp() {
         L"  Synchronus.exe                       Open the GUI: named-step tuning workflow.\n"
         L"  Synchronus.exe --cli                 The same default flow in a console (no GUI).\n"
         L"  Synchronus.exe --gui                 Force the GUI (default when no command is given).\n"
-        L"  Synchronus.exe --benchmark           Benchmark only; makes no permanent changes.\n"
+        L"  Synchronus.exe --benchmark           Benchmark only; does not install. If the\n"
+        L"                                       service starts again and more than one run\n"
+        L"                                       is saved, it holds the lowest aggregate score.\n"
         L"  Synchronus.exe --install             Benchmark + install/update the service.\n"
+        L"                                       After more than one saved run, install\n"
+        L"                                       uses the lowest aggregate score.\n"
         L"      [--resolution N]                 Skip the benchmark; use N (100-ns units,\n"
         L"                                       e.g. 5070 = 0.507 ms).\n"
         L"  Benchmark tuning (0.50-0.60 ms in 0.001 ms steps):\n"
@@ -3415,6 +3463,7 @@ struct Options {
     bool passesSet = false;
     bool verifySet = false;
     bool showWindow = false;
+    bool measuredHandoff = false;  // --measured: --resolution is a chosen hold, not a user pin
 };
 
 bool ParseOptions(const std::vector<std::wstring>& args, Options& opts) {
@@ -3461,6 +3510,8 @@ bool ParseOptions(const std::vector<std::wstring>& args, Options& opts) {
             opts.command = L"storage";
         } else if (a == L"--resolution") {
             if (!needValue(opts.resolution, 1, L"--resolution (100-ns units, e.g. 5070 = 0.507 ms)")) return false;
+        } else if (a == L"--measured") {
+            opts.measuredHandoff = true;
         } else if (a == L"--from") {
             if (!needValue(opts.bench.from, 1, L"--from (100-ns units)")) return false;
         } else if (a == L"--to") {
@@ -3833,8 +3884,15 @@ int CmdBenchmark(const Options& opts) {
         rc = 1;
     } else {
         PrintBenchmarkSummary(r);
-        Out(Format(L"\nNothing was changed. Run with no arguments (or --install) to hold %.4f ms "
-                   L"permanently via the startup service.", UnitsToMs(r.winner)));
+        const ULONG shown = r.hold ? r.hold : r.winner;
+        if (stoppedService && r.fromAggregate) {
+            Out(Format(L"\nThe service is starting again at %.4f ms, the lowest aggregate score across saved runs.",
+                       UnitsToMs(shown)));
+        } else {
+            Out(Format(L"\nNothing was changed. Run with no arguments (or --install) to hold %.4f ms "
+                       L"permanently via the startup service.",
+                       UnitsToMs(shown)));
+        }
     }
     if (stoppedService) {
         Out(L"Restarting the Synchronus service...");
@@ -3879,7 +3937,12 @@ int CmdInstall(const Options& opts, bool interactiveDefault) {
             Out(L"To pin a value anyway: Synchronus.exe --install --resolution <100-ns units>");
             return 2;
         }
-        desired = r.winner;
+        desired = ResolutionToHold(ProgramDataDir(), r.winner, false);
+        if (r.winner && desired != r.winner) {
+            Out(Format(L"This run selected %.4f ms. More than one run is saved, so the timer is set to "
+                       L"%.4f ms, the lowest aggregate score.",
+                       UnitsToMs(r.winner), UnitsToMs(desired)));
+        }
         PrintBenchmarkSummary(r);
         RegSetDword(HKEY_LOCAL_MACHINE, kAppRegKey, L"BenchmarkBoundary", r.boundary);
         RegSetDword(HKEY_LOCAL_MACHINE, kAppRegKey, L"BenchmarkMedianMicroMs",
@@ -3887,7 +3950,8 @@ int CmdInstall(const Options& opts, bool interactiveDefault) {
     }
 
     (void)interactiveDefault;
-    if (!InstallService(desired)) {
+    const bool userPin = opts.resolution != 0 && !opts.measuredHandoff;
+    if (!InstallService(desired, userPin)) {
         Err(L"Install failed; see the log for details.");
         return 1;
     }
@@ -4279,6 +4343,7 @@ int RunGui(const Options& opts, const std::vector<std::wstring>&) {
     host.memorySkip = opts.noMemory;
     host.storageSkip = opts.noStorage;
     host.pinnedResolution = opts.resolution;
+    host.measuredHandoff = opts.measuredHandoff;
     host.fidelity = opts.fidelity;
     host.system = [] { return CurrentSystem(); };
     host.benchmark = [&opts](gui::Feed& feed, int fidelity) -> gui::ResultView {
@@ -4290,6 +4355,7 @@ int RunGui(const Options& opts, const std::vector<std::wstring>&) {
         const BenchmarkResult r = BenchmarkSystem(chosen, stopped);
         gui::ResultView v;
         v.winner = r.winner;
+        v.hold = r.hold ? r.hold : r.winner;
         v.optimum = r.optimum;
         v.boundary = r.boundary;
         v.margin = r.margin;
@@ -4302,12 +4368,14 @@ int RunGui(const Options& opts, const std::vector<std::wstring>&) {
         g_feed = nullptr;
         return v;
     };
-    host.install = [](unsigned units, gui::Feed& feed) -> int {
+    host.install = [](unsigned units, bool userPin, gui::Feed& feed) -> int {
         g_feed = &feed;
+        const unsigned hold = ResolutionToHold(ProgramDataDir(), units, userPin);
         if (!IsAdmin()) {
             feed.Log(L"Requesting administrator privileges (approve the UAC prompt)...");
             std::vector<std::wstring> elevated = {
-                Format(L"--resolution"), Format(L"%lu", static_cast<unsigned long>(units)), L"--yes"};
+                Format(L"--resolution"), Format(L"%lu", static_cast<unsigned long>(hold)), L"--yes"};
+            if (!userPin) elevated.push_back(L"--measured");
             const bool ok = RelaunchElevated(ElevatedArgs(elevated));
             g_feed = nullptr;
             if (!ok) {
@@ -4316,7 +4384,7 @@ int RunGui(const Options& opts, const std::vector<std::wstring>&) {
             }
             return 2;
         }
-        const bool ok = InstallService(units);
+        const bool ok = InstallService(hold, userPin);
         g_feed = nullptr;
         return ok ? 0 : 1;
     };

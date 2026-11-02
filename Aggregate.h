@@ -54,5 +54,20 @@ void NoteTuneEvent(const std::wstring& dataDir, const std::wstring& kind, const 
 
 AggregateView LoadAggregate(const std::wstring& dataDir);
 
+// Lowest aggregate score once more than one run is stored.
+// requested is 0 until a second run exists, so a single run keeps its own pick.
+// Equal scores keep the shorter interval, matching the Aggregate page.
+struct AggregateHold {
+    unsigned requested = 0;
+    double score = 0;
+    unsigned runs = 0;
+};
+
+AggregateHold AggregateHoldPick(const std::wstring& dataDir);
+
+// The resolution to set. An explicit pin is kept. Otherwise, after more than
+// one saved run, this is the aggregate lowest score; until then it is fallback.
+unsigned ResolutionToHold(const std::wstring& dataDir, unsigned fallback, bool userPin);
+
 // 0 when the weighted-mean cases hold.
 int SelfTestAggregate();

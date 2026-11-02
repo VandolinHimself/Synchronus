@@ -44,6 +44,7 @@ struct SweepView {
 
 struct ResultView {
     unsigned winner = 0, optimum = 0, boundary = 0, margin = 0;
+    unsigned hold = 0;                  // resolution to set; aggregate lowest after more than one run
     StatsView loop, idle;
     double score = 0;
     std::wstring failure;
@@ -203,11 +204,13 @@ struct Host {
     bool memorySkip = false;
     bool storageSkip = false;
     unsigned pinnedResolution = 0;                              // skip the benchmark, install this (100-ns units)
+    bool measuredHandoff = false;                               // pinnedResolution was already chosen from a run
     int fidelity = 1;                                           // 0 low, 1 medium, 2 high
     std::function<SystemView()> system;
     std::function<ResultView(Feed&, int fidelity)> benchmark;   // whole benchmark, reports into feed
     // 0 ok, 1 fail, 2 relaunched elevated (caller should quit)
-    std::function<int(unsigned units, Feed&)> install;
+    // userPin keeps an explicit resolution. A measured hold can move to the aggregate lowest score.
+    std::function<int(unsigned units, bool userPin, Feed&)> install;
     std::function<CpuProbeView()> probeCpu;
     std::function<GpuProbeView()> probeGpu;
     std::function<int(Feed&)> applyPpm;                         // 0 ok, 1 fail

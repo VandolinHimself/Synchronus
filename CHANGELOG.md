@@ -1,6 +1,10 @@
 # Changelog
 
-Current release: **2.8.4**.
+Current release: **2.8.5**.
+
+## 2.8.5 — 2026-11-01
+
+- After more than one timer run is saved, the resolution that is set is the lowest aggregate score. A single run still uses that run's verified pick. An explicit resolution pin is kept. This applies to the boot service, a repair, and the next time the service starts.
 
 ## 2.8.4 — 2026-11-01
 

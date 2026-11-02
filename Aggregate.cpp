@@ -379,6 +379,30 @@ void MergeTimingRun(const std::wstring& dataDir, const std::vector<TimingSample>
     WriteMaster(path, rows);
 }
 
+AggregateHold AggregateHoldPick(const std::wstring& dataDir) {
+    AggregateHold out;
+    if (dataDir.empty()) return out;
+    const AggregateView view = LoadAggregate(dataDir);
+    if (view.runs < 2) return out;
+    const AggregatePoint* best = nullptr;
+    for (const auto& p : view.points) {
+        if (!(p.scoreWeight > 0) || p.requested == 0) continue;
+        if (!best || p.score < best->score) best = &p;
+    }
+    if (!best) return out;
+    out.requested = best->requested;
+    out.score = best->score;
+    out.runs = view.runs;
+    return out;
+}
+
+unsigned ResolutionToHold(const std::wstring& dataDir, unsigned fallback, bool userPin) {
+    if (userPin && fallback) return fallback;
+    const AggregateHold hold = AggregateHoldPick(dataDir);
+    if (hold.requested) return hold.requested;
+    return fallback;
+}
+
 void NoteTuneEvent(const std::wstring& dataDir, const std::wstring& kind, const std::wstring& detail) {
     if (dataDir.empty() || kind.empty()) return;
     std::lock_guard<std::mutex> lock(g_aggMu);
@@ -455,6 +479,31 @@ int SelfTestAggregate() {
         const double expect = (30.0 * 3.0 + 10000.0 * 1.0 + 10.0 * 11.0) / 10040.0;
         if (std::fabs(heavy.points[0].loopMedian - expect) > 1e-6) return 8;
         if (!(heavy.points[0].loopWeight > 10000.0)) return 9;
+    }
+    {
+        const std::wstring holdDir = std::wstring(tmp) + L"SynchronusAggHold";
+        CreateDirectoryW(holdDir.c_str(), nullptr);
+        DeleteFileW(MasterPath(holdDir).c_str());
+        DeleteFileW(HistoryPath(holdDir).c_str());
+        if (AggregateHoldPick(holdDir).requested != 0) return 11;
+        MergeTimingRun(holdDir, {sample(5000, 10, 1.0, 4.0), sample(5600, 10, 1.0, 1.0)});
+        if (AggregateHoldPick(holdDir).requested != 0) return 12;
+        MergeTimingRun(holdDir, {sample(5000, 10, 1.0, 3.0), sample(5600, 10, 1.0, 1.0)});
+        const AggregateHold hold = AggregateHoldPick(holdDir);
+        // 5000 -> 3.5, 5600 -> 1.0. The lower aggregate score is the one to hold.
+        if (hold.requested != 5600) return 13;
+        if (hold.runs != 2) return 14;
+        if (std::fabs(hold.score - 1.0) > 1e-9) return 15;
+        if (ResolutionToHold(holdDir, 5000, true) != 5000) return 16;
+        if (ResolutionToHold(holdDir, 5000, false) != 5600) return 17;
+        DeleteFileW(MasterPath(holdDir).c_str());
+        MergeTimingRun(holdDir, {sample(5000, 10, 1.0, 1.0), sample(6000, 10, 1.0, 1.0)});
+        MergeTimingRun(holdDir, {sample(5000, 10, 1.0, 1.0), sample(6000, 10, 1.0, 1.0)});
+        // Equal scores keep the shorter interval, the same rule as the Aggregate page.
+        if (AggregateHoldPick(holdDir).requested != 5000) return 18;
+        DeleteFileW(MasterPath(holdDir).c_str());
+        DeleteFileW(HistoryPath(holdDir).c_str());
+        RemoveDirectoryW(holdDir.c_str());
     }
     NoteTuneEvent(dir, L"CPU", L"power applied");
     const AggregateView noted = LoadAggregate(dir);

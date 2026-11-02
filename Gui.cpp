@@ -2130,7 +2130,13 @@ private:
                     return 1;
                 }
                 feed.Progress(1.0, 0, 0);
-                feed.Phase(L"RESULT", Fmt(L"%.4f ms selected after verification", Ms(r.winner)));
+                const unsigned hold = r.hold ? r.hold : r.winner;
+                if (hold != r.winner) {
+                    feed.Phase(L"RESULT", Fmt(L"%.4f ms lowest aggregate score; this run verified %.4f ms", Ms(hold),
+                                              Ms(r.winner)));
+                } else {
+                    feed.Phase(L"RESULT", Fmt(L"%.4f ms selected after verification", Ms(r.winner)));
+                }
                 return 0;
             });
         }
@@ -2152,7 +2158,7 @@ private:
                     slot.phase.store(static_cast<int>(JobPhase::Running));
                     {
                         std::lock_guard<std::mutex> g(resultM_);
-                        units = result_.winner;
+                        units = result_.hold ? result_.hold : result_.winner;
                     }
                     if (!units) units = host_.pinnedResolution;
                 }
@@ -2165,10 +2171,22 @@ private:
                     return 1;
                 if (!unitsOverride) {
                     std::lock_guard<std::mutex> g(resultM_);
-                    if (result_.winner) units = result_.winner;
+                    if (result_.hold) units = result_.hold;
+                    else if (result_.winner) units = result_.winner;
+                }
+                const bool pin = UserPinned() || (unitsOverride != 0 && RegistryPinned());
+                if (pin) {
+                    if (UserPinned()) units = host_.pinnedResolution;
+                } else if (units) {
+                    const unsigned resolved = ResolutionToHold(host_.dataDir, units, false);
+                    if (resolved) units = resolved;
+                }
+                if (!units) {
+                    feed.Phase(L"INSTALL FAILED", L"measure a timer resolution first");
+                    return 1;
                 }
                 feed.Phase(L"INSTALLING", L"copying the executable, writing the registry, starting the service");
-                const int rc = host_.install ? host_.install(units, feed) : 1;
+                const int rc = host_.install ? host_.install(units, pin, feed) : 1;
                 if (rc == 2) {
                     PostMessageW(hwnd_, WM_CLOSE, 0, 0);
                     return 0;
@@ -2218,8 +2236,25 @@ private:
         return false;
     }
 
+    bool UserPinned() const { return host_.pinnedResolution != 0 && !host_.measuredHandoff; }
+
+    bool RegistryPinned() const {
+        DWORD value = 0, size = sizeof(value);
+        if (RegGetValueW(HKEY_LOCAL_MACHINE, L"SOFTWARE\\Synchronus", L"ResolutionPinned", RRF_RT_REG_DWORD, nullptr,
+                         &value, &size) != ERROR_SUCCESS)
+            return false;
+        return value != 0;
+    }
+
     unsigned Winner() {
         std::lock_guard<std::mutex> g(resultM_);
+        return result_.winner;
+    }
+
+    unsigned HoldUnits() {
+        if (UserPinned()) return host_.pinnedResolution;
+        std::lock_guard<std::mutex> g(resultM_);
+        if (result_.hold) return result_.hold;
         return result_.winner;
     }
 
@@ -3150,12 +3185,8 @@ private:
             if (id == JobId::Prepare) {
                 kind = L"Restore point";
                 detail = L"Pre-tune restore point created";
-            } else if (id == JobId::Hold) {
-                unsigned units = 0;
-                {
-                    std::lock_guard<std::mutex> g(resultM_);
-                    units = result_.winner;
-                }
+            }             else if (id == JobId::Hold) {
+                const unsigned units = HoldUnits();
                 kind = L"Timer hold";
                 detail = units ? Fmt(L"Boot service holding %.4f ms", units / 10000.0) : L"Boot service installed";
             } else if (id == JobId::Cpu) {
@@ -3869,15 +3900,11 @@ private:
             rd_.Text(L"no missed ticks from here", D2D1::RectF(x + 6, P.top + 22, x + 200, P.top + 36),
                      rd_.fMonoSmall.Get(), Alpha(col::teal, 0.8f));
         }
-        // selected (after verification)
-        unsigned winner = 0;
-        {
-            std::lock_guard<std::mutex> g(resultM_);
-            winner = result_.winner;
-        }
-        if (winner && revealT_ > 0) {
+        // The resolution that will be set. After more than one run that is the aggregate lowest score.
+        const unsigned chosen = HoldUnits();
+        if (chosen && revealT_ > 0) {
             for (size_t i = 0; i < n; ++i) {
-                if (items[i].requested != winner || !has[i]) continue;
+                if (items[i].requested != chosen || !has[i]) continue;
                 const D2D1_POINT_2F p = D2D1::Point2F(X(i), Y(anScore_[i]));
                 const float e = EaseOutCubic(revealT_);
                 rd_.Ring(p, 10 + 140 * e, Alpha(col::green, (1 - e) * 0.8f), 2);
@@ -3886,7 +3913,7 @@ private:
                 rd_.Glow(p, 30 + 6 * pulse, col::green, 0.9f);
                 rd_.Ring(p, 8 + 2 * pulse, col::green, 2);
                 rd_.Dot(p, 3.5f, col::white);
-                rd_.Text(Fmt(L"SELECTED %.4f ms", Ms(winner)), D2D1::RectF(p.x - 80, p.y + 12, p.x + 80, p.y + 28),
+                rd_.Text(Fmt(L"SELECTED %.4f ms", Ms(chosen)), D2D1::RectF(p.x - 80, p.y + 12, p.x + 80, p.y + 28),
                          rd_.fLabel.Get(), col::green, DWRITE_TEXT_ALIGNMENT_CENTER);
             }
         }
@@ -4037,14 +4064,10 @@ private:
         } else if (snap_.activeIdx >= 0 && static_cast<size_t>(snap_.activeIdx) < items.size()) {
             who = L"first pass";
         }
-        unsigned winner = 0;
-        {
-            std::lock_guard<std::mutex> g(resultM_);
-            winner = result_.winner;
-        }
-        if (winner) {
+        const unsigned chosen = HoldUnits();
+        if (chosen) {
             for (const auto& f : snap_.finalists) {
-                if (f.requested == winner) {
+                if (f.requested == chosen) {
                     c = &f;
                     who = L"selected";
                 }
@@ -4137,17 +4160,13 @@ private:
             for (const auto& f : fin) if (f.hasData) maxScore = std::max(maxScore, f.score);
             const float rowH = std::min(28.0f, H(L) / static_cast<float>(fin.size()));
             const float barX0 = L.left + 92, barX1 = L.right - 150;
-            unsigned winner = 0;
-            {
-                std::lock_guard<std::mutex> g(resultM_);
-                winner = result_.winner;
-            }
+            const unsigned chosen = HoldUnits();
             for (size_t i = 0; i < fin.size(); ++i) {
                 const CandidateView& f = fin[i];
                 const float y = L.top + i * rowH;
                 const D2D1_RECT_F row = D2D1::RectF(L.left, y, L.right, y + rowH - 3);
                 const bool active = static_cast<int>(i) == snap_.activeFinalist && stage == Stage::Running;
-                const bool selected = winner && f.requested == winner;
+                const bool selected = chosen && f.requested == chosen;
                 const bool eligible = f.requested >= snap_.target;
                 if (active) rd_.FillRound(row, 6, Alpha(col::cyan, 0.06f + 0.04f * std::sin(time_ * 5)));
                 if (selected) rd_.FillRound(row, 6, Alpha(col::green, 0.10f));
@@ -5067,7 +5086,7 @@ private:
         const wchar_t* blurbs[] = {
             L"Makes a restore point first, then measures timing before changing anything else. CPU, memory, and the driver lookup then run together. Storage follows the CPU step. GPU settings and Afterburner wait until the driver choice is finished.",
             L"Opens the health screen. It reads the live settings and lists anything that has drifted. Nothing changes until you choose a repair.",
-            L"Times Sleep(1) across timer resolutions and saves a scan. The heatmap on this screen uses the newest of those scans.",
+            L"Times Sleep(1) across timer resolutions and saves a scan. After more than one run, the timer holds the lowest aggregate score. The heatmap on this screen uses the newest scan.",
             L"Writes the processor power plan. Core parking and throttling are turned off, and the plan asks the CPU to stay at a high, steady state.",
             L"Looks up the current graphics driver and can install a clean copy. This step does not install Afterburner.",
             L"Turns on hardware-accelerated GPU scheduling, turns off Game DVR and Game Bar capture, and writes the NVIDIA or AMD low-latency profile when that vendor is present.",
@@ -5497,7 +5516,9 @@ private:
                 const D2D1_POINT_2F center = D2D1::Point2F(cx, B.top + 34);
                 const float pulse = 0.5f + 0.5f * std::sin(time_ * 2.5f);
                 rd_.Glow(center, 120 * e, col::green, 0.35f + 0.15f * pulse);
-                const std::wstring big = Fmt(L"%.4f ms", Ms(r.winner));
+                const unsigned shown = UserPinned() ? host_.pinnedResolution : (r.hold ? r.hold : r.winner);
+                const bool aggregatePick = !UserPinned() && r.winner && shown && shown != r.winner;
+                const std::wstring big = Fmt(L"%.4f ms", Ms(shown));
                 const float scale = 0.6f + 0.4f * e;
                 D2D1_MATRIX_3X2_F old{};
                 rd_.Dc()->GetTransform(&old);
@@ -5505,16 +5526,18 @@ private:
                 rd_.Text(big, D2D1::RectF(B.left - 200, center.y - 28, B.right + 200, center.y + 28), rd_.fHuge.Get(),
                          col::green, DWRITE_TEXT_ALIGNMENT_CENTER, DWRITE_PARAGRAPH_ALIGNMENT_CENTER);
                 rd_.Dc()->SetTransform(old);
-                rd_.Text(Fmt(L"best measured %.4f ms  +  %.4f ms safety margin", Ms(r.optimum), Ms(r.margin)),
+                rd_.Text(aggregatePick ? Fmt(L"lowest aggregate score. This run verified %.4f ms", Ms(r.winner))
+                                      : Fmt(L"best measured %.4f ms  +  %.4f ms safety margin", Ms(r.optimum), Ms(r.margin)),
                          D2D1::RectF(B.left, B.top + 66, B.right, B.top + 84), rd_.fSmall.Get(), col::muted,
                          DWRITE_TEXT_ALIGNMENT_CENTER);
-                rd_.Text(Fmt(L"verified over %u samples: median %+.4f, mean %+.4f, %.1f%% missed a tick", r.loop.n + r.idle.n,
-                             r.loop.median, r.loop.mean, r.loop.latePct),
+                rd_.Text(Fmt(L"%s%u samples: median %+.4f, mean %+.4f, %.1f%% missed a tick",
+                             aggregatePick ? L"this run, " : L"verified over ", r.loop.n + r.idle.n, r.loop.median,
+                             r.loop.mean, r.loop.latePct),
                          D2D1::RectF(B.left, B.top + 84, B.right, B.top + 100), rd_.fMonoSmall.Get(), col::dim,
                          DWRITE_TEXT_ALIGNMENT_CENTER);
                 if (stage == Stage::Result) {
                     if (Want(kWantHold)) {
-                        unsigned units = Winner();
+                        unsigned units = HoldUnits();
                         if (!units) units = host_.pinnedResolution;
                         rd_.Text(units ? L"The boot service installs on its own and holds this period at every startup."
                                        : L"There is no measured period yet, so the boot service was not installed.",
@@ -5554,7 +5577,7 @@ private:
                             rd_.Line(m, D2D1::Point2F(Lerp(m.x, b.x, u), Lerp(m.y, b.y, u)), col::white, 2.2f, rd_.Round());
                         }
                     }
-                    rd_.Text(Fmt(L"Service running: holding %.4f ms now and at every boot", Ms(r.winner)),
+                    rd_.Text(Fmt(L"Service running: holding %.4f ms now and at every boot", Ms(shown)),
                              D2D1::RectF(cx - 78, B.top + 122, B.right, B.top + 142), rd_.fSub.Get(), col::green);
                 } else {
                     rd_.Text(L"Install failed - see the log for details.", D2D1::RectF(B.left, B.top + 122, B.right, B.top + 142),
