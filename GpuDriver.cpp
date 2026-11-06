@@ -1487,29 +1487,130 @@ bool SetCfgKey(std::string& text, const char* key, const char* value) {
     return true;
 }
 
+bool UpsertCfgKey(std::string& text, const char* key, const char* value) {
+    if (SetCfgKey(text, key, value)) return true;
+    const std::string line = std::string(key) + " = " + value;
+    const size_t at = text.find("[Settings]");
+    if (at == std::string::npos) {
+        text = "[Settings]\r\n" + line + "\r\n" + text;
+        return true;
+    }
+    const size_t nl = text.find('\n', at);
+    if (nl == std::string::npos) text += "\r\n" + line + "\r\n";
+    else text.insert(nl + 1, line + "\r\n");
+    return true;
+}
+
 void ConfigureAfterburner(const std::wstring& exe) {
     const size_t slash = exe.find_last_of(L"\\/");
     if (slash == std::wstring::npos) return;
     const std::wstring cfg = exe.substr(0, slash) + L"\\MSIAfterburner.cfg";
     std::string text;
     if (!ReadFileText(cfg, text)) return;
-    SetCfgKey(text, "StartWithWindows", "1");
-    SetCfgKey(text, "StartMinimized", "1");
-    SetCfgKey(text, "RememberSettings", "1");
-    SetCfgKey(text, "StartupViaTaskScheduler", "1");
-    SetCfgKey(text, "StartupDelay", "0");
-    SetCfgKey(text, "UnlockVoltageControl", "1");
-    SetCfgKey(text, "UnlockVoltageMonitoring", "1");
-    SetCfgKey(text, "FirstRun", "0");
-    SetCfgKey(text, "EnableServer", "1");
+    // Synchronus owns the logon start and passes the saved profile. Afterburner's
+    // own startup entry would launch it again with no profile and ignore the second start.
+    UpsertCfgKey(text, "StartWithWindows", "0");
+    UpsertCfgKey(text, "StartMinimized", "1");
+    UpsertCfgKey(text, "RememberSettings", "1");
+    UpsertCfgKey(text, "RestoreAfterSuspendedMode", "1");
+    UpsertCfgKey(text, "StartupViaTaskScheduler", "0");
+    UpsertCfgKey(text, "StartupDelay", "0");
+    UpsertCfgKey(text, "UnlockVoltageControl", "1");
+    UpsertCfgKey(text, "UnlockVoltageMonitoring", "1");
+    UpsertCfgKey(text, "FirstRun", "0");
+    UpsertCfgKey(text, "EnableServer", "1");
     WriteTextFile(cfg, text);
 }
 
-bool ScheduleLogon(const wchar_t* task, const std::wstring& command) {
+std::wstring XmlEscape(const std::wstring& text) {
+    std::wstring out;
+    out.reserve(text.size());
+    for (wchar_t c : text) {
+        switch (c) {
+            case L'&': out += L"&amp;"; break;
+            case L'<': out += L"&lt;"; break;
+            case L'>': out += L"&gt;"; break;
+            case L'"': out += L"&quot;"; break;
+            default: out += c; break;
+        }
+    }
+    return out;
+}
+
+std::wstring CurrentUserSam() {
+    HANDLE token = nullptr;
+    if (!OpenProcessToken(GetCurrentProcess(), TOKEN_QUERY, &token)) return {};
+    DWORD len = 0;
+    GetTokenInformation(token, TokenUser, nullptr, 0, &len);
+    std::vector<BYTE> buf(len ? len : 1);
+    if (!len || !GetTokenInformation(token, TokenUser, buf.data(), len, &len)) {
+        CloseHandle(token);
+        return {};
+    }
+    CloseHandle(token);
+    wchar_t name[256]{};
+    wchar_t domain[256]{};
+    DWORD nameN = _countof(name);
+    DWORD domainN = _countof(domain);
+    SID_NAME_USE use = SidTypeUnknown;
+    if (!LookupAccountSidW(nullptr, reinterpret_cast<TOKEN_USER*>(buf.data())->User.Sid, name, &nameN, domain, &domainN, &use))
+        return {};
+    if (domain[0] == 0) return name;
+    return std::wstring(domain) + L"\\" + name;
+}
+
+bool WriteUtf16File(const std::wstring& path, const std::wstring& text) {
+    const HANDLE h = CreateFileW(path.c_str(), GENERIC_WRITE, 0, nullptr, CREATE_ALWAYS, FILE_ATTRIBUTE_NORMAL, nullptr);
+    if (h == INVALID_HANDLE_VALUE) return false;
+    const unsigned char bom[] = {0xFF, 0xFE};
+    DWORD wrote = 0;
+    const BOOL mark = WriteFile(h, bom, sizeof(bom), &wrote, nullptr);
+    const BOOL body = WriteFile(h, text.data(), static_cast<DWORD>(text.size() * sizeof(wchar_t)), &wrote, nullptr);
+    CloseHandle(h);
+    return mark && body;
+}
+
+// A logon task whose command and arguments stay separate. schtasks /TR drops
+// the profile argument when the executable path contains spaces, and a task
+// created without an interactive user runs where the driver will not take the curve.
+bool ScheduleInteractive(const wchar_t* task, const std::wstring& exe, const std::wstring& arguments) {
+    const std::wstring user = CurrentUserSam();
+    if (user.empty() || exe.empty()) return false;
+    const size_t slash = exe.find_last_of(L"\\/");
+    const std::wstring dir = slash == std::wstring::npos ? L"" : exe.substr(0, slash);
+    const std::wstring xml =
+        L"<?xml version=\"1.0\" encoding=\"UTF-16\"?>\r\n"
+        L"<Task version=\"1.3\" xmlns=\"http://schemas.microsoft.com/windows/2004/02/mit/task\">\r\n"
+        L"  <RegistrationInfo><Description>Synchronus starts this program at logon and applies the saved overclock.</Description></RegistrationInfo>\r\n"
+        L"  <Triggers><LogonTrigger><Enabled>true</Enabled><UserId>" + XmlEscape(user) +
+        L"</UserId><Delay>PT15S</Delay></LogonTrigger></Triggers>\r\n"
+        L"  <Principals><Principal><UserId>" + XmlEscape(user) +
+        L"</UserId><LogonType>InteractiveToken</LogonType><RunLevel>HighestAvailable</RunLevel></Principal></Principals>\r\n"
+        L"  <Settings>\r\n"
+        L"    <MultipleInstancesPolicy>IgnoreNew</MultipleInstancesPolicy>\r\n"
+        L"    <DisallowStartIfOnBatteries>false</DisallowStartIfOnBatteries>\r\n"
+        L"    <StopIfGoingOnBatteries>false</StopIfGoingOnBatteries>\r\n"
+        L"    <AllowHardTerminate>false</AllowHardTerminate>\r\n"
+        L"    <StartWhenAvailable>true</StartWhenAvailable>\r\n"
+        L"    <RunOnlyIfNetworkAvailable>false</RunOnlyIfNetworkAvailable>\r\n"
+        L"    <AllowStartOnDemand>true</AllowStartOnDemand>\r\n"
+        L"    <Enabled>true</Enabled>\r\n"
+        L"    <Hidden>false</Hidden>\r\n"
+        L"    <ExecutionTimeLimit>PT0S</ExecutionTimeLimit>\r\n"
+        L"    <Priority>6</Priority>\r\n"
+        L"  </Settings>\r\n"
+        L"  <Actions><Exec><Command>" + XmlEscape(exe) + L"</Command><Arguments>" + XmlEscape(arguments) +
+        L"</Arguments><WorkingDirectory>" + XmlEscape(dir) + L"</WorkingDirectory></Exec></Actions>\r\n"
+        L"</Task>\r\n";
+    wchar_t temp[MAX_PATH]{};
+    const DWORD n = GetTempPathW(MAX_PATH, temp);
+    if (n == 0 || n >= MAX_PATH) return false;
+    const std::wstring xmlPath = std::wstring(temp) + L"Synchronus-logon-task.xml";
+    if (!WriteUtf16File(xmlPath, xml)) return false;
     const std::wstring sch = L"C:\\Windows\\System32\\schtasks.exe";
-    const std::wstring args = L"\"" + sch + L"\" /Create /F /SC ONLOGON /TN \"" + std::wstring(task) +
-                              L"\" /TR \"" + command + L"\"";
+    const std::wstring args = L"\"" + sch + L"\" /Create /F /TN \"" + std::wstring(task) + L"\" /XML \"" + xmlPath + L"\"";
     const Proc p = RunProcess(sch, args, L"", 20000, true, true);
+    DeleteFileW(xmlPath.c_str());
     return p.started && !p.timedOut && p.code == 0;
 }
 
@@ -1929,33 +2030,126 @@ int NextHeader(const std::vector<std::string>& lines, int start) {
     return static_cast<int>(lines.size());
 }
 
-std::string KeyLine(const std::vector<std::string>& lines, int start, int end, const char* key) {
-    const std::string prefix = std::string(key) + "=";
-    for (int i = start + 1; i < end; ++i)
-        if (lines[i].compare(0, prefix.size(), prefix) == 0) return lines[i];
-    return {};
+bool SplitKv(const std::string& line, std::string& key, std::string& value) {
+    size_t i = 0;
+    while (i < line.size() && (line[i] == ' ' || line[i] == '\t')) ++i;
+    if (i >= line.size() || line[i] == '[' || line[i] == ';' || line[i] == '#') return false;
+    const size_t start = i;
+    while (i < line.size() && line[i] != '=' && line[i] != ' ' && line[i] != '\t') ++i;
+    key = line.substr(start, i - start);
+    while (i < line.size() && (line[i] == ' ' || line[i] == '\t')) ++i;
+    if (key.empty() || i >= line.size() || line[i] != '=') return false;
+    ++i;
+    while (i < line.size() && (line[i] == ' ' || line[i] == '\t')) ++i;
+    value = line.substr(i);
+    while (!value.empty() && (value.back() == ' ' || value.back() == '\t' || value.back() == '\r')) value.pop_back();
+    return true;
 }
 
+bool FanKey(const std::string& key) { return key.size() >= 3 && key.compare(0, 3, "Fan") == 0; }
+
 void PutKey(std::vector<std::string>& lines, const char* section, const std::string& line) {
-    const size_t eq = line.find('=');
-    if (eq == std::string::npos) return;
-    const std::string prefix = line.substr(0, eq + 1);
+    std::string key, value;
+    if (!SplitKv(line, key, value)) return;
+    const std::string stored = key + "=" + value;
     int start = FindHeader(lines, section);
     if (start < 0) {
         int at = FindHeader(lines, "Defaults");
         if (at < 0) at = static_cast<int>(lines.size());
-        lines.insert(lines.begin() + at, line);
+        lines.insert(lines.begin() + at, stored);
         lines.insert(lines.begin() + at, std::string("[") + section + "]");
         return;
     }
     int end = NextHeader(lines, start);
     for (int i = start + 1; i < end; ++i) {
-        if (lines[i].compare(0, prefix.size(), prefix) == 0) {
-            lines[i] = line;
+        std::string existing, ignored;
+        if (SplitKv(lines[i], existing, ignored) && existing == key) {
+            lines[i] = stored;
             return;
         }
     }
-    lines.insert(lines.begin() + end, line);
+    lines.insert(lines.begin() + end, stored);
+}
+
+struct ProfileKv {
+    std::string key;
+    std::string value;
+};
+
+std::vector<ProfileKv> SectionKeys(const std::vector<std::string>& lines, const char* section) {
+    std::vector<ProfileKv> out;
+    const int start = FindHeader(lines, section);
+    if (start < 0) return out;
+    const int end = NextHeader(lines, start);
+    for (int i = start + 1; i < end; ++i) {
+        ProfileKv kv;
+        if (!SplitKv(lines[i], kv.key, kv.value) || FanKey(kv.key)) continue;
+        out.push_back(std::move(kv));
+    }
+    return out;
+}
+
+std::string SignatureOf(const std::vector<ProfileKv>& keys) {
+    std::string out;
+    for (const auto& kv : keys) out += kv.key + "=" + kv.value + "\n";
+    return out;
+}
+
+std::string ValueOf(const std::vector<ProfileKv>& keys, const char* name) {
+    for (const auto& kv : keys)
+        if (kv.key == name) return kv.value;
+    return {};
+}
+
+void CopyOcSection(std::vector<std::string>& lines, const char* from, const char* to) {
+    const auto keys = SectionKeys(lines, from);
+    const int start = FindHeader(lines, to);
+    if (start >= 0) {
+        const int end = NextHeader(lines, start);
+        for (int i = end - 1; i > start; --i) {
+            std::string key, value;
+            if (SplitKv(lines[i], key, value) && !FanKey(key)) lines.erase(lines.begin() + i);
+        }
+    }
+    for (const auto& kv : keys) PutKey(lines, to, kv.key + "=" + kv.value);
+}
+
+const char* kOcSections[] = {"Profile1", "Profile2", "Profile3", "Profile4", "Profile5", "Startup"};
+
+std::string PickChangedSection(const std::vector<std::string>& before, const std::vector<std::string>& after) {
+    const auto defaults = SectionKeys(after, "Defaults");
+    const std::string defaultSig = SignatureOf(defaults);
+    std::string best;
+    size_t bestScore = 0;
+    for (const char* name : kOcSections) {
+        const auto now = SectionKeys(after, name);
+        const std::string nowSig = SignatureOf(now);
+        if (nowSig.empty() || nowSig == SignatureOf(SectionKeys(before, name)) || nowSig == defaultSig) continue;
+        const size_t score = ValueOf(now, "VFCurve").size() + nowSig.size();
+        if (score > bestScore) {
+            bestScore = score;
+            best = name;
+        }
+    }
+    return best;
+}
+
+int SignedNumber(const std::string& text) {
+    size_t i = 0;
+    int sign = 1;
+    if (!text.empty() && text[0] == '-') {
+        sign = -1;
+        i = 1;
+    }
+    int value = 0;
+    for (; i < text.size() && text[i] >= '0' && text[i] <= '9'; ++i) value = value * 10 + (text[i] - '0');
+    return sign * value;
+}
+
+std::wstring MhzText(int khz) {
+    const int mhz = khz / 1000;
+    if (mhz > 0) return L"+" + std::to_wstring(mhz);
+    return std::to_wstring(mhz);
 }
 
 std::wstring ProfilesDir(const std::wstring& exe) {
@@ -1989,56 +2183,43 @@ std::wstring HardwareProfile(const std::wstring& exe, const std::string& gpuId) 
     return best;
 }
 
-int KeyNumber(const std::string& line) {
-    const size_t eq = line.find('=');
-    if (eq == std::string::npos) return 0;
-    int value = 0;
-    for (size_t i = eq + 1; i < line.size() && line[i] >= '0' && line[i] <= '9'; ++i)
-        value = value * 10 + (line[i] - '0');
-    return value;
-}
-
-// Copies the scanned startup curve onto profile 1. Afterburner applies that
-// profile at logon with "-profile1", and the [Startup] section when
-// StartWithWindows is set. Fan lines in profile 1 are left alone.
-bool SaveStartupAsProfile1(const std::wstring& exe, const std::string& gpuId, std::wstring& detail) {
+// Writes the section the scanner changed into profile 1 and the startup section.
+// Fan lines stay where they were. The caller then applies profile 1 immediately
+// and again at every logon.
+bool PersistScannedCurve(const std::wstring& exe, const std::string& gpuId, const std::string& beforeText,
+                         const std::string& capturedText, std::wstring& detail) {
     const std::wstring path = HardwareProfile(exe, gpuId);
     if (path.empty()) return false;
-    std::string text;
-    if (!ReadFileText(path, text)) return false;
-    const bool crlf = text.find("\r\n") != std::string::npos;
-    auto lines = SplitLines(text);
-    const int startup = FindHeader(lines, "Startup");
-    if (startup < 0) return false;
-    const int startupEnd = NextHeader(lines, startup);
-    const char* keys[] = {"Format", "PowerLimit", "ThermalLimit", "ThermalPrioritize",
-                          "CoreClkBoost", "VFCurve", "MemClkBoost"};
-    bool any = false;
-    for (const char* key : keys) {
-        const std::string line = KeyLine(lines, startup, startupEnd, key);
-        if (line.empty()) continue;
-        PutKey(lines, "Profile1", line);
-        any = true;
+    std::string after;
+    if (!ReadFileText(path, after)) after = capturedText;
+    const auto beforeLines = SplitLines(beforeText);
+    auto lines = SplitLines(after);
+    std::string source = PickChangedSection(beforeLines, lines);
+    if (source.empty() && !capturedText.empty() && capturedText != after) {
+        auto captured = SplitLines(capturedText);
+        source = PickChangedSection(beforeLines, captured);
+        if (!source.empty()) lines = std::move(captured);
     }
-    if (!any) return false;
-    const int startupNow = FindHeader(lines, "Startup");
-    const int profile = FindHeader(lines, "Profile1");
-    if (startupNow < 0 || profile < 0) return false;
-    const int startupEndNow = NextHeader(lines, startupNow);
-    const int profileEnd = NextHeader(lines, profile);
-    const std::string startupCurve = KeyLine(lines, startupNow, startupEndNow, "VFCurve");
-    const std::string profileCurve = KeyLine(lines, profile, profileEnd, "VFCurve");
-    if (startupCurve.empty() || startupCurve != profileCurve) return false;
-    const std::string joined = JoinLines(lines, crlf);
-    if (joined != text && !WriteTextFile(path, joined)) return false;
-    const int core = KeyNumber(KeyLine(lines, startupNow, startupEndNow, "CoreClkBoost"));
-    const int memory = KeyNumber(KeyLine(lines, startupNow, startupEndNow, "MemClkBoost"));
+    if (source.empty()) return false;
+    const std::string want = SignatureOf(SectionKeys(lines, source.c_str()));
+    if (want.empty()) return false;
+    CopyOcSection(lines, source.c_str(), "Profile1");
+    CopyOcSection(lines, source.c_str(), "Startup");
+    const bool crlf = beforeText.find("\r\n") != std::string::npos || after.find("\r\n") != std::string::npos;
+    if (!WriteTextFile(path, JoinLines(lines, crlf))) return false;
+    std::string check;
+    if (!ReadFileText(path, check)) return false;
+    const auto saved = SplitLines(check);
+    if (SignatureOf(SectionKeys(saved, "Profile1")) != want) return false;
+    if (SignatureOf(SectionKeys(saved, "Startup")) != want) return false;
+    const auto profile = SectionKeys(saved, "Profile1");
+    const int core = SignedNumber(ValueOf(profile, "CoreClkBoost"));
+    const int memory = SignedNumber(ValueOf(profile, "MemClkBoost"));
+    detail = L"Saved the scanned curve as profile 1 and as the current startup settings";
     if (core || memory) {
-        detail = L"Profile 1 applies the scanned curve at every logon (core +" + std::to_wstring(core / 1000) +
-                 L" MHz, memory +" + std::to_wstring(memory / 1000) + L" MHz).";
-    } else {
-        detail = L"Profile 1 applies the scanned voltage curve at every logon.";
+        detail += L" (core " + MhzText(core) + L" MHz, memory " + MhzText(memory) + L" MHz)";
     }
+    detail += L". Profile 1 is applied now and at every logon.";
     return true;
 }
 
@@ -2174,6 +2355,7 @@ bool InstallAfterburner(Feed* feed, std::wstring& err) {
     bool scanned = false;
     bool profileReady = false;
     std::string scannedGpuId;
+    std::string profileBeforeText;
     if (!pci.nvidia) {
         log(L"The OC scanner was not started. It runs on the PCI-E NVIDIA card, not integrated graphics.");
     } else if (!nvidia) {
@@ -2185,7 +2367,7 @@ bool InstallAfterburner(Feed* feed, std::wstring& err) {
         if (feed) {
             feed->Narrate(L"OC scanner",
                           L"The Afterburner download and this scan take about 30 minutes. The scan uses the PCI-E "
-                          L"graphics card. Leave the scanner window open. The curve is saved as profile 1 and applied at every logon.");
+                          L"graphics card. Leave the scanner window open. The curve is applied to the current settings, saved as profile 1, and applied at every logon.");
         }
         log(L"Starting MSI Afterburner, then the OC scanner.");
         Started burner = StartShown(ab, L"");
@@ -2214,6 +2396,11 @@ bool InstallAfterburner(Feed* feed, std::wstring& err) {
             } else {
             if (!selectedGpu.empty()) log(L"Afterburner is set to " + selectedGpu + L".");
             else log(L"Windows is set to run Afterburner and the scanner on the PCI-E card.");
+            Sleep(1200);
+            {
+                const std::wstring beforePath = HardwareProfile(ab, "");
+                if (!beforePath.empty()) ReadFileText(beforePath, profileBeforeText);
+            }
             Started scan = StartShown(scanner, L"");
             if (!scan.ok) {
                 CloseStarted(burner);
@@ -2352,9 +2539,19 @@ bool InstallAfterburner(Feed* feed, std::wstring& err) {
                         log(L"The OC scanner finished and sent the curve to Afterburner.");
                         const CurveApply applied = FlushScannedCurve(burner.pid, pci.dev);
                         scannedGpuId = applied.gpuId;
-                        if (applied.flushed) log(L"Applied the scanned curve on the GPU.");
+                        if (applied.flushed) log(L"Applied the scanned curve to the current settings.");
                         else log(L"Afterburner did not confirm the apply. The exported curve is still saved if it wrote its profile.");
-                        Sleep(2000);
+                        std::string captured;
+                        for (int attempt = 0; attempt < 20 && captured.empty() && !stopped(); ++attempt) {
+                            const std::wstring path = HardwareProfile(ab, scannedGpuId);
+                            std::string now;
+                            if (!path.empty() && ReadFileText(path, now) &&
+                                !PickChangedSection(SplitLines(profileBeforeText), SplitLines(now)).empty()) {
+                                captured = std::move(now);
+                                break;
+                            }
+                            Sleep(500);
+                        }
                         if (dlg && IsWindow(dlg)) PostMessageW(dlg, WM_CLOSE, 0, 0);
                         if (WaitForSingleObject(scan.process, 15000) != WAIT_OBJECT_0) TerminateProcess(scan.process, 0);
                         CloseStarted(scan);
@@ -2362,12 +2559,12 @@ bool InstallAfterburner(Feed* feed, std::wstring& err) {
                         if (WaitForSingleObject(burner.process, 15000) != WAIT_OBJECT_0) TerminateProcess(burner.process, 0);
                         CloseStarted(burner);
                         std::wstring profileDetail;
-                        for (int attempt = 0; attempt < 8 && !profileReady; ++attempt) {
-                            profileReady = SaveStartupAsProfile1(ab, scannedGpuId, profileDetail);
+                        for (int attempt = 0; attempt < 10 && !profileReady; ++attempt) {
+                            profileReady = PersistScannedCurve(ab, scannedGpuId, profileBeforeText, captured, profileDetail);
                             if (!profileReady) Sleep(400);
                         }
                         if (profileReady) log(profileDetail);
-                        else log(L"The scanned curve was not copied onto Afterburner profile 1.");
+                        else log(L"The scanned curve was applied, but it was not saved into a profile.");
                     } else if (!done) {
                         log(L"The OC scanner is still running after 45 minutes. It was left open.");
                         CloseStarted(scan);
@@ -2387,17 +2584,36 @@ bool InstallAfterburner(Feed* feed, std::wstring& err) {
         }
     }
 
-    const std::wstring abTr = profileReady ? L"\\\"" + ab + L"\\\" -profile1 /s" : L"\\\"" + ab + L"\\\" /s";
-    if (!ScheduleLogon(L"Synchronus Afterburner", abTr)) {
-        log(L"Could not create the Afterburner logon task. Start with Windows is still set in its config.");
+    if (scanned && !profileReady) {
+        err = L"The scan applied the curve, but it was not saved for the next startup.";
+        return false;
+    }
+    ConfigureAfterburner(ab);
+    DeleteLogonTask(L"MSIAfterburner");
+    if (profileReady) {
+        Started live = StartShown(ab, L"-profile1");
+        if (live.ok) {
+            log(L"Applied profile 1 to the current settings.");
+            CloseStarted(live);
+        } else {
+            log(L"Profile 1 was saved, but Afterburner did not reopen to apply it.");
+        }
+    }
+    const wchar_t* profileArg = profileReady ? L"-profile1" : L"";
+    if (!ScheduleInteractive(L"Synchronus Afterburner", ab, profileArg)) {
+        if (profileReady) {
+            err = L"Profile 1 was saved, but Afterburner could not be set to apply it at logon.";
+            return false;
+        }
+        log(L"Could not create the Afterburner logon task.");
     } else if (profileReady) {
-        log(L"Afterburner will start at logon and apply profile 1.");
+        log(L"Afterburner will start at each logon and apply profile 1.");
     } else {
-        log(L"Afterburner will start at logon and apply its startup settings.");
+        log(L"Afterburner will start at each logon.");
     }
     if (!rtss.empty()) {
-        const std::wstring rtTr = L"\\\"" + rtss + L"\\\"";
-        if (ScheduleLogon(L"Synchronus RivaTuner", rtTr)) log(L"RivaTuner will start at logon.");
+        if (ScheduleInteractive(L"Synchronus RivaTuner", rtss, L"")) log(L"RivaTuner will start at each logon.");
+        else log(L"Could not create the RivaTuner logon task.");
     }
     if (feed) feed->Progress(1, 0, 0);
     err.clear();

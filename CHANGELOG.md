@@ -1,6 +1,16 @@
 # Changelog
 
-Current release: **2.8.5**.
+Current release: **2.9.1**.
+
+## 2.9.1 — 2026-11-05
+
+- A newer Synchronus replaces an older copy that is already running, then points startup at the newest installed executable. The boot service, the logon entry, a startup shortcut, and the startup guard follow that same copy, including after later updates.
+- When the Afterburner scan finishes, the curve is applied to the current settings, saved as profile 1, and started again at every logon. The logon task runs in the signed-in session and passes that profile.
+
+## 2.8.6 — 2026-11-02
+
+- During a full tune, the timer pane stays large enough to read while other steps run beside it.
+- That pane shows the sweep graph and the measurement lattice, sized to the pane, and follows the scan as intervals complete.
 
 ## 2.8.5 — 2026-11-01
 

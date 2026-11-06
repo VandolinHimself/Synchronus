@@ -3,6 +3,7 @@
 #include <windows.h>
 #include <powrprof.h>
 #include <tlhelp32.h>
+#include <winver.h>
 
 #include <cstdarg>
 #include <string>
@@ -383,6 +384,46 @@ void SaveMonitorPrefs(const MonitorPrefs& prefs) {
     ApplyLaunchAtLogin(prefs.launchAtLogin);
 }
 
+bool FileVersionAt(const std::wstring& path, unsigned out[4]) {
+    out[0] = out[1] = out[2] = out[3] = 0;
+    DWORD handle = 0;
+    const DWORD bytes = GetFileVersionInfoSizeW(path.c_str(), &handle);
+    if (!bytes) return false;
+    std::vector<BYTE> block(bytes);
+    if (!GetFileVersionInfoW(path.c_str(), 0, bytes, block.data())) return false;
+    VS_FIXEDFILEINFO* info = nullptr;
+    UINT len = 0;
+    if (!VerQueryValueW(block.data(), L"\\", reinterpret_cast<void**>(&info), &len) || !info) return false;
+    out[0] = HIWORD(info->dwFileVersionMS);
+    out[1] = LOWORD(info->dwFileVersionMS);
+    out[2] = HIWORD(info->dwFileVersionLS);
+    out[3] = LOWORD(info->dwFileVersionLS);
+    return true;
+}
+
+int CmpFileVersion(const unsigned a[4], const unsigned b[4]) {
+    for (int i = 0; i < 4; ++i) {
+        if (a[i] < b[i]) return -1;
+        if (a[i] > b[i]) return 1;
+    }
+    return 0;
+}
+
+std::wstring LaunchExe() {
+    wchar_t self[MAX_PATH * 2]{};
+    const DWORD selfN = GetModuleFileNameW(nullptr, self, _countof(self));
+    const std::wstring current = selfN ? std::wstring(self, selfN) : L"";
+    wchar_t programFiles[MAX_PATH]{};
+    const DWORD pfN = GetEnvironmentVariableW(L"ProgramFiles", programFiles, _countof(programFiles));
+    const std::wstring installed = (pfN ? std::wstring(programFiles, pfN) : L"C:\\Program Files") + L"\\Synchronus\\Synchronus.exe";
+    if (GetFileAttributesW(installed.c_str()) == INVALID_FILE_ATTRIBUTES) return current;
+    unsigned installedVer[4]{};
+    unsigned currentVer[4]{};
+    if (!FileVersionAt(installed, installedVer)) return current;
+    if (!current.empty() && FileVersionAt(current, currentVer) && CmpFileVersion(installedVer, currentVer) < 0) return current;
+    return installed;
+}
+
 void ApplyLaunchAtLogin(bool enabled) {
     HKEY key = nullptr;
     if (RegOpenKeyExW(HKEY_CURRENT_USER, L"Software\\Microsoft\\Windows\\CurrentVersion\\Run", 0, KEY_SET_VALUE, &key) != ERROR_SUCCESS) return;
@@ -391,13 +432,12 @@ void ApplyLaunchAtLogin(bool enabled) {
         RegCloseKey(key);
         return;
     }
-    wchar_t path[MAX_PATH];
-    const DWORD n = GetModuleFileNameW(nullptr, path, MAX_PATH);
-    if (n == 0 || n >= MAX_PATH) {
+    const std::wstring path = LaunchExe();
+    if (path.empty()) {
         RegCloseKey(key);
         return;
     }
-    const std::wstring quoted = L"\"" + std::wstring(path) + L"\"";
+    const std::wstring quoted = L"\"" + path + L"\"";
     RegSetValueExW(key, L"Synchronus", 0, REG_SZ, reinterpret_cast<const BYTE*>(quoted.c_str()),
                    static_cast<DWORD>((quoted.size() + 1) * sizeof(wchar_t)));
     RegCloseKey(key);

@@ -1576,6 +1576,7 @@ public:
         nextUpdateAt_ = GetTickCount64() +
                         static_cast<unsigned long long>(std::max(1, prefs_.updateMinutes)) * 60ull * 1000ull;
         showMsg_ = RegisterWindowMessageW(L"Synchronus.Show");
+        replaceMsg_ = RegisterWindowMessageW(L"Synchronus.Replace");
         AddTray();
         if (host_.tidyServices) host_.tidyServices();
         const bool firstOpen = !prefs_.startupAsked && !host_.autoInstall;
@@ -1764,6 +1765,13 @@ private:
                 if (showMsg_ && msg == showMsg_) {
                     ShowWindow(hwnd_, SW_SHOW);
                     SetForegroundWindow(hwnd_);
+                    return 0;
+                }
+                if (replaceMsg_ && msg == replaceMsg_) {
+                    exitRequested_ = true;
+                    relaunch_.store(false);
+                    RemoveTray();
+                    DestroyWindow(hwnd_);
                     return 0;
                 }
                 if (msg == WM_APP + 42) {
@@ -2777,6 +2785,35 @@ private:
         if (fx > bar.left + 2) rd_.FillRound(D2D1::RectF(bar.left, bar.top, fx, bar.bottom), 3, col::cyan);
     }
 
+    // Sweep graph and measurement lattice, sized to whatever rect the full-tune pane has this frame.
+    void DrawFleetMeasureViz(const D2D1_RECT_F& R, float dt, bool live) {
+        if (W(R) < 40.0f || H(R) < 40.0f) return;
+        rd_.Clip(R);
+        const Stage stage = live ? Stage::Running : Stage::Result;
+        const float gap = 8.0f;
+        const float sideCap = std::min(H(R), std::max(64.0f, W(R) * 0.40f));
+        const float chartW = W(R) - sideCap - gap;
+        if (chartW >= 140.0f && sideCap >= 72.0f) {
+            const float dy = (H(R) - sideCap) * 0.5f;
+            const D2D1_RECT_F lattice = D2D1::RectF(R.right - sideCap, R.top + dy, R.right, R.top + dy + sideCap);
+            const D2D1_RECT_F chart = D2D1::RectF(R.left, R.top, lattice.left - gap, R.bottom);
+            DrawChart(chart, dt, stage, true);
+            DrawHistogram(lattice, dt, true);
+        } else {
+            const float side = std::min(W(R), H(R) * 0.46f);
+            if (side >= 64.0f && H(R) - side - gap >= 56.0f) {
+                const D2D1_RECT_F lattice = D2D1::RectF(R.left + (W(R) - side) * 0.5f, R.bottom - side,
+                                                       R.left + (W(R) + side) * 0.5f, R.bottom);
+                const D2D1_RECT_F chart = D2D1::RectF(R.left, R.top, R.right, lattice.top - gap);
+                DrawChart(chart, dt, stage, true);
+                DrawHistogram(lattice, dt, true);
+            } else {
+                DrawChart(R, dt, stage, true);
+            }
+        }
+        rd_.Unclip();
+    }
+
     void DrawFleet(const D2D1_RECT_F& B, float dt) {
         struct Pane {
             int kind;
@@ -2801,17 +2838,53 @@ private:
             return;
         }
 
-        const float gap = 12.0f;
-        int cols = 1;
-        while (cols < n && (cols + 1) * 300.0f + cols * gap <= W(B)) ++cols;
-        const int rows = (n + cols - 1) / cols;
-        const float pw = (W(B) - gap * static_cast<float>(cols - 1)) / static_cast<float>(cols);
-        const float ph = (H(B) - gap * static_cast<float>(rows - 1)) / static_cast<float>(rows);
+        auto drawAt = [&](int index, const D2D1_RECT_F& pane) {
+            DrawFleetPane(pane, panes[index].kind, panes[index].id, dt, 300 + index * 4);
+        };
+
+        int measureAt = -1;
         for (int i = 0; i < n; ++i) {
-            const float x = B.left + static_cast<float>(i % cols) * (pw + gap);
-            const float y = B.top + static_cast<float>(i / cols) * (ph + gap);
-            const D2D1_RECT_F pane = D2D1::RectF(x, y, x + pw, y + ph);
-            DrawFleetPane(pane, panes[i].kind, panes[i].id, dt, 300 + i * 4);
+            if (panes[i].kind == 0 && panes[i].id == JobId::Measure) measureAt = i;
+        }
+
+        const float gap = 12.0f;
+        bool placed = false;
+        // Keep the scan readable: the timer pane takes the left of the window and the other
+        // running steps stack beside it. A lone timer pane still fills the window.
+        if (measureAt >= 0 && n > 1 && W(B) >= 680.0f && H(B) >= 320.0f) {
+            const float otherMin = 248.0f;
+            float measureW = W(B) * 0.64f;
+            if (W(B) - measureW - gap < otherMin) measureW = W(B) - gap - otherMin;
+            if (measureW >= 380.0f) {
+                drawAt(measureAt, D2D1::RectF(B.left, B.top, B.left + measureW, B.bottom));
+                const D2D1_RECT_F rest = D2D1::RectF(B.left + measureW + gap, B.top, B.right, B.bottom);
+                int others[8];
+                int m = 0;
+                for (int i = 0; i < n; ++i)
+                    if (i != measureAt && m < 8) others[m++] = i;
+                const int cols = (m > 3 && W(rest) >= 520.0f) ? 2 : 1;
+                const int rows = (m + cols - 1) / cols;
+                const float pw = (W(rest) - gap * static_cast<float>(cols - 1)) / static_cast<float>(cols);
+                const float ph = (H(rest) - gap * static_cast<float>(rows - 1)) / static_cast<float>(rows);
+                for (int k = 0; k < m; ++k) {
+                    const float x = rest.left + static_cast<float>(k % cols) * (pw + gap);
+                    const float y = rest.top + static_cast<float>(k / cols) * (ph + gap);
+                    drawAt(others[k], D2D1::RectF(x, y, x + pw, y + ph));
+                }
+                placed = true;
+            }
+        }
+        if (!placed) {
+            int cols = 1;
+            while (cols < n && (cols + 1) * 300.0f + cols * gap <= W(B)) ++cols;
+            const int rows = (n + cols - 1) / cols;
+            const float pw = (W(B) - gap * static_cast<float>(cols - 1)) / static_cast<float>(cols);
+            const float ph = (H(B) - gap * static_cast<float>(rows - 1)) / static_cast<float>(rows);
+            for (int i = 0; i < n; ++i) {
+                const float x = B.left + static_cast<float>(i % cols) * (pw + gap);
+                const float y = B.top + static_cast<float>(i / cols) * (ph + gap);
+                drawAt(i, D2D1::RectF(x, y, x + pw, y + ph));
+            }
         }
         if (FleetComplete()) {
             fleet_ = false;
@@ -2870,6 +2943,25 @@ private:
             const float etaH = (!waiting && job.remaining > 0.5) ? 16.0f : 0.0f;
             const float barTop = pane.bottom - 14.0f - etaH;
             const D2D1_RECT_F bar = D2D1::RectF(pane.left + 14, barTop, pane.right - 14, barTop + 8.0f);
+            if (id == JobId::Measure) {
+                if (job.sweep.pass > 0 && job.sweep.passes > 0) {
+                    rd_.Text(sub, D2D1::RectF(pane.left + 96, pane.top + 38, pane.right - 64, pane.top + 58),
+                             rd_.fMonoSmall.Get(), col::dim, DWRITE_TEXT_ALIGNMENT_LEADING,
+                             DWRITE_PARAGRAPH_ALIGNMENT_CENTER);
+                }
+                const float vizBottom = (!waiting && job.remaining > 0.5) ? barTop - 16.0f : barTop - 8.0f;
+                const D2D1_RECT_F viz = D2D1::RectF(pane.left + 10, pane.top + 64, pane.right - 10, vizBottom);
+                if (H(viz) >= 48.0f && W(viz) >= 80.0f) DrawFleetMeasureViz(viz, dt, !waiting);
+                else if (!work.empty() && viz.bottom > viz.top)
+                    rd_.Text(work, viz, rd_.fSmall.Get(), col::text);
+                if (!waiting && job.remaining > 0.5) {
+                    rd_.Text(Fmt(L"About %s left", Duration(job.remaining).c_str()),
+                             D2D1::RectF(pane.left + 14, barTop - 14.0f, pane.right - 14, barTop - 2.0f),
+                             rd_.fMonoSmall.Get(), col::dim, DWRITE_TEXT_ALIGNMENT_TRAILING);
+                }
+                DrawFleetProgressBar(bar, FleetJobFraction(job), waiting);
+                return;
+            }
             const float floorY = barTop - 8.0f;
             float cursor = pane.top + 58.0f;
             if (!work.empty() && cursor + 18.0f < floorY) {
@@ -2981,7 +3073,7 @@ private:
             if (Button(idBase + 1, no, L"Skip", col::muted, false, true, dt)) FleetSkipDriver();
             return;
         }
-        rd_.Text(L"Afterburner downloads, scans the GPU, and saves the curve. This takes about 30 minutes.",
+        rd_.Text(L"Afterburner downloads, scans the GPU, applies the curve, and saves it for the next startup. This takes about 30 minutes.",
                  D2D1::RectF(pane.left + 14, pane.top + 44, pane.right - 14, pane.bottom - 52), rd_.fBody.Get(), col::muted);
         const D2D1_RECT_F yes = D2D1::RectF(pane.left + 14, pane.bottom - 40, pane.left + W(pane) * 0.62f, pane.bottom - 10);
         const D2D1_RECT_F no = D2D1::RectF(yes.right + 8, pane.bottom - 40, pane.right - 12, pane.bottom - 10);
@@ -3200,7 +3292,7 @@ private:
                 detail = L"Scheduling, capture, and the vendor profile applied";
             } else if (id == JobId::Afterburner) {
                 kind = L"Afterburner";
-                detail = L"PCI-E card scan saved for sign-in";
+                detail = L"Scanned curve saved as profile 1 and applied at sign-in";
             } else if (id == JobId::Memory) {
                 kind = L"Memory";
                 detail = L"Page file and memory compression applied";
@@ -3734,11 +3826,26 @@ private:
     }
 
     // ---- sweep chart ----
-    void DrawChart(const D2D1_RECT_F& R, float dt, Stage stage) {
-        Panel(R, L"Sweep", L"overshoot vs requested resolution");
-        const D2D1_RECT_F P = Inset(R, 60, 44, 18, 52);
+    void DrawChart(const D2D1_RECT_F& R, float dt, Stage stage, bool embedded = false) {
+        if (!embedded) Panel(R, L"Sweep", L"overshoot vs requested resolution");
+        else {
+            rd_.FillRound(R, 8, Alpha(col::bg, 0.35f));
+            rd_.StrokeRound(R, 8, Alpha(col::cyan, 0.22f), 1.0f);
+        }
+        const bool roomy = !embedded || H(R) >= 150.0f;
+        const bool yLabels = !embedded || W(R) >= 220.0f;
+        float top = embedded ? 8.0f : 44.0f;
+        if (embedded && H(R) >= 120.0f) {
+            rd_.Text(L"SWEEP", D2D1::RectF(R.left + 10, R.top + 4, R.left + 90, R.top + 18), rd_.fLabel.Get(), col::cyan);
+            top = 20.0f;
+        }
+        const float left = embedded ? (yLabels ? 50.0f : 8.0f) : 60.0f;
+        const float right = embedded ? 8.0f : 18.0f;
+        const float bottom = embedded ? (roomy ? 32.0f : 8.0f) : 52.0f;
+        const D2D1_RECT_F P = Inset(R, left, top, right, bottom);
         const auto& items = snap_.sweep.items;
         const size_t n = items.size();
+        if (W(P) < 8.0f || H(P) < 8.0f) return;
         if (n == 0) {
             rd_.Text(L"Measuring the untuned Sleep(1) baseline\u2026", P, rd_.fSub.Get(), col::dim,
                      DWRITE_TEXT_ALIGNMENT_CENTER, DWRITE_PARAGRAPH_ALIGNMENT_CENTER);
@@ -3782,28 +3889,39 @@ private:
         for (float v = 0; v < yMax_; v += step) {
             const float y = Y(v);
             rd_.Line(D2D1::Point2F(P.left, y), D2D1::Point2F(P.right, y), v == 0 ? Alpha(col::muted, 0.5f) : col::grid);
-            rd_.Text(Fmt(L"%+.2f", v), D2D1::RectF(R.left + 10, y - 8, P.left - 8, y + 8), rd_.fMonoSmall.Get(),
-                     col::muted, DWRITE_TEXT_ALIGNMENT_TRAILING, DWRITE_PARAGRAPH_ALIGNMENT_CENTER);
+            if (yLabels)
+                rd_.Text(Fmt(L"%+.2f", v),
+                         D2D1::RectF(embedded ? R.left + 6 : R.left + 10, y - 8, P.left - (embedded ? 4.0f : 8.0f), y + 8),
+                         rd_.fMonoSmall.Get(), col::muted, DWRITE_TEXT_ALIGNMENT_TRAILING, DWRITE_PARAGRAPH_ALIGNMENT_CENTER);
         }
-        const size_t lab = std::max<size_t>(1, n / 10);
-        for (size_t i = 0; i < n; i += lab) {
-            const float x = X(i);
-            rd_.Line(D2D1::Point2F(x, P.bottom), D2D1::Point2F(x, P.bottom + 4), col::muted);
-            rd_.Text(Fmt(L"%.3f", Ms(items[i].requested)), D2D1::RectF(x - 30, P.bottom + 18, x + 30, P.bottom + 32),
-                     rd_.fMonoSmall.Get(), col::muted, DWRITE_TEXT_ALIGNMENT_CENTER);
-        }
-        rd_.Text(L"ms", D2D1::RectF(P.right - 30, P.bottom + 18, P.right + 10, P.bottom + 32), rd_.fMonoSmall.Get(),
-                 col::dim, DWRITE_TEXT_ALIGNMENT_TRAILING);
+        if (roomy) {
+            const float labY = embedded ? 12.0f : 18.0f;
+            const float stripY = embedded ? 2.0f : 7.0f;
+            const size_t every = std::max<size_t>(1, static_cast<size_t>(std::lround(70.0f / std::max(8.0f, colW))));
+            const size_t lab = std::max<size_t>(1, embedded ? std::max(n / 10, every) : n / 10);
+            for (size_t i = 0; i < n; i += lab) {
+                const float x = X(i);
+                rd_.Line(D2D1::Point2F(x, P.bottom), D2D1::Point2F(x, P.bottom + 4), col::muted);
+                rd_.Text(Fmt(L"%.3f", Ms(items[i].requested)),
+                         D2D1::RectF(x - 30, P.bottom + labY, x + 30, P.bottom + labY + 14), rd_.fMonoSmall.Get(),
+                         col::muted, DWRITE_TEXT_ALIGNMENT_CENTER);
+            }
+            rd_.Text(L"ms", D2D1::RectF(P.right - 30, P.bottom + labY, P.right + (embedded ? 4.0f : 10.0f), P.bottom + labY + 14),
+                     rd_.fMonoSmall.Get(), col::dim, DWRITE_TEXT_ALIGNMENT_TRAILING);
 
-        // late% heat strip just below the axis
-        for (size_t i = 0; i < n; ++i) {
-            if (anAppear_[i] <= 0) continue;
-            const float a = Clamp01(anLate_[i] / 35.0f) * anAppear_[i];
-            rd_.Fill(D2D1::RectF(X(i) - colW / 2, P.bottom + 7, X(i) + colW / 2, P.bottom + 15),
-                     MixC(Alpha(col::cyan, 0.15f), col::magenta, a));
+            // late% heat strip just below the axis
+            for (size_t i = 0; i < n; ++i) {
+                if (anAppear_[i] <= 0) continue;
+                const float a = Clamp01(anLate_[i] / 35.0f) * anAppear_[i];
+                rd_.Fill(D2D1::RectF(X(i) - colW / 2, P.bottom + stripY, X(i) + colW / 2, P.bottom + stripY + (embedded ? 6.0f : 8.0f)),
+                         MixC(Alpha(col::cyan, 0.15f), col::magenta, a));
+            }
+            if (!embedded || yLabels)
+                rd_.Text(L"late %",
+                         D2D1::RectF(embedded ? R.left + 6 : R.left + 10, P.bottom + (embedded ? 1.0f : 3.0f),
+                                     P.left - (embedded ? 4.0f : 8.0f), P.bottom + (embedded ? 14.0f : 19.0f)),
+                         rd_.fMonoSmall.Get(), col::dim, DWRITE_TEXT_ALIGNMENT_TRAILING, DWRITE_PARAGRAPH_ALIGNMENT_CENTER);
         }
-        rd_.Text(L"late %", D2D1::RectF(R.left + 10, P.bottom + 3, P.left - 8, P.bottom + 19), rd_.fMonoSmall.Get(),
-                 col::dim, DWRITE_TEXT_ALIGNMENT_TRAILING, DWRITE_PARAGRAPH_ALIGNMENT_CENTER);
 
         // live smoothing over +-2 neighbours (what the selection uses)
         std::vector<float> sm(n, 0);
@@ -3823,7 +3941,7 @@ private:
             if (leadIdx < 0 || sm[i] <= sm[leadIdx]) leadIdx = static_cast<int>(i);
         }
 
-        rd_.Clip(D2D1::RectF(P.left - 6, R.top + 30, P.right + 6, P.bottom + 1));
+        rd_.Clip(embedded ? R : D2D1::RectF(P.left - 6, R.top + 30, P.right + 6, P.bottom + 1));
         // series: build segments broken at gaps
         auto Series = [&](const std::vector<float>& vals, D2D1_COLOR_F c, float w, bool glow, bool area) {
             std::vector<D2D1_POINT_2F> pts;
@@ -3890,15 +4008,17 @@ private:
         if (snap_.sweep.targetIdx >= 0 && static_cast<size_t>(snap_.sweep.targetIdx) < n) {
             const float x = X(static_cast<size_t>(snap_.sweep.targetIdx));
             rd_.Dashed(D2D1::Point2F(x, P.top + 14), D2D1::Point2F(x, P.bottom), Alpha(col::green, 0.6f));
-            rd_.Text(Fmt(L"target %.4f (+%.4f margin)", Ms(items[static_cast<size_t>(snap_.sweep.targetIdx)].requested),
-                         Ms(snap_.sweep.margin)),
-                     D2D1::RectF(x + 6, P.top + 4, x + 220, P.top + 18), rd_.fMonoSmall.Get(), Alpha(col::green, 0.9f));
+            if (!embedded || W(R) >= 300.0f)
+                rd_.Text(Fmt(L"target %.4f (+%.4f margin)", Ms(items[static_cast<size_t>(snap_.sweep.targetIdx)].requested),
+                             Ms(snap_.sweep.margin)),
+                         D2D1::RectF(x + 6, P.top + 4, x + 220, P.top + 18), rd_.fMonoSmall.Get(), Alpha(col::green, 0.9f));
         }
         if (snap_.sweep.boundaryIdx >= 0 && static_cast<size_t>(snap_.sweep.boundaryIdx) < n) {
             const float x = X(static_cast<size_t>(snap_.sweep.boundaryIdx));
             rd_.Dotted(D2D1::Point2F(x, P.top + 30), D2D1::Point2F(x, P.bottom), Alpha(col::teal, 0.6f));
-            rd_.Text(L"no missed ticks from here", D2D1::RectF(x + 6, P.top + 22, x + 200, P.top + 36),
-                     rd_.fMonoSmall.Get(), Alpha(col::teal, 0.8f));
+            if (!embedded || W(R) >= 300.0f)
+                rd_.Text(L"no missed ticks from here", D2D1::RectF(x + 6, P.top + 22, x + 200, P.top + 36),
+                         rd_.fMonoSmall.Get(), Alpha(col::teal, 0.8f));
         }
         // The resolution that will be set. After more than one run that is the aggregate lowest score.
         const unsigned chosen = HoldUnits();
@@ -3919,6 +4039,7 @@ private:
         }
         rd_.Unclip();
 
+        if (embedded) return;
         // legend, right-aligned in the panel header so it never sits on the plot
         const float ly = R.top + 19;
         const wchar_t* legs[] = {L"mean (loop)", L"median", L"mean (idle)", L"score"};
@@ -4024,18 +4145,31 @@ private:
     }
 
     // ---- measurement lattice ----
-    void DrawHistogram(const D2D1_RECT_F& R, float dt) {
+    void DrawHistogram(const D2D1_RECT_F& R, float dt, bool embedded = false) {
         (void)dt;
-        const int pass = snap_.sweep.pass;
-        const int passes = snap_.sweep.passes;
-        const bool verify = !snap_.finalists.empty();
-        Panel(R, L"Lattice",
-              verify ? Fmt(L"verification  |  128\u00B3  |  n = %u  |  missed %u", snap_.histTotal,
-                           snap_.histLate)
-                     : pass ? Fmt(L"pass %d of %d  |  late %% \u00D7 latency \u00D7 n  |  n = %u",
-                                  pass, std::max(1, passes), snap_.histTotal)
-                            : L"late %  \u00D7  measured latency  \u00D7  sample n");
-        const D2D1_RECT_F P = Inset(R, 8, 36, 8, 8);
+        D2D1_RECT_F P;
+        if (!embedded) {
+            const int pass = snap_.sweep.pass;
+            const int passes = snap_.sweep.passes;
+            const bool verify = !snap_.finalists.empty();
+            Panel(R, L"Lattice",
+                  verify ? Fmt(L"verification  |  128\u00B3  |  n = %u  |  missed %u", snap_.histTotal,
+                               snap_.histLate)
+                         : pass ? Fmt(L"pass %d of %d  |  late %% \u00D7 latency \u00D7 n  |  n = %u",
+                                      pass, std::max(1, passes), snap_.histTotal)
+                                : L"late %  \u00D7  measured latency  \u00D7  sample n");
+            P = Inset(R, 8, 36, 8, 8);
+        } else {
+            rd_.FillRound(R, 8, Alpha(col::bg, 0.35f));
+            rd_.StrokeRound(R, 8, Alpha(col::cyan, 0.22f), 1.0f);
+            float top = 6.0f;
+            if (H(R) >= 96.0f) {
+                rd_.Text(L"LATTICE", D2D1::RectF(R.left + 8, R.top + 4, R.right - 8, R.top + 18), rd_.fLabel.Get(),
+                         col::cyan, DWRITE_TEXT_ALIGNMENT_CENTER);
+                top = 20.0f;
+            }
+            P = Inset(R, 6, top, 6, 6);
+        }
         if (!rd_.LatticeReady()) {
             rd_.Text(L"Lattice renderer unavailable on this device.", P, rd_.fBody.Get(), col::dim,
                      DWRITE_TEXT_ALIGNMENT_CENTER, DWRITE_PARAGRAPH_ALIGNMENT_CENTER);
@@ -5090,7 +5224,7 @@ private:
             L"Writes the processor power plan. Core parking and throttling are turned off, and the plan asks the CPU to stay at a high, steady state.",
             L"Looks up the current graphics driver and can install a clean copy. This step does not install Afterburner.",
             L"Turns on hardware-accelerated GPU scheduling, turns off Game DVR and Game Bar capture, and writes the NVIDIA or AMD low-latency profile when that vendor is present.",
-            L"Installs MSI Afterburner and RivaTuner, runs the overclock scanner on the PCI-E graphics card, and saves that curve so it applies at sign-in. The download and scan take about 30 minutes.",
+            L"Installs MSI Afterburner and RivaTuner, scans the PCI-E graphics card, applies that curve, and saves it as a profile that loads at sign-in. The download and scan take about 30 minutes.",
             L"Sets the page file and turns memory compression off.",
             L"Turns SysMain off and checks that TRIM is enabled for the system drive.",
             L"Shows the BIOS settings to change by hand, then asks you to restart. Windows cannot write those settings for you.",
@@ -5645,7 +5779,7 @@ private:
                 DrawPackPrompt(B, dt, L"Afterburner and RivaTuner",
                                L"The Afterburner download and the OC scan take about 30 minutes. MSI Afterburner 4.6.6 and "
                                L"RivaTuner are installed if they are missing. On an NVIDIA GPU the scanner starts on its own. "
-                               L"The curve it finds is saved as profile 1 and applied every time you log on. This step does not change the GPU driver.",
+                               L"The curve it finds is applied to the current settings, saved as profile 1, and applied every time you log on. This step does not change the GPU driver.",
                                L"Continue  -  install and scan", col::green,
                                [this] { StartAfterburner(); },
                                [this] { OpenHome(); });
@@ -6344,6 +6478,7 @@ private:
     unsigned long long nextUpdateAt_ = 0;
     NOTIFYICONDATAW nid_{};
     UINT showMsg_ = 0;
+    UINT replaceMsg_ = 0;
     MonitorPrefs prefs_{};
     std::mutex healthM_;
     std::vector<HealthCheck> checks_;

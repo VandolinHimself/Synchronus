@@ -20,6 +20,11 @@
 #define NOMINMAX
 #include <windows.h>
 #include <shellapi.h>
+#include <shlobj.h>
+#include <tlhelp32.h>
+#include <winver.h>
+
+#pragma comment(lib, "uuid.lib")
 #include <intrin.h>
 #include <powrprof.h>
 #include <winioctl.h>
@@ -72,7 +77,7 @@ gui::MeasurePlan gui::MeasurePlanFor(int fidelity) {
 
 namespace {
 
-constexpr wchar_t kVersion[] = L"2.8.5";
+constexpr wchar_t kVersion[] = L"2.9.1";
 constexpr wchar_t kProduct[] = L"Synchronus";
 constexpr wchar_t kCompany[] = L"Lucius & Wayne Systems";
 constexpr wchar_t kCompanyUrl[] = L"https://luciuswayne.com";
@@ -101,6 +106,9 @@ constexpr wchar_t kThreadDpcName[] = L"ThreadDpcEnable";
 void HardenRepeatedDriftImpl(const std::wstring& kind);
 void RemoveUnusedServicesImpl();
 int CmdGuard();
+void EnsureGuardTask();
+std::wstring StartupTarget();
+bool ClaimNewestInstall(const std::vector<std::wstring>& args);
 
 // Resolutions are in 100-ns units throughout (10,000 == 1 ms), matching
 // NtQuery/NtSetTimerResolution. The kernel reports:
@@ -2612,7 +2620,7 @@ bool ApplyAfterburner() {
     Narrate(L"Afterburner",
             L"The Afterburner download and OC scan take about 30 minutes. MSI Afterburner and RivaTuner "
             L"are installed if they are missing. On an NVIDIA GPU the scanner starts on its own. The curve "
-            L"is saved as profile 1 and applied at every logon.");
+            L"is applied to the current settings, saved as profile 1, and applied at every logon.");
     ReportPhase(L"AFTERBURNER", L"download and scan, about 30 minutes");
     Out(L"Installing MSI Afterburner and RivaTuner, then scanning a startup overclock. This takes about 30 minutes.");
     std::wstring err;
@@ -2620,7 +2628,7 @@ bool ApplyAfterburner() {
         Err(err.empty() ? L"Afterburner did not install." : err);
         return false;
     }
-    Out(L"Afterburner and RivaTuner will apply profile 1 at every logon.");
+    Out(L"Afterburner and RivaTuner apply profile 1 now and at every logon.");
     return true;
 }
 
@@ -3779,7 +3787,7 @@ int OfferAfterburner(const Options& opts) {
     if (!apply) {
         apply = Confirm(opts,
                         L"Download MSI Afterburner if it is missing and scan an NVIDIA overclock? "
-                        L"The download and scan take about 30 minutes. The curve is saved as profile 1 "
+                        L"The download and scan take about 30 minutes. The curve is applied now, saved as profile 1, "
                         L"and applied at every logon.");
     }
     if (!apply) {
@@ -4318,12 +4326,451 @@ gui::SystemView CurrentSystem(const std::wstring& priority = {}) {
     return s;
 }
 
-int RunGui(const Options& opts, const std::vector<std::wstring>&) {
+bool ReadFileVersion(const std::wstring& path, unsigned out[4]) {
+    out[0] = out[1] = out[2] = out[3] = 0;
+    DWORD handle = 0;
+    const DWORD bytes = GetFileVersionInfoSizeW(path.c_str(), &handle);
+    if (!bytes) return false;
+    std::vector<BYTE> block(bytes);
+    if (!GetFileVersionInfoW(path.c_str(), 0, bytes, block.data())) return false;
+    VS_FIXEDFILEINFO* info = nullptr;
+    UINT len = 0;
+    if (!VerQueryValueW(block.data(), L"\\", reinterpret_cast<void**>(&info), &len) || !info) return false;
+    out[0] = HIWORD(info->dwFileVersionMS);
+    out[1] = LOWORD(info->dwFileVersionMS);
+    out[2] = HIWORD(info->dwFileVersionLS);
+    out[3] = LOWORD(info->dwFileVersionLS);
+    return true;
+}
+
+int CmpVer(const unsigned a[4], const unsigned b[4]) {
+    for (int i = 0; i < 4; ++i) {
+        if (a[i] < b[i]) return -1;
+        if (a[i] > b[i]) return 1;
+    }
+    return 0;
+}
+
+bool FileExistsPath(const std::wstring& path) {
+    return !path.empty() && GetFileAttributesW(path.c_str()) != INVALID_FILE_ATTRIBUTES;
+}
+
+bool IsSynchronusExe(const std::wstring& path) {
+    const size_t slash = path.find_last_of(L"\\/");
+    std::wstring name = slash == std::wstring::npos ? path : path.substr(slash + 1);
+    for (wchar_t& c : name) c = static_cast<wchar_t>(towlower(c));
+    return name.size() >= 4 && name.compare(name.size() - 4, 4, L".exe") == 0 && name.compare(0, 10, L"synchronus") == 0;
+}
+
+std::wstring ExeFromCommand(const std::wstring& command) {
+    if (command.empty()) return {};
+    if (command.front() == L'"') {
+        const size_t end = command.find(L'"', 1);
+        return end == std::wstring::npos ? std::wstring{} : command.substr(1, end - 1);
+    }
+    const size_t space = command.find(L' ');
+    return space == std::wstring::npos ? command : command.substr(0, space);
+}
+
+std::wstring StartupTarget() {
+    const std::wstring self = GetExePath();
+    const std::wstring installed = GetInstallPath();
+    unsigned installedVer[4]{};
+    unsigned selfVer[4]{};
+    const bool haveInstalled = FileExistsPath(installed) && ReadFileVersion(installed, installedVer);
+    const bool haveSelf = ReadFileVersion(self, selfVer);
+    if (haveInstalled && (!haveSelf || CmpVer(installedVer, selfVer) >= 0)) return installed;
+    return self;
+}
+
+std::wstring ServiceImagePath(const wchar_t* name) {
+    const SC_HANDLE scm = OpenSCManagerW(nullptr, nullptr, SC_MANAGER_CONNECT);
+    if (!scm) return {};
+    const SC_HANDLE svc = OpenServiceW(scm, name, SERVICE_QUERY_CONFIG);
+    if (!svc) {
+        CloseServiceHandle(scm);
+        return {};
+    }
+    DWORD bytes = 0;
+    QueryServiceConfigW(svc, nullptr, 0, &bytes);
+    std::vector<BYTE> buf(bytes ? bytes : 1);
+    std::wstring image;
+    if (bytes && QueryServiceConfigW(svc, reinterpret_cast<QUERY_SERVICE_CONFIGW*>(buf.data()), bytes, &bytes)) {
+        const wchar_t* binary = reinterpret_cast<QUERY_SERVICE_CONFIGW*>(buf.data())->lpBinaryPathName;
+        if (binary) image = ExeFromCommand(binary);
+    }
+    CloseServiceHandle(svc);
+    CloseServiceHandle(scm);
+    return image;
+}
+
+bool ReadRunValue(HKEY root, REGSAM view, const wchar_t* name, std::wstring& value) {
+    HKEY key = nullptr;
+    if (RegOpenKeyExW(root, L"Software\\Microsoft\\Windows\\CurrentVersion\\Run", 0, KEY_QUERY_VALUE | view, &key) !=
+        ERROR_SUCCESS)
+        return false;
+    DWORD size = 0;
+    DWORD type = 0;
+    if (RegQueryValueExW(key, name, nullptr, &type, nullptr, &size) != ERROR_SUCCESS ||
+        (type != REG_SZ && type != REG_EXPAND_SZ) || size < sizeof(wchar_t)) {
+        RegCloseKey(key);
+        return false;
+    }
+    std::wstring buf(size / sizeof(wchar_t), L'\0');
+    const LONG rc = RegQueryValueExW(key, name, nullptr, &type, reinterpret_cast<BYTE*>(buf.data()), &size);
+    RegCloseKey(key);
+    if (rc != ERROR_SUCCESS) return false;
+    while (!buf.empty() && buf.back() == L'\0') buf.pop_back();
+    value = std::move(buf);
+    return !value.empty();
+}
+
+bool WriteRunValue(HKEY root, REGSAM view, const wchar_t* name, const std::wstring& exe) {
+    HKEY key = nullptr;
+    if (RegCreateKeyExW(root, L"Software\\Microsoft\\Windows\\CurrentVersion\\Run", 0, nullptr, 0,
+                        KEY_SET_VALUE | view, nullptr, &key, nullptr) != ERROR_SUCCESS)
+        return false;
+    const std::wstring quoted = L"\"" + exe + L"\"";
+    const LONG rc = RegSetValueExW(key, name, 0, REG_SZ, reinterpret_cast<const BYTE*>(quoted.c_str()),
+                                   static_cast<DWORD>((quoted.size() + 1) * sizeof(wchar_t)));
+    RegCloseKey(key);
+    return rc == ERROR_SUCCESS;
+}
+
+void ConsiderNewer(const std::wstring& path, const unsigned selfVer[4], std::wstring& best) {
+    if (!IsSynchronusExe(path) || EqualPath(path, GetExePath()) || !FileExistsPath(path)) return;
+    unsigned ver[4]{};
+    if (!ReadFileVersion(path, ver) || CmpVer(ver, selfVer) <= 0) return;
+    if (best.empty()) {
+        best = path;
+        return;
+    }
+    unsigned have[4]{};
+    if (!ReadFileVersion(best, have) || CmpVer(ver, have) > 0) best = path;
+}
+
+struct LiveCopy {
+    DWORD pid = 0;
+    std::wstring path;
+    unsigned ver[4]{};
+    bool hasVer = false;
+};
+
+bool SynchronusProcessName(const wchar_t* file) {
+    std::wstring name = file ? file : L"";
+    for (wchar_t& c : name) c = static_cast<wchar_t>(towlower(c));
+    return name.size() >= 4 && name.compare(name.size() - 4, 4, L".exe") == 0 && name.compare(0, 10, L"synchronus") == 0;
+}
+
+std::vector<LiveCopy> LiveCopies() {
+    std::vector<LiveCopy> out;
+    const HANDLE snap = CreateToolhelp32Snapshot(TH32CS_SNAPPROCESS, 0);
+    if (snap == INVALID_HANDLE_VALUE) return out;
+    PROCESSENTRY32W pe{};
+    pe.dwSize = sizeof(pe);
+    const DWORD self = GetCurrentProcessId();
+    if (Process32FirstW(snap, &pe)) {
+        do {
+            if (pe.th32ProcessID == self || !SynchronusProcessName(pe.szExeFile)) continue;
+            DWORD session = 0;
+            if (!ProcessIdToSessionId(pe.th32ProcessID, &session) || session == 0) continue;
+            const HANDLE process = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, FALSE, pe.th32ProcessID);
+            if (!process) continue;
+            wchar_t path[MAX_PATH * 2]{};
+            DWORD n = _countof(path);
+            const BOOL ok = QueryFullProcessImageNameW(process, 0, path, &n);
+            CloseHandle(process);
+            if (!ok || !IsSynchronusExe(path)) continue;
+            LiveCopy copy;
+            copy.pid = pe.th32ProcessID;
+            copy.path = path;
+            copy.hasVer = ReadFileVersion(copy.path, copy.ver);
+            out.push_back(std::move(copy));
+        } while (Process32NextW(snap, &pe));
+    }
+    CloseHandle(snap);
+    return out;
+}
+
+bool PidAlive(DWORD pid) {
+    const HANDLE process = OpenProcess(SYNCHRONIZE, FALSE, pid);
+    if (!process) return false;
+    const DWORD wait = WaitForSingleObject(process, 0);
+    CloseHandle(process);
+    return wait == WAIT_TIMEOUT;
+}
+
+void StopPid(DWORD pid) {
+    const HANDLE process = OpenProcess(PROCESS_TERMINATE | SYNCHRONIZE, FALSE, pid);
+    if (!process) return;
+    TerminateProcess(process, 0);
+    WaitForSingleObject(process, 5000);
+    CloseHandle(process);
+}
+
+void AskRunningToShow() {
+    const UINT msg = RegisterWindowMessageW(L"Synchronus.Show");
+    if (msg) PostMessageW(HWND_BROADCAST, msg, 0, 0);
+}
+
+void AskRunningToExit() {
+    const UINT msg = RegisterWindowMessageW(L"Synchronus.Replace");
+    if (msg) PostMessageW(HWND_BROADCAST, msg, 0, 0);
+}
+
+bool StartDetached(const std::wstring& exe, const std::vector<std::wstring>& args) {
+    std::wstring cmd = L"\"" + exe + L"\"";
+    for (const auto& arg : args) {
+        cmd += L" \"";
+        for (wchar_t c : arg) {
+            if (c == L'"') cmd += L'\\';
+            cmd += c;
+        }
+        cmd += L"\"";
+    }
+    std::vector<wchar_t> buf(cmd.begin(), cmd.end());
+    buf.push_back(0);
+    std::wstring dir = exe;
+    const size_t slash = dir.find_last_of(L"\\/");
+    if (slash != std::wstring::npos) dir.resize(slash);
+    STARTUPINFOW si{};
+    si.cb = sizeof(si);
+    si.dwFlags = STARTF_USESHOWWINDOW;
+    si.wShowWindow = SW_SHOWNORMAL;
+    PROCESS_INFORMATION pi{};
+    if (!CreateProcessW(exe.c_str(), buf.data(), nullptr, nullptr, FALSE, 0, nullptr, dir.empty() ? nullptr : dir.c_str(),
+                        &si, &pi))
+        return false;
+    CloseHandle(pi.hThread);
+    CloseHandle(pi.hProcess);
+    return true;
+}
+
+bool PathRunning(const std::wstring& path) {
+    for (const auto& copy : LiveCopies())
+        if (EqualPath(copy.path, path)) return true;
+    return false;
+}
+
+void RetargetRun(HKEY root, REGSAM view, const std::wstring& preferred, const unsigned selfVer[4]) {
+    std::wstring value;
+    if (!ReadRunValue(root, view, L"Synchronus", value)) return;
+    const std::wstring exe = ExeFromCommand(value);
+    if (!IsSynchronusExe(exe) || EqualPath(exe, preferred)) return;
+    unsigned ver[4]{};
+    if (ReadFileVersion(exe, ver) && CmpVer(ver, selfVer) > 0) return;
+    if (WriteRunValue(root, view, L"Synchronus", preferred))
+        LogLine(L"Startup now launches " + preferred + L".");
+}
+
+void RetargetShortcut(const std::wstring& lnk, const std::wstring& preferred, const unsigned selfVer[4]) {
+    IShellLinkW* link = nullptr;
+    if (FAILED(CoCreateInstance(CLSID_ShellLink, nullptr, CLSCTX_INPROC_SERVER, IID_PPV_ARGS(&link)))) return;
+    IPersistFile* store = nullptr;
+    if (FAILED(link->QueryInterface(IID_PPV_ARGS(&store)))) {
+        link->Release();
+        return;
+    }
+    if (SUCCEEDED(store->Load(lnk.c_str(), STGM_READWRITE))) {
+        wchar_t target[MAX_PATH]{};
+        if (SUCCEEDED(link->GetPath(target, MAX_PATH, nullptr, SLGP_RAWPATH)) && IsSynchronusExe(target) &&
+            !EqualPath(target, preferred)) {
+            unsigned ver[4]{};
+            if (!ReadFileVersion(target, ver) || CmpVer(ver, selfVer) <= 0) {
+                link->SetPath(preferred.c_str());
+                const size_t slash = preferred.find_last_of(L"\\/");
+                if (slash != std::wstring::npos) link->SetWorkingDirectory(preferred.substr(0, slash).c_str());
+                if (SUCCEEDED(store->Save(lnk.c_str(), TRUE))) LogLine(L"A startup shortcut now launches " + preferred + L".");
+            }
+        }
+    }
+    store->Release();
+    link->Release();
+}
+
+void RetargetStartupShortcuts(const std::wstring& preferred, const unsigned selfVer[4]) {
+    const HRESULT com = CoInitializeEx(nullptr, COINIT_APARTMENTTHREADED);
+    const int folders[] = {CSIDL_STARTUP, CSIDL_COMMON_STARTUP};
+    for (int folderId : folders) {
+        wchar_t folder[MAX_PATH]{};
+        if (FAILED(SHGetFolderPathW(nullptr, folderId, nullptr, SHGFP_TYPE_CURRENT, folder))) continue;
+        WIN32_FIND_DATAW fd{};
+        const HANDLE find = FindFirstFileW((std::wstring(folder) + L"\\*.lnk").c_str(), &fd);
+        if (find == INVALID_HANDLE_VALUE) continue;
+        do {
+            if (fd.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY) continue;
+            RetargetShortcut(std::wstring(folder) + L"\\" + fd.cFileName, preferred, selfVer);
+        } while (FindNextFileW(find, &fd));
+        FindClose(find);
+    }
+    if (com == S_OK || com == S_FALSE) CoUninitialize();
+}
+
+bool RetargetService(const std::wstring& preferred) {
+    if (!ServiceExistsNamed(kServiceName) || preferred.empty()) return false;
+    const std::wstring image = ServiceImagePath(kServiceName);
+    if (image.empty() || EqualPath(image, preferred)) return false;
+    if (IsSynchronusExe(image) && FileExistsPath(image)) {
+        unsigned imageVer[4]{};
+        unsigned preferredVer[4]{};
+        if (ReadFileVersion(image, imageVer) && ReadFileVersion(preferred, preferredVer) &&
+            CmpVer(imageVer, preferredVer) > 0)
+            return false;
+    } else if (!image.empty() && !IsSynchronusExe(image) && FileExistsPath(image)) {
+        return false;
+    }
+    const bool wasRunning = ServiceState() == 1;
+    if (wasRunning) StopInstalledService();
+    const SC_HANDLE scm = OpenSCManagerW(nullptr, nullptr, SC_MANAGER_CONNECT);
+    const SC_HANDLE svc = scm ? OpenServiceW(scm, kServiceName, SERVICE_CHANGE_CONFIG) : nullptr;
+    const std::wstring binary = L"\"" + preferred + L"\" --service";
+    const bool changed = svc && ChangeServiceConfigW(svc, SERVICE_NO_CHANGE, SERVICE_NO_CHANGE, SERVICE_NO_CHANGE,
+                                                     binary.c_str(), nullptr, nullptr, nullptr, nullptr, nullptr, nullptr);
+    if (svc) CloseServiceHandle(svc);
+    if (scm) CloseServiceHandle(scm);
+    if (wasRunning) StartServiceNamed(kServiceName);
+    if (changed) LogLine(L"The startup service now runs " + preferred + L".");
+    return changed;
+}
+
+// The newest copy replaces whatever Synchronus is already set to start, then
+// leaves one installed executable for later versions to replace the same way.
+bool ClaimNewestInstall(const std::vector<std::wstring>& args) {
+    const std::wstring self = GetExePath();
+    unsigned selfVer[4]{};
+    if (!ReadFileVersion(self, selfVer)) return true;
+    const std::wstring canonical = GetInstallPath();
+
+    bool sameRunning = false;
+    for (int i = 0; i < 15; ++i) {
+        sameRunning = false;
+        for (const auto& copy : LiveCopies())
+            if (copy.hasVer && CmpVer(copy.ver, selfVer) == 0) sameRunning = true;
+        if (!sameRunning) break;
+        Sleep(100);
+    }
+
+    std::wstring newer;
+    ConsiderNewer(canonical, selfVer, newer);
+    ConsiderNewer(ServiceImagePath(kServiceName), selfVer, newer);
+    std::wstring runValue;
+    if (ReadRunValue(HKEY_CURRENT_USER, 0, L"Synchronus", runValue)) ConsiderNewer(ExeFromCommand(runValue), selfVer, newer);
+    if (ReadRunValue(HKEY_LOCAL_MACHINE, KEY_WOW64_64KEY, L"Synchronus", runValue))
+        ConsiderNewer(ExeFromCommand(runValue), selfVer, newer);
+    for (const auto& copy : LiveCopies())
+        if (copy.hasVer && CmpVer(copy.ver, selfVer) > 0) ConsiderNewer(copy.path, selfVer, newer);
+    if (!newer.empty()) {
+        LogLine(L"A newer Synchronus is installed. Opening that copy.");
+        if (!PathRunning(newer)) StartDetached(newer, args);
+        else AskRunningToShow();
+        return false;
+    }
+
+    std::vector<DWORD> older;
+    if (!sameRunning) {
+        for (const auto& copy : LiveCopies())
+            if (!copy.hasVer || CmpVer(copy.ver, selfVer) < 0) older.push_back(copy.pid);
+    }
+    if (!older.empty()) {
+        AskRunningToExit();
+        for (int i = 0; i < 20; ++i) {
+            bool any = false;
+            for (DWORD pid : older)
+                if (PidAlive(pid)) any = true;
+            if (!any) break;
+            Sleep(100);
+        }
+        for (DWORD pid : older)
+            if (PidAlive(pid)) StopPid(pid);
+        bool stuck = false;
+        for (DWORD pid : older)
+            if (PidAlive(pid)) stuck = true;
+        if (stuck) {
+            LogLine(L"An older Synchronus is still running. This copy left it in place.");
+            AskRunningToShow();
+            return false;
+        }
+        LogLine(L"Closed the older Synchronus so this version can take over.");
+    }
+
+    std::wstring preferred = self;
+    unsigned canonicalVer[4]{};
+    const bool haveCanonical = FileExistsPath(canonical) && ReadFileVersion(canonical, canonicalVer);
+    const bool replaceCanonical =
+        !sameRunning && !EqualPath(self, canonical) && (!haveCanonical || CmpVer(canonicalVer, selfVer) <= 0);
+    bool stoppedService = false;
+    const bool serviceWasRunning = ServiceState() == 1;
+    if (replaceCanonical) {
+        const std::wstring image = ServiceImagePath(kServiceName);
+        if (serviceWasRunning && (image.empty() || EqualPath(image, canonical))) {
+            StopInstalledService();
+            stoppedService = true;
+        }
+        CreateDirectoryW(GetInstallDir().c_str(), nullptr);
+        std::wstring err;
+        if (gui::ReplaceExecutable(canonical, self, err)) {
+            preferred = canonical;
+            LogLine(L"Installed this Synchronus over the previous copy.");
+        } else {
+            LogLine(L"Could not replace the installed copy. Startup will keep using this file. " + err);
+            if (stoppedService) StartServiceNamed(kServiceName);
+            stoppedService = false;
+        }
+    } else if (haveCanonical && CmpVer(canonicalVer, selfVer) >= 0) {
+        preferred = canonical;
+    }
+
+    if (!sameRunning && ServiceExistsNamed(kServiceName) && !EqualPath(ServiceImagePath(kServiceName), preferred))
+        RetargetService(preferred);
+    if (!sameRunning && serviceWasRunning && ServiceState() != 1) StartServiceNamed(kServiceName);
+    (void)stoppedService;
+
+    const auto prefs = gui::LoadMonitorPrefs();
+    if (prefs.launchAtLogin && prefs.startupAsked) WriteRunValue(HKEY_CURRENT_USER, 0, L"Synchronus", preferred);
+    RetargetRun(HKEY_CURRENT_USER, 0, preferred, selfVer);
+    RetargetRun(HKEY_LOCAL_MACHINE, KEY_WOW64_64KEY, preferred, selfVer);
+    RetargetRun(HKEY_LOCAL_MACHINE, KEY_WOW64_32KEY, preferred, selfVer);
+    RetargetStartupShortcuts(preferred, selfVer);
+    if (RunHiddenWait(L"C:\\Windows\\System32\\schtasks.exe", L"/Query /TN \"Synchronus Guard\"", 15000) == 0)
+        EnsureGuardTask();
+
+    if (!sameRunning) {
+        for (const auto& copy : LiveCopies())
+            if (copy.hasVer && CmpVer(copy.ver, selfVer) == 0) sameRunning = true;
+    }
+    if (sameRunning) {
+        AskRunningToShow();
+        return false;
+    }
+    if (!EqualPath(self, preferred) && FileExistsPath(preferred)) {
+        LogLine(L"Opening the installed Synchronus.");
+        if (!StartDetached(preferred, args)) {
+            LogLine(L"The installed copy did not open. This copy will stay open.");
+            return true;
+        }
+        return false;
+    }
+    return true;
+}
+
+int RunGui(const Options& opts, const std::vector<std::wstring>& args) {
     CleanupUpdateBackups();
-    HANDLE mutex = CreateMutexW(nullptr, FALSE, L"Global\\Synchronus.SingleInstance");
-    if (mutex && GetLastError() == ERROR_ALREADY_EXISTS) {
-        const UINT show = RegisterWindowMessageW(L"Synchronus.Show");
-        if (show) PostMessageW(HWND_BROADCAST, show, 0, 0);
+    if (!ClaimNewestInstall(args)) return 0;
+    HANDLE mutex = nullptr;
+    DWORD mutexError = 0;
+    for (int attempt = 0; attempt < 25; ++attempt) {
+        mutex = CreateMutexW(nullptr, FALSE, L"Global\\Synchronus.SingleInstance");
+        mutexError = GetLastError();
+        if (!mutex || mutexError != ERROR_ALREADY_EXISTS) break;
+        bool alive = false;
+        if (!LiveCopies().empty()) alive = true;
+        if (alive || attempt == 24) break;
+        CloseHandle(mutex);
+        mutex = nullptr;
+        Sleep(100);
+    }
+    if (mutex && mutexError == ERROR_ALREADY_EXISTS) {
+        AskRunningToShow();
         CloseHandle(mutex);
         return 0;
     }
@@ -4649,9 +5096,9 @@ void WriteTweaksEveryScheme(const PpmTweak* tweaks, size_t count) {
 void MarkGuard(const wchar_t* name) { RegSetDword(HKEY_LOCAL_MACHINE, kAppRegKey, name, 1); }
 
 void EnsureGuardTask() {
-    wchar_t path[MAX_PATH]{};
-    if (!GetModuleFileNameW(nullptr, path, MAX_PATH)) return;
-    const std::wstring tr = L"\\\"" + std::wstring(path) + L"\\\" --guard";
+    const std::wstring path = StartupTarget();
+    if (path.empty()) return;
+    const std::wstring tr = L"\\\"" + path + L"\\\" --guard";
     const std::wstring args = L"/Create /F /SC ONSTART /RU SYSTEM /RL HIGHEST /TN \"Synchronus Guard\" /TR \"" + tr + L"\"";
     const DWORD code = RunHiddenWait(L"C:\\Windows\\System32\\schtasks.exe", args, 20000);
     if (code != 0) LogLine(L"Could not create the Synchronus Guard startup task.");
