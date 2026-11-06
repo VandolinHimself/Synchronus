@@ -427,7 +427,7 @@ AggregateView LoadAggregate(const std::wstring& dataDir) {
         view.samples += p.scoreWeight;
     }
     const auto lines = LinesOf(ReadWhole(HistoryPath(dataDir)));
-    for (auto it = lines.rbegin(); it != lines.rend() && view.events.size() < 80; ++it) {
+    for (auto it = lines.rbegin(); it != lines.rend() && view.events.size() < 500; ++it) {
         const auto f = Split(*it, ',');
         if (f.size() < 3) continue;
         TuneEvent e;

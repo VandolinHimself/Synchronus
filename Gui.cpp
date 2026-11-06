@@ -1751,6 +1751,7 @@ private:
                     return 0;
                 }
                 if (stage_.load() == Stage::Home && homeTab_ == 1) {
+                    if (aggHistRect_.right > aggHistRect_.left && !PtIn(mouse_, aggHistRect_)) return 0;
                     const int delta = GET_WHEEL_DELTA_WPARAM(wp);
                     aggregateScroll_ = std::max(0, aggregateScroll_ - delta / 120);
                     if (aggregateScroll_ > aggregateMaxScroll_) aggregateScroll_ = aggregateMaxScroll_;
@@ -5137,8 +5138,20 @@ private:
                  rd_.fMonoSmall.Get(), col::dim, DWRITE_TEXT_ALIGNMENT_TRAILING);
     }
 
+    static std::wstring EventDay(const std::wstring& when) {
+        if (when.size() >= 10 && when[4] == L'-' && when[7] == L'-') return when.substr(0, 10);
+        return {};
+    }
+
+    static std::wstring EventClock(const std::wstring& when, bool withDay) {
+        if (when.size() >= 19 && when[10] == L' ') {
+            if (withDay && when.size() >= 10) return when.substr(5, 5) + L"  " + when.substr(11, 5);
+            return when.substr(11, 8);
+        }
+        return when;
+    }
+
     void DrawAggregate(const D2D1_RECT_F& B, float dt) {
-        (void)dt;
         EnsureAggregate();
         const unsigned runs = aggregate_.runs;
         const double samples = aggregate_.samples;
@@ -5148,7 +5161,7 @@ private:
         rd_.Text(L"Each interval is a sample-weighted mean. A new run moves it by that run's samples over the master weight.",
                  D2D1::RectF(B.left, B.top + 24, B.right, B.top + 42), rd_.fSmall.Get(), col::dim);
         const float gap = 12.0f;
-        const float curveW = std::max(280.0f, W(B) * 0.58f);
+        const float curveW = std::max(280.0f, W(B) * 0.52f);
         const D2D1_RECT_F curve = D2D1::RectF(B.left, B.top + 50, B.left + curveW, B.bottom);
         const D2D1_RECT_F list = D2D1::RectF(curve.right + gap, B.top + 50, B.right, B.bottom);
         rd_.FillRound(curve, 14, Alpha(col::panel, 0.9f));
@@ -5168,33 +5181,192 @@ private:
                      D2D1::RectF(curve.left + 12, curve.bottom - 28, curve.right - 12, curve.bottom - 8), rd_.fMonoSmall.Get(),
                      col::green);
         }
+
         rd_.FillRound(list, 14, Alpha(col::panel, 0.9f));
         rd_.StrokeRound(list, 14, Alpha(col::cyan, 0.35f), 1.2f);
-        rd_.Text(L"Tuned values over time", D2D1::RectF(list.left + 12, list.top + 8, list.right - 12, list.top + 28),
-                 rd_.fSmall.Get(), col::cyan);
-        const D2D1_RECT_F rows = D2D1::RectF(list.left + 8, list.top + 36, list.right - 8, list.bottom - 8);
-        rd_.Clip(rows);
-        const float rowH = 36.0f;
-        float y = rows.top - static_cast<float>(aggregateScroll_) * rowH;
-        if (aggregate_.events.empty()) {
-            rd_.Text(L"Timer wins, power, graphics, memory, and storage land here as each step finishes.",
-                     rows, rd_.fSmall.Get(), col::dim);
-        }
+        aggHistRect_ = list;
+        rd_.Text(L"Tuned values", D2D1::RectF(list.left + 12, list.top + 8, list.right - 120, list.top + 28), rd_.fSmall.Get(),
+                 col::cyan);
+
+        std::vector<std::wstring> days;
         for (const auto& e : aggregate_.events) {
-            const D2D1_RECT_F row = D2D1::RectF(rows.left, y, rows.right, y + rowH - 4);
-            y += rowH;
-            if (row.bottom < rows.top || row.top > rows.bottom) continue;
-            rd_.Text(e.kind + L"   " + e.when, D2D1::RectF(row.left, row.top, row.right, row.top + 16), rd_.fSmall.Get(),
-                     col::text);
-            rd_.Text(e.detail, D2D1::RectF(row.left, row.top + 16, row.right, row.bottom), rd_.fMonoSmall.Get(), col::muted);
+            const std::wstring day = EventDay(e.when);
+            if (!day.empty() && std::find(days.begin(), days.end(), day) == days.end()) days.push_back(day);
         }
-        rd_.Unclip();
-        const int maxScroll = std::max(0, static_cast<int>(aggregate_.events.size()) - static_cast<int>(H(rows) / rowH));
+        std::sort(days.begin(), days.end());
+        int dayIndex = -1;
+        for (int i = 0; i < static_cast<int>(days.size()); ++i) {
+            if (days[static_cast<size_t>(i)] == aggDate_) dayIndex = i;
+        }
+        if (!aggDate_.empty() && dayIndex < 0) aggDate_.clear();
+
+        const float ctlY = list.top + 32;
+        const float ctlH = 26.0f;
+        const D2D1_RECT_F earlier = D2D1::RectF(list.left + 10, ctlY, list.left + 36, ctlY + ctlH);
+        const D2D1_RECT_F all = D2D1::RectF(list.right - 58, ctlY, list.right - 10, ctlY + ctlH);
+        const D2D1_RECT_F later = D2D1::RectF(all.left - 32, ctlY, all.left - 6, ctlY + ctlH);
+        const bool canEarlier = !days.empty() && (dayIndex < 0 || dayIndex > 0);
+        const bool canLater = dayIndex >= 0;
+        const bool goEarlier =
+            Button(250, earlier, L"<", col::cyan, false, canEarlier, dt, false, false, rd_.fSmall.Get()) && canEarlier;
+        const bool goLater =
+            Button(251, later, L">", col::cyan, false, canLater, dt, false, false, rd_.fSmall.Get()) && canLater;
+        const bool goAll =
+            Button(252, all, L"All", col::cyan, aggDate_.empty(), !aggDate_.empty(), dt, false, false, rd_.fSmall.Get());
+        if (goAll) {
+            aggDate_.clear();
+            aggregateScroll_ = 0;
+            dayIndex = -1;
+        } else if (goEarlier) {
+            aggDate_ = dayIndex < 0 ? days.back() : days[static_cast<size_t>(dayIndex - 1)];
+            aggregateScroll_ = 0;
+        } else if (goLater) {
+            if (dayIndex + 1 < static_cast<int>(days.size())) aggDate_ = days[static_cast<size_t>(dayIndex + 1)];
+            else aggDate_.clear();
+            aggregateScroll_ = 0;
+        }
+        rd_.Text(aggDate_.empty() ? L"All days" : aggDate_, D2D1::RectF(earlier.right + 6, ctlY, later.left - 6, ctlY + ctlH),
+                 rd_.fMonoSmall.Get(), col::text, DWRITE_TEXT_ALIGNMENT_CENTER, DWRITE_PARAGRAPH_ALIGNMENT_CENTER);
+
+        const float headY = ctlY + ctlH + 8;
+        const float headH = 22.0f;
+        const float barW = 12.0f;
+        const D2D1_RECT_F rows = D2D1::RectF(list.left + 8, headY + headH + 4, list.right - 8, list.bottom - 8);
+        const float rowH = 42.0f;
+        const int visible = std::max(1, static_cast<int>(H(rows) / rowH));
+        auto shownCount = [&] {
+            int n = 0;
+            for (const auto& e : aggregate_.events) {
+                if (aggDate_.empty() || EventDay(e.when) == aggDate_) ++n;
+            }
+            return n;
+        };
+        const bool needBar = shownCount() > visible;
+        const float textRight = needBar ? rows.right - barW - 6 : rows.right;
+        const float whenW = std::min(aggDate_.empty() ? 112.0f : 78.0f, std::max(64.0f, (textRight - rows.left) * 0.32f));
+        const float kindW = std::min(100.0f, std::max(72.0f, (textRight - rows.left) * 0.24f));
+        const D2D1_RECT_F whenH = D2D1::RectF(rows.left, headY, rows.left + whenW, headY + headH);
+        const D2D1_RECT_F kindH = D2D1::RectF(whenH.right + 4, headY, whenH.right + 4 + kindW, headY + headH);
+        const D2D1_RECT_F detailH = D2D1::RectF(kindH.right + 4, headY, textRight, headY + headH);
+        auto mark = [&](int col) {
+            if (aggSort_ != col) return std::wstring();
+            return std::wstring(aggSortAsc_ ? L"  ^" : L"  v");
+        };
+        const int sortBefore = aggSort_;
+        const bool ascBefore = aggSortAsc_;
+        if (Button(253, whenH, L"When" + mark(0), col::cyan, aggSort_ == 0, true, dt, false, false, rd_.fMonoSmall.Get())) {
+            if (aggSort_ == 0) aggSortAsc_ = !aggSortAsc_;
+            else {
+                aggSort_ = 0;
+                aggSortAsc_ = false;
+            }
+        }
+        if (Button(254, kindH, L"Step" + mark(1), col::cyan, aggSort_ == 1, true, dt, false, false, rd_.fMonoSmall.Get())) {
+            if (aggSort_ == 1) aggSortAsc_ = !aggSortAsc_;
+            else {
+                aggSort_ = 1;
+                aggSortAsc_ = true;
+            }
+        }
+        if (Button(255, detailH, L"Change" + mark(2), col::cyan, aggSort_ == 2, true, dt, false, false,
+                   rd_.fMonoSmall.Get())) {
+            if (aggSort_ == 2) aggSortAsc_ = !aggSortAsc_;
+            else {
+                aggSort_ = 2;
+                aggSortAsc_ = true;
+            }
+        }
+        if (aggSort_ != sortBefore || aggSortAsc_ != ascBefore) aggregateScroll_ = 0;
+
+        std::vector<const TuneEvent*> shown;
+        shown.reserve(aggregate_.events.size());
+        for (const auto& e : aggregate_.events) {
+            if (aggDate_.empty() || EventDay(e.when) == aggDate_) shown.push_back(&e);
+        }
+        std::stable_sort(shown.begin(), shown.end(), [&](const TuneEvent* a, const TuneEvent* b) {
+            int cmp = 0;
+            if (aggSort_ == 1) cmp = _wcsicmp(a->kind.c_str(), b->kind.c_str());
+            else if (aggSort_ == 2) cmp = _wcsicmp(a->detail.c_str(), b->detail.c_str());
+            else cmp = a->when.compare(b->when);
+            if (cmp == 0) cmp = a->when.compare(b->when);
+            if (!aggSortAsc_) cmp = -cmp;
+            return cmp < 0;
+        });
+        rd_.Text(shown.empty() ? L"0 shown" : Fmt(L"%u shown", static_cast<unsigned>(shown.size())),
+                 D2D1::RectF(list.right - 110, list.top + 8, list.right - 12, list.top + 28), rd_.fMonoSmall.Get(), col::dim,
+                 DWRITE_TEXT_ALIGNMENT_TRAILING, DWRITE_PARAGRAPH_ALIGNMENT_CENTER);
+
+        const int maxScroll = std::max(0, static_cast<int>(shown.size()) - visible);
         aggregateMaxScroll_ = maxScroll;
         if (aggregateScroll_ > aggregateMaxScroll_) aggregateScroll_ = aggregateMaxScroll_;
+        if (aggregateScroll_ < 0) aggregateScroll_ = 0;
+
+        const D2D1_RECT_F body = D2D1::RectF(rows.left, rows.top, textRight, rows.bottom);
+        rd_.Clip(body);
+        if (shown.empty()) {
+            rd_.Text(aggregate_.events.empty()
+                         ? L"Timer wins, power, graphics, memory, and storage land here as each step finishes."
+                         : L"Nothing was tuned on this day.",
+                     body, rd_.fSmall.Get(), col::dim);
+        }
+        float y = body.top - static_cast<float>(aggregateScroll_) * rowH;
+        for (const TuneEvent* e : shown) {
+            const D2D1_RECT_F row = D2D1::RectF(body.left, y, body.right, y + rowH - 4);
+            y += rowH;
+            if (row.bottom < body.top || row.top > body.bottom) continue;
+            if (PtIn(mouse_, row)) rd_.FillRound(row, 6, Alpha(col::cyan, 0.10f));
+            rd_.Text(EventClock(e->when, aggDate_.empty()), D2D1::RectF(row.left + 4, row.top, row.left + whenW, row.bottom),
+                     rd_.fMonoSmall.Get(), col::text, DWRITE_TEXT_ALIGNMENT_LEADING, DWRITE_PARAGRAPH_ALIGNMENT_CENTER);
+            rd_.Text(e->kind, D2D1::RectF(kindH.left, row.top, kindH.right, row.bottom), rd_.fSmall.Get(), col::cyan,
+                     DWRITE_TEXT_ALIGNMENT_LEADING, DWRITE_PARAGRAPH_ALIGNMENT_CENTER);
+            rd_.Text(e->detail, D2D1::RectF(detailH.left, row.top + 2, row.right - 4, row.bottom - 2), rd_.fMonoSmall.Get(),
+                     col::muted, DWRITE_TEXT_ALIGNMENT_LEADING, DWRITE_PARAGRAPH_ALIGNMENT_CENTER);
+        }
+        rd_.Unclip();
+
+        if (needBar) {
+            const D2D1_RECT_F track = D2D1::RectF(rows.right - barW, rows.top, rows.right, rows.bottom);
+            const float viewH = std::max(1.0f, H(track));
+            float thumbH = std::max(28.0f, viewH * static_cast<float>(visible) / static_cast<float>(std::max(1, static_cast<int>(shown.size()))));
+            if (thumbH > viewH) thumbH = viewH;
+            const float travel = std::max(1.0f, viewH - thumbH);
+            auto thumbAt = [&](int scroll) {
+                const float t = maxScroll ? static_cast<float>(scroll) / static_cast<float>(maxScroll) : 0.0f;
+                const float top = track.top + t * travel;
+                return D2D1::RectF(track.left + 1, top, track.right - 1, top + thumbH);
+            };
+            D2D1_RECT_F thumb = thumbAt(aggregateScroll_);
+            if (mouseDown_ && !aggDrag_ && PtIn(mouse_, thumb)) {
+                aggDrag_ = true;
+                aggGrab_ = mouse_.y - thumb.top;
+            }
+            const bool wasDrag = aggDrag_;
+            if (aggDrag_) {
+                if (mouseDown_) {
+                    const float nt = std::clamp((mouse_.y - aggGrab_ - track.top) / travel, 0.0f, 1.0f);
+                    aggregateScroll_ = static_cast<int>(std::lround(nt * static_cast<float>(maxScroll)));
+                    if (aggregateScroll_ < 0) aggregateScroll_ = 0;
+                    if (aggregateScroll_ > maxScroll) aggregateScroll_ = maxScroll;
+                    thumb = thumbAt(aggregateScroll_);
+                } else {
+                    aggDrag_ = false;
+                }
+            }
+            rd_.FillRound(track, 4, Alpha(col::bg, 0.8f));
+            const bool hot = aggDrag_ || PtIn(mouse_, thumb);
+            if (hot) hoverButton_ = true;
+            rd_.FillRound(thumb, 4, hot ? col::cyan : Alpha(col::muted, 0.9f));
+            if (clickPending_ && !wasDrag && PtIn(clickPos_, track) && !PtIn(clickPos_, thumb)) {
+                if (clickPos_.y < thumb.top) aggregateScroll_ = std::max(0, aggregateScroll_ - visible);
+                else aggregateScroll_ = std::min(maxScroll, aggregateScroll_ + visible);
+            }
+        } else if (!mouseDown_) {
+            aggDrag_ = false;
+        }
     }
 
     void DrawHome(const D2D1_RECT_F& outer, float dt) {
+        aggHistRect_ = {};
         const D2D1_RECT_F tabHome = D2D1::RectF(outer.left, outer.top, outer.left + 128, outer.top + 30);
         const D2D1_RECT_F tabAgg = D2D1::RectF(outer.left + 136, outer.top, outer.left + 292, outer.top + 30);
         if (Button(240, tabHome, L"Home", col::cyan, homeTab_ == 0, true, dt, false, false, rd_.fSmall.Get())) homeTab_ = 0;
@@ -5229,14 +5401,13 @@ private:
             L"Turns SysMain off and checks that TRIM is enabled for the system drive.",
             L"Shows the BIOS settings to change by hand, then asks you to restart. Windows cannot write those settings for you.",
         };
-        rd_.Text(L"Tools", D2D1::RectF(B.left, B.top, B.left + leftW, B.top + 28), rd_.fPhase.Get(), col::cyan);
         const std::wstring banner = JobBanner();
         if (!banner.empty()) {
-            rd_.Text(banner, D2D1::RectF(B.left, B.top + 28, B.left + leftW, B.top + 48), rd_.fSmall.Get(), col::muted);
+            rd_.Text(banner, D2D1::RectF(B.left, B.top, B.left + leftW, B.top + 20), rd_.fSmall.Get(), col::muted);
         }
         const bool showUpdate = updatePulse_;
         const float heatH = std::max(180.0f, H(B) * 0.36f);
-        const float btnTop = B.top + (banner.empty() ? 40.0f : 52.0f);
+        const float btnTop = B.top + (banner.empty() ? 0.0f : 24.0f);
         const float btnBottom = B.bottom - heatH - 46.0f - (showUpdate ? 52.0f : 12.0f);
         const float btnGap = 8.0f;
         const float btnH = std::max(40.0f, (btnBottom - btnTop - 4.0f * btnGap) / 5.0f);
@@ -6435,6 +6606,12 @@ private:
     int homeTab_ = 0;
     int aggregateScroll_ = 0;
     int aggregateMaxScroll_ = 0;
+    int aggSort_ = 0;
+    bool aggSortAsc_ = false;
+    std::wstring aggDate_;
+    bool aggDrag_ = false;
+    float aggGrab_ = 0;
+    D2D1_RECT_F aggHistRect_{};
     bool aggregateLoaded_ = false;
     AggregateView aggregate_{};
     int jobSeen_[static_cast<int>(JobId::Count)]{};

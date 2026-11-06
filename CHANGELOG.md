@@ -1,6 +1,11 @@
 # Changelog
 
-Current release: **2.9.1**.
+Current release: **2.9.2**.
+
+## 2.9.2 — 2026-11-05
+
+- The Aggregate history has a scrollbar. Date controls move through the days that have tune entries, and the column headings sort those entries by time, step, or what changed.
+- The home screen no longer reserves a heading above the tool buttons.
 
 ## 2.9.1 — 2026-11-05
 
