@@ -1,6 +1,12 @@
 # Changelog
 
-Current release: **2.9.2**.
+Current release: **2.10.1**.
+
+## 2.10.1 — 2026-11-05
+
+- Moving between panes slides and fades the one you are leaving, and brings the next one up with a light sweep. Home, Aggregate, and About use the same motion.
+- The Aggregate curve keeps its axis labels above the lowest-score line.
+- About sits beside Home and Aggregate. It credits Van Graham, the GitHub repositories this program is built from, and Lucius & Wayne Systems, and each credit opens its link.
 
 ## 2.9.2 — 2026-11-05
 

@@ -781,7 +781,7 @@ public:
         dc_->SetTransform(D2D1::Matrix3x2F::Translation(dx, dy) * old);
         bool layered = false;
         if (opacity < 0.985f) {
-            if (!fadeLayer_) dc_->CreateLayer(&fadeLayer_);
+            if (!fadeLayer_) dc_->CreateLayer(fadeLayer_.ReleaseAndGetAddressOf());
             if (fadeLayer_) {
                 dc_->PushLayer(D2D1::LayerParameters(D2D1::InfiniteRect(), nullptr, D2D1_ANTIALIAS_MODE_PER_PRIMITIVE,
                                                      D2D1::IdentityMatrix(), Clamp01(opacity)),
@@ -1485,6 +1485,49 @@ bool IsTuneStage(Stage s) {
         default:
             return false;
     }
+}
+
+int PaneFamily(Stage s) {
+    switch (s) {
+        case Stage::Welcome: return 0;
+        case Stage::PreparePrompt:
+        case Stage::PrepareApplying:
+        case Stage::PrepareDone:
+        case Stage::PrepareFailed: return 1;
+        case Stage::Running:
+        case Stage::Result:
+        case Stage::Failed:
+        case Stage::Cancelled:
+        case Stage::Installing:
+        case Stage::Installed:
+        case Stage::InstallFailed: return 2;
+        case Stage::PpmPrompt:
+        case Stage::PpmApplying:
+        case Stage::PpmDone:
+        case Stage::PpmFailed: return 3;
+        case Stage::GpuClean: return 4;
+        case Stage::GpuPrompt:
+        case Stage::GpuApplying:
+        case Stage::GpuDone:
+        case Stage::GpuFailed: return 5;
+        case Stage::AfterburnerPrompt:
+        case Stage::AfterburnerApplying:
+        case Stage::AfterburnerDone:
+        case Stage::AfterburnerFailed: return 6;
+        case Stage::MemoryPrompt:
+        case Stage::MemoryApplying:
+        case Stage::MemoryDone:
+        case Stage::MemoryFailed: return 7;
+        case Stage::StoragePrompt:
+        case Stage::StorageApplying:
+        case Stage::StorageDone:
+        case Stage::StorageFailed: return 8;
+        case Stage::Review: return 9;
+        case Stage::Home: return 10;
+        case Stage::Monitor: return 11;
+        case Stage::Fleet: return 12;
+    }
+    return 0;
 }
 
 enum {
@@ -3395,33 +3438,68 @@ private:
             clickPending_ = false;
             enterPending_ = false;
         }
-        if (stage == Stage::Welcome) {
-            DrawWelcome(D2D1::RectF(pad, pad, w - pad, footer.top - 10), dt);
-        } else if (stage == Stage::Fleet) {
-            DrawHeader(header, bar, stage, dt);
-            DrawFleet(body, dt);
-        } else if (stage == Stage::Home || stage == Stage::Monitor) {
-            DrawHeader(header, bar, stage, dt);
-            if (stage == Stage::Home) DrawHome(body, dt);
-            else DrawMonitor(body, dt);
+        if (!paneInit_) {
+            paneStage_ = stage;
+            paneT_ = 1;
+            paneInit_ = true;
+        } else if (stage != paneStage_) {
+            paneFrom_ = paneStage_;
+            paneStage_ = stage;
+            paneVertical_ = PaneFamily(paneFrom_) == PaneFamily(stage);
+            paneDir_ = PaneFamily(stage) >= PaneFamily(paneFrom_) ? 1.0f : -1.0f;
+            paneT_ = 0;
+        } else if (paneT_ < 1.0f) {
+            paneT_ = std::min(1.0f, paneT_ + dt / (paneVertical_ ? 0.36f : 0.55f));
+        }
+        auto drawPane = [&](Stage which, bool liveHome) {
+            if (which == Stage::Welcome) {
+                DrawWelcome(D2D1::RectF(pad, pad, w - pad, footer.top - 10), dt);
+                return;
+            }
+            DrawHeader(header, bar, which, dt);
+            if (which == Stage::Fleet) {
+                DrawFleet(body, dt);
+            } else if (which == Stage::Home) {
+                DrawHome(body, dt, liveHome);
+            } else if (which == Stage::Monitor) {
+                DrawMonitor(body, dt);
+            } else {
+                const float gap = 12;
+                const float leftW = std::floor((W(body) - gap) * 0.62f);
+                const float finalH = IsTuneStage(which) ? 360.0f : 236.0f;
+                const D2D1_RECT_F chart = D2D1::RectF(body.left, body.top, body.left + leftW, body.bottom - finalH - gap);
+                const D2D1_RECT_F finals = D2D1::RectF(body.left, chart.bottom + gap, body.left + leftW, body.bottom);
+                const float rx = chart.right + gap;
+                const float rh = H(body);
+                const D2D1_RECT_F trace = D2D1::RectF(rx, body.top, body.right, body.top + std::floor(rh * 0.22f));
+                const D2D1_RECT_F hist =
+                    D2D1::RectF(rx, trace.bottom + gap, body.right, trace.bottom + gap + std::floor(rh * 0.52f));
+                const D2D1_RECT_F stats = D2D1::RectF(rx, hist.bottom + gap, body.right, body.bottom);
+                DrawChart(chart, dt, which);
+                DrawTrace(trace, dt);
+                DrawHistogram(hist, dt);
+                DrawStats(stats, dt);
+                DrawFinalists(finals, dt, which);
+            }
+        };
+        const D2D1_RECT_F stageClip = D2D1::RectF(0, pad, w, footer.top);
+        if (paneT_ < 1.0f && paneFrom_ != paneStage_) {
+            const float e = EaseOutCubic(paneT_);
+            const float slide = paneVertical_ ? 0.0f : paneDir_ * 78.0f;
+            const float rise = paneVertical_ ? 28.0f : 10.0f;
+            const bool holdClick = clickPending_;
+            const bool holdEnter = enterPending_;
+            clickPending_ = false;
+            enterPending_ = false;
+            rd_.Motion(stageClip, -slide * e, rise * e, (1.0f - e) * (1.0f - e), [&] { drawPane(paneFrom_, false); });
+            clickPending_ = holdClick;
+            enterPending_ = holdEnter;
+            rd_.Motion(stageClip, 0, rise * 0.25f * (1.0f - e), e, [&] { drawPane(paneStage_, true); });
+            const float sweep = stageClip.left + (W(stageClip) + 120.0f) * e - 120.0f;
+            rd_.Fill(D2D1::RectF(sweep, stageClip.top, sweep + 90.0f, stageClip.bottom),
+                     Alpha(col::cyan, (paneVertical_ ? 0.03f : 0.05f) * (1.0f - e)));
         } else {
-            DrawHeader(header, bar, stage, dt);
-            const float gap = 12;
-            const float leftW = std::floor((W(body) - gap) * 0.62f);
-            const float finalH = IsTuneStage(stage) ? 360.0f : 236.0f;
-            const D2D1_RECT_F chart = D2D1::RectF(body.left, body.top, body.left + leftW, body.bottom - finalH - gap);
-            const D2D1_RECT_F finals = D2D1::RectF(body.left, chart.bottom + gap, body.left + leftW, body.bottom);
-            const float rx = chart.right + gap;
-            const float rh = H(body);
-            const D2D1_RECT_F trace = D2D1::RectF(rx, body.top, body.right, body.top + std::floor(rh * 0.22f));
-            const D2D1_RECT_F hist =
-                D2D1::RectF(rx, trace.bottom + gap, body.right, trace.bottom + gap + std::floor(rh * 0.52f));
-            const D2D1_RECT_F stats = D2D1::RectF(rx, hist.bottom + gap, body.right, body.bottom);
-            DrawChart(chart, dt, stage);
-            DrawTrace(trace, dt);
-            DrawHistogram(hist, dt);
-            DrawStats(stats, dt);
-            DrawFinalists(finals, dt, stage);
+            drawPane(stage, true);
         }
         DrawFooter(footer, dt);
         UpdateParticles(dt);
@@ -5393,18 +5471,144 @@ private:
         }
     }
 
-    void DrawHome(const D2D1_RECT_F& outer, float dt) {
+    void OpenUrl(const wchar_t* url) {
+        if (url && url[0]) ShellExecuteW(nullptr, L"open", url, nullptr, nullptr, SW_SHOWNORMAL);
+    }
+
+    bool LinkRow(int id, const D2D1_RECT_F& r, const wchar_t* title, const wchar_t* url, const wchar_t* note, float dt) {
+        if (hover_.size() <= static_cast<size_t>(id)) hover_.resize(static_cast<size_t>(id) + 1, 0.0f);
+        const bool over = PtIn(mouse_, r);
+        if (over) hoverButton_ = true;
+        hover_[id] = Approach(hover_[id], over ? 1.0f : 0.0f, dt, 12.0f);
+        const float hv = hover_[id];
+        rd_.FillRound(r, 10, Alpha(col::cyan, 0.05f + 0.10f * hv));
+        rd_.StrokeRound(r, 10, Alpha(col::cyan, 0.28f + 0.45f * hv), 1.2f);
+        rd_.Text(title, D2D1::RectF(r.left + 14, r.top + 6, r.right - 14, r.top + 26), rd_.fSmall.Get(), col::text);
+        rd_.Text(note, D2D1::RectF(r.left + 14, r.top + 26, r.right - 230, r.bottom - 4), rd_.fMonoSmall.Get(), col::dim);
+        rd_.Text(url, D2D1::RectF(r.right - 240, r.top + 26, r.right - 14, r.bottom - 4), rd_.fMonoSmall.Get(), col::cyan,
+                 DWRITE_TEXT_ALIGNMENT_TRAILING);
+        return over && clickPending_ && PtIn(clickPos_, r);
+    }
+
+    void DrawAbout(const D2D1_RECT_F& B, float dt) {
+        const float pulse = 0.5f + 0.5f * std::sin(time_ * 1.5f);
+        const D2D1_RECT_F mast = D2D1::RectF(B.left, B.top, B.right, B.top + 168);
+        rd_.FillRound(mast, 16, Alpha(col::panel, 0.94f));
+        rd_.StrokeRound(mast, 16, Alpha(col::cyan, 0.35f + 0.15f * pulse), 1.4f);
+        rd_.Glow(D2D1::Point2F((mast.left + mast.right) * 0.5f, mast.top + 54), 160, col::cyan, 0.12f + 0.06f * pulse);
+        float y = mast.top + 16;
+        if (rd_.Mark()) {
+            const D2D1_SIZE_F sz = rd_.Mark()->GetSize();
+            const float lh = 42.0f;
+            const float lw = lh * sz.width / std::max(1.0f, sz.height);
+            const float cx = (mast.left + mast.right) * 0.5f;
+            rd_.DrawMark(D2D1::RectF(cx - lw * 0.5f, y, cx + lw * 0.5f, y + lh), 1.0f);
+            y += lh + 4;
+        }
+        ID2D1LinearGradientBrush* grad = rd_.TitleGrad();
+        grad->SetStartPoint(D2D1::Point2F(mast.left, y));
+        grad->SetEndPoint(D2D1::Point2F(mast.right, y));
+        grad->SetOpacity(1);
+        rd_.TextBrush(L"SYNCHRONUS", D2D1::RectF(mast.left, y, mast.right, y + 34), rd_.fTitle.Get(), grad,
+                      DWRITE_TEXT_ALIGNMENT_CENTER);
+        y += 36;
+        rd_.Text(L"Created by Van Graham", D2D1::RectF(mast.left, y, mast.right, y + 22), rd_.fSmall.Get(), col::text,
+                 DWRITE_TEXT_ALIGNMENT_CENTER);
+        y += 24;
+        const D2D1_RECT_F van = D2D1::RectF((mast.left + mast.right) * 0.5f - 170, y, (mast.left + mast.right) * 0.5f + 170, y + 28);
+        if (Button(260, van, L"github.com/VandolinHimself", col::cyan, false, true, dt, false, false, rd_.fMonoSmall.Get()))
+            OpenUrl(L"https://github.com/VandolinHimself");
+
+        rd_.Text(L"Repositories that this program is built from",
+                 D2D1::RectF(B.left + 4, mast.bottom + 14, B.right, mast.bottom + 34), rd_.fSmall.Get(), col::cyan);
+        const wchar_t* titles[] = {L"Synchronus", L"TimerResolution", L"PC-Tuning"};
+        const wchar_t* notes[] = {L"This program, by Van Graham", L"Timer-resolution core it descends from",
+                                  L"Processor-power research used by the CPU step"};
+        const wchar_t* urls[] = {L"https://github.com/VandolinHimself/Synchronus",
+                                 L"https://github.com/amitxv/TimerResolution",
+                                 L"https://github.com/valleyofdoom/PC-Tuning"};
+        const wchar_t* shown[] = {L"VandolinHimself/Synchronus", L"amitxv/TimerResolution", L"valleyofdoom/PC-Tuning"};
+        float rowY = mast.bottom + 40;
+        const float rowH = 52.0f;
+        for (int i = 0; i < 3; ++i) {
+            const D2D1_RECT_F row = D2D1::RectF(B.left, rowY, B.right, rowY + rowH - 6);
+            if (LinkRow(261 + i, row, titles[i], shown[i], notes[i], dt)) OpenUrl(urls[i]);
+            rowY += rowH;
+        }
+
+        const D2D1_RECT_F house = D2D1::RectF(B.left, rowY + 8, B.right, B.bottom);
+        rd_.FillRound(house, 16, Alpha(col::panel, 0.94f));
+        rd_.StrokeRound(house, 16, Alpha(col::cyan, 0.28f), 1.2f);
+        float hy = house.top + 14;
+        if (rd_.Logo()) {
+            const D2D1_SIZE_F sz = rd_.Logo()->GetSize();
+            const float lh = 28.0f;
+            const float lw = lh * sz.width / std::max(1.0f, sz.height);
+            const float cx = (house.left + house.right) * 0.5f;
+            rd_.DrawLogo(D2D1::RectF(cx - lw * 0.5f, hy, cx + lw * 0.5f, hy + lh), 1.0f);
+            hy += lh + 8;
+        }
+        rd_.Text(L"Lucius", D2D1::RectF(house.left, hy, house.right, hy + 28), rd_.fPhase.Get(), col::text,
+                 DWRITE_TEXT_ALIGNMENT_CENTER);
+        hy += 28;
+        rd_.Text(L"Lucius & Wayne Systems publishes Synchronus.",
+                 D2D1::RectF(house.left + 16, hy, house.right - 16, hy + 20), rd_.fSmall.Get(), col::muted,
+                 DWRITE_TEXT_ALIGNMENT_CENTER);
+        hy += 28;
+        const D2D1_RECT_F site =
+            D2D1::RectF((house.left + house.right) * 0.5f - 150, hy, (house.left + house.right) * 0.5f + 150, hy + 30);
+        if (site.bottom < house.bottom - 8 &&
+            Button(264, site, L"luciuswayne.com", col::cyan, true, true, dt, false, false, rd_.fSmall.Get()))
+            OpenUrl(L"https://luciuswayne.com");
+    }
+
+    void DrawHome(const D2D1_RECT_F& outer, float dt, bool live) {
         aggHistRect_ = {};
-        const D2D1_RECT_F tabHome = D2D1::RectF(outer.left, outer.top, outer.left + 128, outer.top + 30);
-        const D2D1_RECT_F tabAgg = D2D1::RectF(outer.left + 136, outer.top, outer.left + 292, outer.top + 30);
+        const D2D1_RECT_F tabHome = D2D1::RectF(outer.left, outer.top, outer.left + 108, outer.top + 30);
+        const D2D1_RECT_F tabAgg = D2D1::RectF(outer.left + 116, outer.top, outer.left + 252, outer.top + 30);
+        const D2D1_RECT_F tabAbout = D2D1::RectF(outer.left + 260, outer.top, outer.left + 368, outer.top + 30);
         if (Button(240, tabHome, L"Home", col::cyan, homeTab_ == 0, true, dt, false, false, rd_.fSmall.Get())) homeTab_ = 0;
         if (Button(241, tabAgg, L"Aggregate", col::cyan, homeTab_ == 1, true, dt, false, false, rd_.fSmall.Get()))
             homeTab_ = 1;
-        if (homeTab_ == 1) {
-            DrawAggregate(D2D1::RectF(outer.left, outer.top + 38, outer.right, outer.bottom), dt);
+        if (Button(242, tabAbout, L"About", col::cyan, homeTab_ == 2, true, dt, false, false, rd_.fSmall.Get()))
+            homeTab_ = 2;
+        const D2D1_RECT_F page = D2D1::RectF(outer.left, outer.top + 38, outer.right, outer.bottom);
+        if (!live) {
+            if (homeTab_ == 1) DrawAggregate(page, dt);
+            else if (homeTab_ == 2) DrawAbout(page, dt);
+            else DrawHomeTools(page, dt);
             return;
         }
-        const D2D1_RECT_F B = D2D1::RectF(outer.left, outer.top + 38, outer.right, outer.bottom);
+        if (homeTab_ != shownHomeTab_) {
+            tabFrom_ = shownHomeTab_;
+            shownHomeTab_ = homeTab_;
+            tabT_ = 0;
+            tabDir_ = homeTab_ >= tabFrom_ ? 1.0f : -1.0f;
+        }
+        if (tabT_ < 1.0f) tabT_ = std::min(1.0f, tabT_ + dt / 0.48f);
+        auto pageOf = [&](int tab) {
+            if (tab == 1) DrawAggregate(page, dt);
+            else if (tab == 2) DrawAbout(page, dt);
+            else DrawHomeTools(page, dt);
+        };
+        if (tabT_ < 1.0f && tabFrom_ != shownHomeTab_) {
+            const float e = EaseOutCubic(tabT_);
+            const bool savedClick = clickPending_;
+            const bool savedEnter = enterPending_;
+            clickPending_ = false;
+            enterPending_ = false;
+            rd_.Motion(page, -tabDir_ * 72.0f * e, 12.0f * e, (1.0f - e) * (1.0f - e), [&] { pageOf(tabFrom_); });
+            clickPending_ = savedClick;
+            enterPending_ = savedEnter;
+            rd_.Motion(page, 0, 10.0f * (1.0f - e), e, [&] { pageOf(shownHomeTab_); });
+            const float sweep = page.left + (W(page) + 90.0f) * e - 90.0f;
+            rd_.Fill(D2D1::RectF(sweep, page.top, sweep + 70.0f, page.bottom), Alpha(col::cyan, 0.045f * (1.0f - e)));
+            return;
+        }
+        pageOf(shownHomeTab_);
+    }
+
+    void DrawHomeTools(const D2D1_RECT_F& B, float dt) {
         const float gap = 14.0f;
         float leftW = std::floor(W(B) * 0.30f);
         float rightW = std::floor(W(B) * 0.42f);
@@ -6632,6 +6836,16 @@ private:
     std::atomic<bool> updateStop_{false};
     std::atomic<bool> relaunch_{false};
     int homeTab_ = 0;
+    int shownHomeTab_ = 0;
+    int tabFrom_ = 0;
+    float tabT_ = 1;
+    float tabDir_ = 1;
+    bool paneInit_ = false;
+    Stage paneStage_ = Stage::Welcome;
+    Stage paneFrom_ = Stage::Welcome;
+    float paneT_ = 1;
+    float paneDir_ = 1;
+    bool paneVertical_ = false;
     int aggregateScroll_ = 0;
     int aggregateMaxScroll_ = 0;
     int aggSort_ = 0;
