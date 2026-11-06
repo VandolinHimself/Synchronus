@@ -610,6 +610,7 @@ public:
         logo_.Reset();
         mark_.Reset();
         brand_.Reset();
+        fadeLayer_.Reset();
         context_.Reset();
         device_.Reset();
     }
@@ -768,6 +769,31 @@ public:
 
     void Clip(const D2D1_RECT_F& r) { dc_->PushAxisAlignedClip(r, D2D1_ANTIALIAS_MODE_PER_PRIMITIVE); }
     void Unclip() { dc_->PopAxisAlignedClip(); }
+
+    // Slides and fades a pane without leaving the clip. Opacity uses a layer so the
+    // outgoing pane can pass under the one that is arriving.
+    template <typename DrawFn>
+    void Motion(const D2D1_RECT_F& clip, float dx, float dy, float opacity, DrawFn&& draw) {
+        if (opacity <= 0.02f) return;
+        dc_->PushAxisAlignedClip(clip, D2D1_ANTIALIAS_MODE_PER_PRIMITIVE);
+        D2D1_MATRIX_3X2_F old{};
+        dc_->GetTransform(&old);
+        dc_->SetTransform(D2D1::Matrix3x2F::Translation(dx, dy) * old);
+        bool layered = false;
+        if (opacity < 0.985f) {
+            if (!fadeLayer_) dc_->CreateLayer(&fadeLayer_);
+            if (fadeLayer_) {
+                dc_->PushLayer(D2D1::LayerParameters(D2D1::InfiniteRect(), nullptr, D2D1_ANTIALIAS_MODE_PER_PRIMITIVE,
+                                                     D2D1::IdentityMatrix(), Clamp01(opacity)),
+                               fadeLayer_.Get());
+                layered = true;
+            }
+        }
+        draw();
+        if (layered) dc_->PopLayer();
+        dc_->SetTransform(old);
+        dc_->PopAxisAlignedClip();
+    }
 
     // ---- text ----
     void Text(const std::wstring& s, const D2D1_RECT_F& r, IDWriteTextFormat* f, D2D1_COLOR_F c,
@@ -1311,6 +1337,7 @@ float4 ps(VSOut i) : SV_TARGET {
     ComPtr<IDXGISwapChain1> swapChain_;
     ComPtr<ID2D1Factory1> d2dFactory_;
     ComPtr<ID2D1DeviceContext> dc_;
+    ComPtr<ID2D1Layer> fadeLayer_;
     ComPtr<ID2D1Bitmap1> target_;
     ComPtr<IDWriteFactory> dwrite_;
     ComPtr<IDWriteInMemoryFontFileLoader> fontLoader_;
@@ -5170,7 +5197,8 @@ private:
                  rd_.fSmall.Get(), col::cyan);
         rd_.Text(L"Cyan is the aggregate score. Violet is the newest run.",
                  D2D1::RectF(curve.left + 12, curve.top + 28, curve.right - 12, curve.top + 46), rd_.fMonoSmall.Get(), col::dim);
-        DrawScoreCurve(D2D1::RectF(curve.left + 8, curve.top + 50, curve.right - 8, curve.bottom - 8), true);
+        const float scoreBand = 28.0f;
+        DrawScoreCurve(D2D1::RectF(curve.left + 8, curve.top + 50, curve.right - 8, curve.bottom - 8 - scoreBand), true);
         if (!aggregate_.points.empty()) {
             const AggregatePoint* best = &aggregate_.points.front();
             for (const auto& p : aggregate_.points) {
@@ -5178,8 +5206,8 @@ private:
             }
             rd_.Text(Fmt(L"Lowest aggregate score  %.4f ms at %.4f ms   weight %.0f", best->score, best->requested / 10000.0,
                          best->scoreWeight),
-                     D2D1::RectF(curve.left + 12, curve.bottom - 28, curve.right - 12, curve.bottom - 8), rd_.fMonoSmall.Get(),
-                     col::green);
+                     D2D1::RectF(curve.left + 12, curve.bottom - scoreBand, curve.right - 12, curve.bottom - 6),
+                     rd_.fMonoSmall.Get(), col::green, DWRITE_TEXT_ALIGNMENT_LEADING, DWRITE_PARAGRAPH_ALIGNMENT_CENTER);
         }
 
         rd_.FillRound(list, 14, Alpha(col::panel, 0.9f));
