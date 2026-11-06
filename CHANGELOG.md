@@ -1,6 +1,11 @@
 # Changelog
 
-Current release: **2.10.1**.
+Current release: **2.10.2**.
+
+## 2.10.2 — 2026-11-05
+
+- Stop no longer sits on the CPU step counter during a full tune, or on the same counter in the other step panes.
+- The title, the home mark, and the step line in the header stay in their own columns. Prompt text stops above its buttons, and a step's name no longer runs through the value beside it.
 
 ## 2.10.1 — 2026-11-05
 

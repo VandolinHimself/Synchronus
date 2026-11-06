@@ -2969,29 +2969,30 @@ private:
         rd_.FillRound(pane, 14, Alpha(col::panel, 0.9f));
         rd_.StrokeRound(pane, 14, Alpha(col::cyan, 0.28f), 1.2f);
         const wchar_t* title = kind == 2 ? L"Afterburner" : JobLabel(id);
-        rd_.Text(title, D2D1::RectF(pane.left + 14, pane.top + 10, pane.right - 100, pane.top + 36), rd_.fPhase.Get(),
-                 col::cyan);
+        const D2D1_RECT_F stopR = D2D1::RectF(pane.right - 84, pane.top + 8, pane.right - 12, pane.top + 34);
+        rd_.Text(title, D2D1::RectF(pane.left + 14, pane.top + 8, stopR.left - 10, pane.top + 34), rd_.fPhase.Get(),
+                 col::cyan, DWRITE_TEXT_ALIGNMENT_LEADING, DWRITE_PARAGRAPH_ALIGNMENT_CENTER);
         if (kind == 0 && JobBusy(id)) {
-            if (Button(idBase, D2D1::RectF(pane.right - 86, pane.top + 10, pane.right - 12, pane.top + 36), L"Stop",
-                       col::red, false, true, dt))
-                CancelJob(id);
+            if (Button(idBase, stopR, L"Stop", col::red, false, true, dt)) CancelJob(id);
             Snapshot job;
             jobs_[static_cast<int>(id)].feed.Snap(job);
             const bool waiting = jobs_[static_cast<int>(id)].phase.load() == static_cast<int>(JobPhase::Waiting);
-            rd_.Text(waiting ? L"Waiting" : L"Running",
-                     D2D1::RectF(pane.left + 14, pane.top + 38, pane.right - 14, pane.top + 58), rd_.fSmall.Get(),
-                     waiting ? col::amber : col::text);
             const int activePpm = FleetActivePpmStep(job.ppm);
             const int ppmCount = static_cast<int>(job.ppm.size());
-            if (ppmCount > 0) {
-                rd_.Text(Fmt(L"%d / %d", (activePpm >= 0 ? activePpm + 1 : ppmCount), ppmCount),
-                         D2D1::RectF(pane.right - 72, pane.top + 38, pane.right - 14, pane.top + 58), rd_.fMonoSmall.Get(),
-                         col::dim, DWRITE_TEXT_ALIGNMENT_TRAILING);
-            } else if (job.progress > 0.001) {
-                rd_.Text(Fmt(L"%d%%", static_cast<int>(std::lround(job.progress * 100.0))),
-                         D2D1::RectF(pane.right - 52, pane.top + 38, pane.right - 14, pane.top + 58), rd_.fMonoSmall.Get(),
-                         col::dim, DWRITE_TEXT_ALIGNMENT_TRAILING);
-            }
+            std::wstring count;
+            if (ppmCount > 0) count = Fmt(L"%d / %d", (activePpm >= 0 ? activePpm + 1 : ppmCount), ppmCount);
+            else if (job.progress > 0.001) count = Fmt(L"%d%%", static_cast<int>(std::lround(job.progress * 100.0)));
+            const float countW = count.empty() ? 0.0f : 72.0f;
+            const D2D1_RECT_F countR =
+                D2D1::RectF(pane.right - 12 - countW, pane.top + 40, pane.right - 12, pane.top + 58);
+            const float statusRight = count.empty() ? pane.right - 14 : countR.left - 8;
+            rd_.Text(waiting ? L"Waiting" : L"Running",
+                     D2D1::RectF(pane.left + 14, pane.top + 40, std::min(pane.left + 92, statusRight), pane.top + 58),
+                     rd_.fSmall.Get(), waiting ? col::amber : col::text, DWRITE_TEXT_ALIGNMENT_LEADING,
+                     DWRITE_PARAGRAPH_ALIGNMENT_CENTER);
+            if (!count.empty())
+                rd_.Text(count, countR, rd_.fMonoSmall.Get(), col::dim, DWRITE_TEXT_ALIGNMENT_TRAILING,
+                         DWRITE_PARAGRAPH_ALIGNMENT_CENTER);
 
             std::wstring work = job.detail;
             if (work.empty() && activePpm >= 0 && activePpm < ppmCount) work = job.ppm[static_cast<size_t>(activePpm)].title;
@@ -3015,13 +3016,13 @@ private:
             const float barTop = pane.bottom - 14.0f - etaH;
             const D2D1_RECT_F bar = D2D1::RectF(pane.left + 14, barTop, pane.right - 14, barTop + 8.0f);
             if (id == JobId::Measure) {
-                if (job.sweep.pass > 0 && job.sweep.passes > 0) {
-                    rd_.Text(sub, D2D1::RectF(pane.left + 96, pane.top + 38, pane.right - 64, pane.top + 58),
+                if (job.sweep.pass > 0 && job.sweep.passes > 0 && statusRight > pane.left + 108) {
+                    rd_.Text(sub, D2D1::RectF(pane.left + 100, pane.top + 40, statusRight, pane.top + 58),
                              rd_.fMonoSmall.Get(), col::dim, DWRITE_TEXT_ALIGNMENT_LEADING,
                              DWRITE_PARAGRAPH_ALIGNMENT_CENTER);
                 }
-                const float vizBottom = (!waiting && job.remaining > 0.5) ? barTop - 16.0f : barTop - 8.0f;
-                const D2D1_RECT_F viz = D2D1::RectF(pane.left + 10, pane.top + 64, pane.right - 10, vizBottom);
+                const float vizBottom = (!waiting && job.remaining > 0.5) ? barTop - 20.0f : barTop - 10.0f;
+                const D2D1_RECT_F viz = D2D1::RectF(pane.left + 10, pane.top + 66, pane.right - 10, vizBottom);
                 if (H(viz) >= 48.0f && W(viz) >= 80.0f) DrawFleetMeasureViz(viz, dt, !waiting);
                 else if (!work.empty() && viz.bottom > viz.top)
                     rd_.Text(work, viz, rd_.fSmall.Get(), col::text);
@@ -3033,8 +3034,8 @@ private:
                 DrawFleetProgressBar(bar, FleetJobFraction(job), waiting);
                 return;
             }
-            const float floorY = barTop - 8.0f;
-            float cursor = pane.top + 58.0f;
+            const float floorY = barTop - (etaH > 0.0f ? 22.0f : 10.0f);
+            float cursor = pane.top + 66.0f;
             if (!work.empty() && cursor + 18.0f < floorY) {
                 const float workH = std::min(40.0f, floorY - cursor);
                 rd_.Text(work, D2D1::RectF(pane.left + 14, cursor, pane.right - 14, cursor + workH), rd_.fSmall.Get(),
@@ -3094,12 +3095,13 @@ private:
             DrawFleetProgressBar(bar, FleetJobFraction(job), waiting);
             return;
         }
+        const float buttonTop = pane.bottom - 44.0f;
         if (kind == 3) {
             rd_.Text(L"The restore point did not finish. Nothing else has been changed.",
-                     D2D1::RectF(pane.left + 14, pane.top + 44, pane.right - 14, pane.bottom - 52), rd_.fBody.Get(),
+                     D2D1::RectF(pane.left + 14, pane.top + 44, pane.right - 14, buttonTop - 8), rd_.fBody.Get(),
                      col::muted);
-            const D2D1_RECT_F yes = D2D1::RectF(pane.left + 14, pane.bottom - 40, pane.left + W(pane) * 0.62f, pane.bottom - 10);
-            const D2D1_RECT_F no = D2D1::RectF(yes.right + 8, pane.bottom - 40, pane.right - 12, pane.bottom - 10);
+            const D2D1_RECT_F yes = D2D1::RectF(pane.left + 14, buttonTop, pane.left + W(pane) * 0.58f, pane.bottom - 10);
+            const D2D1_RECT_F no = D2D1::RectF(yes.right + 8, buttonTop, pane.right - 12, pane.bottom - 10);
             if (Button(idBase, yes, L"Retry restore point", col::cyan, true, true, dt)) {
                 jobs_[static_cast<int>(JobId::Prepare)].phase.store(static_cast<int>(JobPhase::Idle));
             }
@@ -3121,13 +3123,17 @@ private:
                 headline = offer.error.empty() ? L"The driver step failed." : offer.error;
             else if (!offer.gpuName.empty())
                 headline = offer.gpuName;
-            rd_.Text(headline, D2D1::RectF(pane.left + 14, pane.top + 40, pane.right - 14, pane.top + 88), rd_.fSmall.Get(),
-                     col::text);
-            std::wstring sub = offer.version.empty() ? L"Installs the graphics driver only." : offer.version;
-            rd_.Text(sub, D2D1::RectF(pane.left + 14, pane.top + 90, pane.right - 14, pane.bottom - 48), rd_.fBody.Get(),
-                     col::muted);
-            const D2D1_RECT_F yes = D2D1::RectF(pane.left + 14, pane.bottom - 40, pane.left + W(pane) * 0.62f, pane.bottom - 10);
-            const D2D1_RECT_F no = D2D1::RectF(yes.right + 8, pane.bottom - 40, pane.right - 12, pane.bottom - 10);
+            const float textFloor = buttonTop - 8.0f;
+            if (textFloor > pane.top + 44) {
+                rd_.Text(headline, D2D1::RectF(pane.left + 14, pane.top + 44, pane.right - 14, std::min(pane.top + 86, textFloor)),
+                         rd_.fSmall.Get(), col::text);
+                std::wstring sub = offer.version.empty() ? L"Installs the graphics driver only." : offer.version;
+                if (pane.top + 90 < textFloor)
+                    rd_.Text(sub, D2D1::RectF(pane.left + 14, pane.top + 90, pane.right - 14, textFloor), rd_.fBody.Get(),
+                             col::muted);
+            }
+            const D2D1_RECT_F yes = D2D1::RectF(pane.left + 14, buttonTop, pane.left + W(pane) * 0.58f, pane.bottom - 10);
+            const D2D1_RECT_F no = D2D1::RectF(yes.right + 8, buttonTop, pane.right - 12, pane.bottom - 10);
             if (phase == GpuDl::Offer && offer.canDownload) {
                 if (Button(idBase, yes, L"Download driver", col::cyan, true, true, dt)) BeginGpuDownload();
             } else if (phase == GpuDl::Ready) {
@@ -3145,9 +3151,9 @@ private:
             return;
         }
         rd_.Text(L"Afterburner downloads, scans the GPU, applies the curve, and saves it for the next startup. This takes about 30 minutes.",
-                 D2D1::RectF(pane.left + 14, pane.top + 44, pane.right - 14, pane.bottom - 52), rd_.fBody.Get(), col::muted);
-        const D2D1_RECT_F yes = D2D1::RectF(pane.left + 14, pane.bottom - 40, pane.left + W(pane) * 0.62f, pane.bottom - 10);
-        const D2D1_RECT_F no = D2D1::RectF(yes.right + 8, pane.bottom - 40, pane.right - 12, pane.bottom - 10);
+                 D2D1::RectF(pane.left + 14, pane.top + 44, pane.right - 14, buttonTop - 8), rd_.fBody.Get(), col::muted);
+        const D2D1_RECT_F yes = D2D1::RectF(pane.left + 14, buttonTop, pane.left + W(pane) * 0.58f, pane.bottom - 10);
+        const D2D1_RECT_F no = D2D1::RectF(yes.right + 8, buttonTop, pane.right - 12, pane.bottom - 10);
         if (Button(idBase, yes, L"Start Afterburner", col::violet, true, true, dt)) {
             afterburnerPrompt_ = false;
             StartAfterburner(false);
@@ -3766,17 +3772,7 @@ private:
         grad->SetStartPoint(D2D1::Point2F(textLeft, r.top));
         grad->SetEndPoint(D2D1::Point2F(textLeft + 420, r.top));
         grad->SetOpacity(1);
-        rd_.TextBrush(L"SYNCHRONUS", D2D1::RectF(textLeft, r.top, textLeft + 560, r.top + 32), rd_.fTitle.Get(),
-                      grad);
-        rd_.Text(L"Lucius & Wayne Systems  |  luciuswayne.com",
-                 D2D1::RectF(textLeft, r.top + 32, textLeft + 560, r.top + 50), rd_.fSmall.Get(), col::cyan);
         const StepMeta meta = Meta(stage);
-        rd_.Text((meta.number || stage == Stage::Home || stage == Stage::Monitor)
-                     ? Fmt(L"%s - %s | v%s", meta.name, meta.title, host_.version.c_str())
-                     : Fmt(L"Synchronus | v%s", host_.version.c_str()),
-                 D2D1::RectF(textLeft, r.top + 50, textLeft + 560, r.top + 68), rd_.fSub.Get(), col::muted);
-
-        // phase, right aligned
         const std::wstring phase = snap_.phase.empty() ? Upper(std::wstring(meta.name)) : snap_.phase;
         D2D1_COLOR_F phaseColor = col::cyan;
         if (stage == Stage::Result || stage == Stage::Installed || stage == Stage::PpmDone || stage == Stage::GpuDone ||
@@ -3800,9 +3796,11 @@ private:
             phaseColor = col::violet;
         const float pulse = 0.75f + 0.25f * std::sin(time_ * 3.0f);
         const float hcx = (r.left + r.right) * 0.5f;
-        const float half = std::min(270.0f, W(r) * 0.22f);
+        const float homeHalf = std::min(86.0f, std::max(48.0f, W(r) * 0.10f));
+        const float homeLeft = hcx - homeHalf;
+        const float homeRight = hcx + homeHalf;
         if (stage != Stage::Home &&
-            DrawEtchedHome(D2D1::RectF(hcx - half, r.top, hcx + half, r.bottom), dt))
+            DrawEtchedHome(D2D1::RectF(homeLeft, r.top + 6, homeRight, r.bottom - 6), dt))
             OpenHome();
         const float side = 26.0f;
         const D2D1_RECT_F settingsR = D2D1::RectF(r.right - side, r.top, r.right, r.top + side);
@@ -3810,7 +3808,18 @@ private:
             settingsOpen_ = !settingsOpen_;
             if (settingsOpen_) settingsScroll_ = 0;
         }
-        const D2D1_RECT_F pr = D2D1::RectF(r.left + 420, r.top + 2, settingsR.left - 10.0f, r.top + 26);
+        const float leftLimit = homeLeft - 12.0f;
+        rd_.TextBrush(L"SYNCHRONUS", D2D1::RectF(textLeft, r.top, std::min(textLeft + 560.0f, leftLimit), r.top + 32),
+                      rd_.fTitle.Get(), grad);
+        rd_.Text(L"Lucius & Wayne Systems  |  luciuswayne.com",
+                 D2D1::RectF(textLeft, r.top + 32, std::min(textLeft + 560.0f, leftLimit), r.top + 50), rd_.fSmall.Get(),
+                 col::cyan);
+        rd_.Text((meta.number || stage == Stage::Home || stage == Stage::Monitor)
+                     ? Fmt(L"%s - %s | v%s", meta.name, meta.title, host_.version.c_str())
+                     : Fmt(L"Synchronus | v%s", host_.version.c_str()),
+                 D2D1::RectF(textLeft, r.top + 50, std::min(textLeft + 560.0f, leftLimit), r.top + 68), rd_.fSub.Get(),
+                 col::muted);
+        const D2D1_RECT_F pr = D2D1::RectF(homeRight + 12.0f, r.top + 2, settingsR.left - 8.0f, r.top + 26);
         rd_.Text(meta.number ? Fmt(L"STEP %d OF %d  |  %s", meta.number, kStepCount, Upper(phase).c_str())
                              : Upper(phase),
                  pr, rd_.fPhase.Get(), Alpha(phaseColor, stage == Stage::Running ? pulse : 1.0f),
@@ -3821,7 +3830,7 @@ private:
             detail += Fmt(L"   elapsed %s", Duration(snap_.elapsed).c_str());
             if (snap_.remaining > 0) detail += Fmt(L"  |  remaining ~%s", Duration(snap_.remaining).c_str());
         }
-        rd_.Text(detail, D2D1::RectF(r.left + 420, r.top + 28, r.right, r.top + 48), rd_.fSmall.Get(), col::muted,
+        rd_.Text(detail, D2D1::RectF(homeRight + 12.0f, r.top + 28, r.right - 8, r.top + 48), rd_.fSmall.Get(), col::muted,
                  DWRITE_TEXT_ALIGNMENT_TRAILING);
 
         // progress bar
@@ -6032,7 +6041,7 @@ private:
                                                     : snap_.narrateTitle,
                          D2D1::RectF(B.left + 42, B.top + 8, B.right - 8, B.top + 32), rd_.fPhase.Get(), col::text);
                 rd_.Text(snap_.narrateBody.empty() ? snap_.detail : snap_.narrateBody,
-                         D2D1::RectF(B.left + 8, B.top + 36, B.right - 8, B.bottom - (snap_.hasBaseline ? 64 : 44)),
+                         D2D1::RectF(B.left + 8, B.top + 36, B.right - 8, B.bottom - (snap_.hasBaseline ? 72 : 52)),
                          rd_.fBody.Get(), col::muted);
                 if (snap_.hasBaseline) {
                     rd_.Text(Fmt(L"untuned Sleep(1) overshoots by %+.2f ms  -  default ~15.6 ms clock",
@@ -6474,8 +6483,8 @@ private:
         const D2D1_COLOR_F accent = offer.vendor == 2 ? col::red : (offer.vendor == 1 ? col::green : col::cyan);
         const bool busy = phase == GpuDl::Looking || phase == GpuDl::Downloading || phase == GpuDl::Installing;
         if (busy) rd_.Arc(D2D1::Point2F(B.left + 18, B.top + 18), 7, spinner_, spinner_ + 1.7f, col::cyan, 2.0f);
-        rd_.Text(L"GPU Clean", D2D1::RectF(B.left, B.top + 6, B.right, B.top + 28), rd_.fPhase.Get(), col::violet,
-                 DWRITE_TEXT_ALIGNMENT_CENTER);
+        rd_.Text(L"GPU Clean", D2D1::RectF(busy ? B.left + 34 : B.left, B.top + 6, B.right, B.top + 28), rd_.fPhase.Get(),
+                 col::violet, DWRITE_TEXT_ALIGNMENT_CENTER);
 
         std::wstring headline = L"Looking up the current driver";
         if (phase == GpuDl::Offer || phase == GpuDl::Ready || phase == GpuDl::Done || phase == GpuDl::Failed ||
@@ -6659,11 +6668,13 @@ private:
         (void)dt;
         const bool skipped = gpu && gpuSkipped_;
         const StepMeta meta = Meta(stage_.load());
+        const D2D1_RECT_F stopR = D2D1::RectF(B.right - 86, B.top + 6, B.right - 8, B.top + 32);
+        const float titleRight = done ? B.right - 8 : stopR.left - 10;
         rd_.Text(done ? (skipped ? Fmt(L"%s skipped", meta.name).c_str() : Fmt(L"%s applied", meta.name).c_str())
                       : meta.title,
-                 D2D1::RectF(B.left + 8, B.top + 6, B.right - 110, B.top + 28), rd_.fPhase.Get(),
-                 done ? col::green : col::amber, DWRITE_TEXT_ALIGNMENT_CENTER);
-        if (!done && Button(8, D2D1::RectF(B.right - 96, B.top + 4, B.right - 8, B.top + 30), L"Stop", col::red, false, true, dt)) {
+                 D2D1::RectF(B.left + 8, B.top + 6, titleRight, B.top + 32), rd_.fPhase.Get(),
+                 done ? col::green : col::amber, DWRITE_TEXT_ALIGNMENT_LEADING, DWRITE_PARAGRAPH_ALIGNMENT_CENTER);
+        if (!done && Button(8, stopR, L"Stop", col::red, false, true, dt)) {
             CancelJob(StageJob(stage_.load()));
         }
         const wchar_t* progressLine = L"Writing settings.";
@@ -6672,34 +6683,41 @@ private:
         if (done && stage_.load() == Stage::AfterburnerDone && afterburnerStale_.load()) {
             doneLine = L"Complete. A later driver install may have cleared the curve. Run this step again if the overclock is gone.";
         }
-        rd_.Text(done ? doneLine.c_str() : progressLine,
-                 D2D1::RectF(B.left + 8, B.top + 28, B.right - 8, B.top + 48), rd_.fSmall.Get(), col::muted,
-                 DWRITE_TEXT_ALIGNMENT_CENTER);
-
         const auto& steps = snap_.ppm;
-        if (steps.empty()) {
-            rd_.Text(snap_.narrateBody.empty() ? L"Preparing\u2026" : snap_.narrateBody,
-                     D2D1::RectF(B.left + 8, B.top + 56, B.right - 8, B.bottom - 8), rd_.fBody.Get(), col::muted);
-            return;
-        }
-
         int active = -1;
-        for (size_t i = 0; i < steps.size(); ++i) {
-            if (steps[i].status == 1) active = static_cast<int>(i);
-        }
-        if (active < 0) {
-            for (int i = static_cast<int>(steps.size()) - 1; i >= 0; --i) {
-                if (steps[static_cast<size_t>(i)].status == 2 || steps[static_cast<size_t>(i)].status == 3) {
-                    active = i;
-                    break;
+        if (!steps.empty()) {
+            for (size_t i = 0; i < steps.size(); ++i) {
+                if (steps[i].status == 1) active = static_cast<int>(i);
+            }
+            if (active < 0) {
+                for (int i = static_cast<int>(steps.size()) - 1; i >= 0; --i) {
+                    if (steps[static_cast<size_t>(i)].status == 2 || steps[static_cast<size_t>(i)].status == 3) {
+                        active = i;
+                        break;
+                    }
                 }
             }
         }
-
-        const float listTop = B.top + 52;
-        const float listBottom = done ? B.bottom - (restartConfirm_ ? 72.0f : 48.0f) : B.bottom - 86;
-        const int visible = std::max(1, static_cast<int>((listBottom - listTop) / 18.0f));
         const int n = static_cast<int>(steps.size());
+        const bool showCount = n > 0;
+        const D2D1_RECT_F countR = D2D1::RectF(B.right - 78, B.top + 36, B.right - 8, B.top + 54);
+        rd_.Text(done ? doneLine.c_str() : progressLine,
+                 D2D1::RectF(B.left + 8, B.top + 36, showCount ? countR.left - 8 : B.right - 8, B.top + 54), rd_.fSmall.Get(),
+                 col::muted, DWRITE_TEXT_ALIGNMENT_LEADING, DWRITE_PARAGRAPH_ALIGNMENT_CENTER);
+        if (showCount) {
+            rd_.Text(Fmt(L"%d / %d", (active >= 0 ? active + 1 : n), n), countR, rd_.fMonoSmall.Get(), col::dim,
+                     DWRITE_TEXT_ALIGNMENT_TRAILING, DWRITE_PARAGRAPH_ALIGNMENT_CENTER);
+        }
+
+        if (steps.empty()) {
+            rd_.Text(snap_.narrateBody.empty() ? L"Preparing\u2026" : snap_.narrateBody,
+                     D2D1::RectF(B.left + 8, B.top + 60, B.right - 8, B.bottom - 8), rd_.fBody.Get(), col::muted);
+            return;
+        }
+
+        const float listTop = B.top + 60;
+        const float listBottom = done ? B.bottom - (restartConfirm_ ? 76.0f : 52.0f) : B.bottom - 92;
+        const int visible = std::max(1, static_cast<int>((listBottom - listTop) / 18.0f));
         int start = 0;
         if (n > visible) {
             start = std::max(0, (active < 0 ? 0 : active) - visible / 3);
@@ -6707,10 +6725,6 @@ private:
         }
         const int end = std::min(n, start + visible);
         const float rowH = (listBottom - listTop) / std::max(1, end - start);
-
-        rd_.Text(Fmt(L"%d / %d", (active >= 0 ? active + 1 : end), n),
-                 D2D1::RectF(B.right - 80, B.top + 8, B.right - 10, B.top + 28), rd_.fMonoSmall.Get(), col::dim,
-                 DWRITE_TEXT_ALIGNMENT_TRAILING);
 
         for (int i = start; i < end; ++i) {
             const auto& s = steps[static_cast<size_t>(i)];
@@ -6728,10 +6742,11 @@ private:
                 c = col::red;
                 mark = L"\u00D7";
             }
-            rd_.Text(Fmt(L"%s  %s", mark, s.title.c_str()), D2D1::RectF(B.left + 12, y, B.left + W(B) * 0.55f, y + rowH),
+            const float split = B.left + 12 + std::max(120.0f, W(B) * 0.52f);
+            rd_.Text(Fmt(L"%s  %s", mark, s.title.c_str()), D2D1::RectF(B.left + 12, y, split - 8, y + rowH),
                      rd_.fMonoSmall.Get(), c, DWRITE_TEXT_ALIGNMENT_LEADING, DWRITE_PARAGRAPH_ALIGNMENT_CENTER);
             if (!s.change.empty()) {
-                rd_.Text(s.change, D2D1::RectF(B.left + W(B) * 0.55f, y, B.right - 12, y + rowH), rd_.fMonoSmall.Get(), c,
+                rd_.Text(s.change, D2D1::RectF(split, y, B.right - 12, y + rowH), rd_.fMonoSmall.Get(), c,
                          DWRITE_TEXT_ALIGNMENT_TRAILING, DWRITE_PARAGRAPH_ALIGNMENT_CENTER);
             }
         }
