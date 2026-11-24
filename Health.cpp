@@ -345,6 +345,7 @@ MonitorPrefs LoadMonitorPrefs() {
     std::wstring path;
     if (ReadSz(HKEY_CURRENT_USER, kMonitor, L"DriverDir", path)) p.driverDir = path;
     if (ReadSz(HKEY_CURRENT_USER, kMonitor, L"AfterburnerDir", path)) p.afterburnerDir = path;
+    if (ReadDword(HKEY_CURRENT_USER, kMonitor, L"HdrColors", v)) p.hdr = v != 0;
     return p;
 }
 
@@ -380,6 +381,7 @@ void SaveMonitorPrefs(const MonitorPrefs& prefs) {
     };
     putSz(L"DriverDir", prefs.driverDir);
     putSz(L"AfterburnerDir", prefs.afterburnerDir);
+    put(L"HdrColors", prefs.hdr ? 1 : 0);
     RegCloseKey(key);
     ApplyLaunchAtLogin(prefs.launchAtLogin);
 }

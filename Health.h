@@ -57,6 +57,7 @@ struct MonitorPrefs {
     int notifyMinutes = 30;
     std::wstring driverDir;
     std::wstring afterburnerDir;
+    bool hdr = false;
 };
 
 const wchar_t* HealthStatusText(HealthStatus status);

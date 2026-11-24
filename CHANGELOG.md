@@ -1,6 +1,11 @@
 # Changelog
 
-Current release: **2.10.2**.
+Current release: **2.10.3**.
+
+## 2.10.3 — 2026-11-24
+
+- HDR color keeps the same theme and opens it onto a wider scale: deeper panels, brighter accents, and a wider glow.
+- The HDR control stays at the bottom left of every pane. The choice is remembered.
 
 ## 2.10.2 — 2026-11-05
 

@@ -140,22 +140,60 @@ D2D1_COLOR_F MixC(D2D1_COLOR_F a, D2D1_COLOR_F b, float t) {
 }
 
 namespace col {
-const D2D1_COLOR_F bg = Rgb(0x071638);        // Midnight Navy
-const D2D1_COLOR_F panel = Rgb(0x0A1E4C);
-const D2D1_COLOR_F panel2 = Rgb(0x0C2458);
-const D2D1_COLOR_F border = Rgb(0x123A91);
-const D2D1_COLOR_F grid = Rgb(0x0C2A68);
-const D2D1_COLOR_F text = Rgb(0xF4F7FF);      // Cool White
-const D2D1_COLOR_F muted = Rgb(0x8DB8FF);     // Icy Blue
-const D2D1_COLOR_F dim = Rgb(0x4D72B8);
-const D2D1_COLOR_F cyan = Rgb(0x347BFF);      // Electric Blue (primary accent)
-const D2D1_COLOR_F teal = Rgb(0x8DB8FF);
-const D2D1_COLOR_F violet = Rgb(0x123A91);    // Blueprint
-const D2D1_COLOR_F magenta = Rgb(0x347BFF);
-const D2D1_COLOR_F amber = Rgb(0x8DB8FF);
-const D2D1_COLOR_F green = Rgb(0x8DB8FF);
-const D2D1_COLOR_F red = Rgb(0xFF8A9A);
-const D2D1_COLOR_F white = Rgb(0xF4F7FF);
+// The theme is midnight navy, blueprint, electric blue, icy blue, cool white,
+// and rose. HDR keeps those hues and stretches luminance around the mid gray:
+// panels go deeper, accents and type go brighter. The display values below are
+// that wider scale tone-mapped back into the window.
+D2D1_COLOR_F bg = Rgb(0x071638);
+D2D1_COLOR_F panel = Rgb(0x0A1E4C);
+D2D1_COLOR_F panel2 = Rgb(0x0C2458);
+D2D1_COLOR_F border = Rgb(0x123A91);
+D2D1_COLOR_F grid = Rgb(0x0C2A68);
+D2D1_COLOR_F text = Rgb(0xF4F7FF);
+D2D1_COLOR_F muted = Rgb(0x8DB8FF);
+D2D1_COLOR_F dim = Rgb(0x4D72B8);
+D2D1_COLOR_F cyan = Rgb(0x347BFF);
+D2D1_COLOR_F teal = Rgb(0x8DB8FF);
+D2D1_COLOR_F violet = Rgb(0x123A91);
+D2D1_COLOR_F magenta = Rgb(0x347BFF);
+D2D1_COLOR_F amber = Rgb(0x8DB8FF);
+D2D1_COLOR_F green = Rgb(0x8DB8FF);
+D2D1_COLOR_F red = Rgb(0xFF8A9A);
+D2D1_COLOR_F white = Rgb(0xF4F7FF);
+bool hdr = false;
+
+void UseHdr(bool on) {
+    hdr = on;
+    if (!on) {
+        bg = Rgb(0x071638);
+        panel = Rgb(0x0A1E4C);
+        panel2 = Rgb(0x0C2458);
+        border = Rgb(0x123A91);
+        grid = Rgb(0x0C2A68);
+        text = Rgb(0xF4F7FF);
+        muted = Rgb(0x8DB8FF);
+        dim = Rgb(0x4D72B8);
+        cyan = Rgb(0x347BFF);
+        red = Rgb(0xFF8A9A);
+    } else {
+        bg = Rgb(0x020618);
+        panel = Rgb(0x030D29);
+        panel2 = Rgb(0x041334);
+        border = Rgb(0x0C2C70);
+        grid = Rgb(0x051944);
+        text = Rgb(0xF8FAFF);
+        muted = Rgb(0x9EC7FF);
+        dim = Rgb(0x5277BB);
+        cyan = Rgb(0x3B87FF);
+        red = Rgb(0xFF9BAB);
+    }
+    teal = muted;
+    violet = border;
+    magenta = cyan;
+    amber = muted;
+    green = muted;
+    white = text;
+}
 }  // namespace col
 
 D2D1_RECT_F Inset(const D2D1_RECT_F& r, float l, float t, float rr, float b) {
@@ -544,6 +582,7 @@ public:
         if (!fTitle) CreateFormats();
 
         dc_->CreateSolidColorBrush(col::white, &brush_);
+        RebuildThemeBrushes();
         d2dFactory_->CreateStrokeStyle(
             D2D1::StrokeStyleProperties(D2D1_CAP_STYLE_ROUND, D2D1_CAP_STYLE_ROUND, D2D1_CAP_STYLE_ROUND,
                                         D2D1_LINE_JOIN_ROUND, 10.0f, D2D1_DASH_STYLE_SOLID, 0.0f),
@@ -556,17 +595,6 @@ public:
             D2D1::StrokeStyleProperties(D2D1_CAP_STYLE_ROUND, D2D1_CAP_STYLE_ROUND, D2D1_CAP_STYLE_ROUND,
                                         D2D1_LINE_JOIN_ROUND, 10.0f, D2D1_DASH_STYLE_DOT, 0.0f),
             nullptr, 0, &dot_);
-        glowCyan_ = MakeRadial(col::cyan);
-        glowMagenta_ = MakeRadial(col::magenta);
-        glowViolet_ = MakeRadial(col::violet);
-        glowAmber_ = MakeRadial(col::amber);
-        glowGreen_ = MakeRadial(col::green);
-        glowWhite_ = MakeRadial(col::white);
-        glowTeal_ = MakeRadial(col::teal);
-        glowRed_ = MakeRadial(col::red);
-        titleGrad_ = MakeLinear(col::cyan, col::muted);
-        progressGrad_ = MakeLinear(col::border, col::cyan);
-        greenGrad_ = MakeLinear(col::cyan, col::muted);
         LoadLogos();
         InitLattice();
         return true;
@@ -682,8 +710,17 @@ public:
         return glowWhite_.Get();
     }
 
-    // Soft radial glow of `radius` around p.
+    void SetHdr(bool on) {
+        col::UseHdr(on);
+        if (dc_) RebuildThemeBrushes();
+    }
+
+    // Soft radial glow of `radius` around p. HDR opens the same glow.
     void Glow(D2D1_POINT_2F p, float radius, D2D1_COLOR_F c, float opacity) {
+        if (col::hdr) {
+            radius *= 1.18f;
+            opacity *= 1.55f;
+        }
         ID2D1RadialGradientBrush* br = GlowBrush(c);
         br->SetCenter(p);
         br->SetGradientOriginOffset(D2D1::Point2F(0, 0));
@@ -873,8 +910,8 @@ public:
         context_->UpdateSubresource(histTex_.Get(), 0, nullptr, histUpload_.data(), row, 0);
         context_->UpdateSubresource(statTex_.Get(), 0, nullptr, statUpload_.data(), row, 0);
         struct {
-            float time, res, pad0, pad1;
-        } cb{time, static_cast<float>(kLatRT), 0, 0};
+            float time, res, hdr, pad1;
+        } cb{time, static_cast<float>(kLatRT), col::hdr ? 1.0f : 0.0f, 0};
         context_->UpdateSubresource(latCB_.Get(), 0, nullptr, &cb, 0, 0);
 
         const float clear[4] = {0, 0, 0, 0};
@@ -913,7 +950,7 @@ private:
         latticeReady_ = false;
         if (!device_ || !context_ || !dc_ || feature_ < D3D_FEATURE_LEVEL_10_0) return false;
         static const char* kSrc = R"lat(
-cbuffer Frame : register(b0) { float time; float res; float2 _pad; };
+cbuffer Frame : register(b0) { float time; float res; float hdr; float _pad1; };
 Texture2D histTex : register(t0);
 Texture2D statTex : register(t1);
 SamplerState samp0 : register(s0);
@@ -962,7 +999,7 @@ float4 ps(VSOut i) : SV_TARGET {
     ro = rotZ(rotX(rotY(ro, yaw), pitch), roll);
     rd = rotZ(rotX(rotY(rd, yaw), pitch), roll);
 
-    float3 bg = float3(0.012, 0.028, 0.07);
+    float3 bg = hdr > 0.5 ? float3(0.0034, 0.0076, 0.030) : float3(0.012, 0.028, 0.07);
     bg *= 1.0 - 0.35 * dot(ndc, ndc);
 
     float3 inv = 1.0 / rd;
@@ -1053,11 +1090,12 @@ float4 ps(VSOut i) : SV_TARGET {
         float4 st1 = statTex.SampleLevel(samp0, float2(uv.x, 0.75), 0);
         float n = h.r;
 
-        // App palette: Blueprint #123A91, Electric #347BFF, Icy #8DB8FF, Cool White #F4F7FF.
-        const float3 blueprint = float3(0.071, 0.227, 0.569);
-        const float3 electric = float3(0.204, 0.482, 1.0);
-        const float3 icy = float3(0.553, 0.722, 1.0);
-        const float3 cool = float3(0.957, 0.969, 1.0);
+        // Same hues. HDR is the wider scale: Blueprint #0C2C70, Electric #3B87FF,
+        // Icy #9EC7FF, Cool White #F8FAFF. Off: #123A91, #347BFF, #8DB8FF, #F4F7FF.
+        const float3 blueprint = hdr > 0.5 ? float3(0.047, 0.173, 0.439) : float3(0.071, 0.227, 0.569);
+        const float3 electric = hdr > 0.5 ? float3(0.231, 0.529, 1.0) : float3(0.204, 0.482, 1.0);
+        const float3 icy = hdr > 0.5 ? float3(0.620, 0.780, 1.0) : float3(0.553, 0.722, 1.0);
+        const float3 cool = hdr > 0.5 ? float3(0.973, 0.980, 1.0) : float3(0.957, 0.969, 1.0);
 
         if (st1.z > 0.5) {
             float dLoop = abs(y01 - st0.x);
@@ -1320,6 +1358,20 @@ float4 ps(VSOut i) : SV_TARGET {
         brand_ = LoadPngResource(L"BRAND_PNG");
         if (!mark_) mark_ = brand_ ? brand_ : logo_;
         if (!brand_) brand_ = mark_;
+    }
+
+    void RebuildThemeBrushes() {
+        glowCyan_ = MakeRadial(col::cyan);
+        glowMagenta_ = MakeRadial(col::magenta);
+        glowViolet_ = MakeRadial(col::violet);
+        glowAmber_ = MakeRadial(col::amber);
+        glowGreen_ = MakeRadial(col::green);
+        glowWhite_ = MakeRadial(col::white);
+        glowTeal_ = MakeRadial(col::teal);
+        glowRed_ = MakeRadial(col::red);
+        titleGrad_ = MakeLinear(col::cyan, col::muted);
+        progressGrad_ = MakeLinear(col::border, col::cyan);
+        greenGrad_ = MakeLinear(col::cyan, col::muted);
     }
 
     ComPtr<ID2D1RadialGradientBrush> MakeRadial(D2D1_COLOR_F c) {
@@ -1641,6 +1693,7 @@ public:
             return 1;
         }
         prefs_ = LoadMonitorPrefs();
+        rd_.SetHdr(prefs_.hdr);
         SetDriverStoreDir(prefs_.driverDir);
         SetAfterburnerRoot(prefs_.afterburnerDir);
         nextUpdateAt_ = GetTickCount64() +
@@ -3423,6 +3476,7 @@ private:
         const D2D1_RECT_F header = D2D1::RectF(pad, pad, w - pad, pad + 78);
         const D2D1_RECT_F bar = D2D1::RectF(pad, header.bottom + 8, w - pad, header.bottom + 14);
         const D2D1_RECT_F footer = D2D1::RectF(pad, h - pad - 28, w - pad, h - pad);
+        hdrToggleRect_ = HdrToggleRect(footer);
         const D2D1_RECT_F body = D2D1::RectF(pad, bar.bottom + 14, w - pad, footer.top - 10);
         if (stage == Stage::Fleet) {
             PumpFleet(FleetCapacity(W(body), H(body)));
@@ -3516,6 +3570,7 @@ private:
             enterPending_ = savedEnter;
             DrawSettings(w, h, dt, wasSettings);
         }
+        DrawHdrToggle(footer, dt);
         if (!rd_.End()) rd_.Release();
         if (pendingBrowse_ != 0) {
             const int which = pendingBrowse_;
@@ -3622,7 +3677,7 @@ private:
         const float left = (w - pw) * 0.5f;
         const float top = (h - ph) * 0.5f;
         const D2D1_RECT_F win = D2D1::RectF(left, top, left + pw, top + ph);
-        if (interactive && clickPending_ && !PtIn(clickPos_, win)) {
+        if (interactive && clickPending_ && !PtIn(clickPos_, win) && !PtIn(clickPos_, hdrToggleRect_)) {
             settingsOpen_ = false;
             return;
         }
@@ -6785,8 +6840,51 @@ private:
             pg->SetOpacity(1);
             rd_.Dc()->FillRoundedRectangle(D2D1::RoundedRect(D2D1::RectF(track.left, track.top, fx, track.bottom), 3, 3), pg);
         }
-        rd_.Text(last, D2D1::RectF(r.left, r.top, track.left - 16, r.bottom), rd_.fMonoSmall.Get(), col::muted,
+        const float textLeft = r.left + 76.0f;
+        const float textRight = std::max(textLeft + 8.0f, track.left - 16.0f);
+        rd_.Text(last, D2D1::RectF(textLeft, r.top, textRight, r.bottom), rd_.fMonoSmall.Get(), col::muted,
                  DWRITE_TEXT_ALIGNMENT_LEADING, DWRITE_PARAGRAPH_ALIGNMENT_CENTER);
+    }
+
+    D2D1_RECT_F HdrToggleRect(const D2D1_RECT_F& footer) const {
+        const float cy = (footer.top + footer.bottom) * 0.5f;
+        return D2D1::RectF(footer.left, cy - 11.0f, footer.left + 64.0f, cy + 11.0f);
+    }
+
+    // Bottom-left of every pane. The choice is one setting, so the control stays put
+    // while the pane behind it changes.
+    void DrawHdrToggle(const D2D1_RECT_F& footer, float dt) {
+        const D2D1_RECT_F r = HdrToggleRect(footer);
+        hdrToggleRect_ = r;
+        const int id = 88;
+        if (hover_.size() <= static_cast<size_t>(id)) hover_.resize(static_cast<size_t>(id) + 1, 0.0f);
+        const bool over = PtIn(mouse_, r);
+        if (over) hoverButton_ = true;
+        hover_[id] = Approach(hover_[id], over ? 1.0f : 0.0f, dt, 14.0f);
+        const float hv = hover_[id];
+        const bool on = prefs_.hdr;
+        rd_.FillRound(r, 11.0f, on ? Alpha(col::cyan, 0.20f + 0.12f * hv) : Alpha(col::panel2, 0.94f));
+        rd_.StrokeRound(r, 11.0f, on ? Alpha(col::cyan, 0.70f + 0.25f * hv) : Alpha(col::border, 0.85f + 0.15f * hv),
+                        on ? 1.4f : 1.0f);
+        const float knobR = 4.2f;
+        const float kx = on ? r.right - 12.0f : r.left + 12.0f;
+        const float ky = (r.top + r.bottom) * 0.5f;
+        if (on) rd_.Glow(D2D1::Point2F(kx, ky), 14.0f, col::cyan, 0.75f);
+        rd_.Dot(D2D1::Point2F(kx, ky), knobR, on ? col::white : col::dim);
+        const D2D1_RECT_F label = on ? D2D1::RectF(r.left + 6.0f, r.top, r.right - 20.0f, r.bottom)
+                                     : D2D1::RectF(r.left + 18.0f, r.top, r.right - 4.0f, r.bottom);
+        rd_.Text(L"HDR", label, rd_.fSmall.Get(), on ? col::text : col::muted, DWRITE_TEXT_ALIGNMENT_CENTER,
+                 DWRITE_PARAGRAPH_ALIGNMENT_CENTER);
+        NoteTip(r, on ? L"HDR color on" : L"HDR color off",
+                on ? L"The same theme on a wider scale. Deeper panels, brighter accents."
+                   : L"Turn on a wider scale of this theme. The hues stay the same.");
+        buttons_.push_back({id, r});
+        if (over && clickPending_ && PtIn(clickPos_, r)) {
+            prefs_.hdr = !prefs_.hdr;
+            rd_.SetHdr(prefs_.hdr);
+            CommitPrefs();
+            clickPending_ = false;
+        }
     }
 
     // ---- particles ----
@@ -6906,6 +7004,7 @@ private:
     std::vector<LatCell> homeLat_;
     std::vector<ColStat> homeCol_;
     bool settingsOpen_ = false;
+    D2D1_RECT_F hdrToggleRect_{};
     int settingsScroll_ = 0;
     int settingsMaxScroll_ = 0;
     int pendingBrowse_ = 0;
