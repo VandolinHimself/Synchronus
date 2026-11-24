@@ -1,6 +1,8 @@
 # Build the single Synchronus.exe (Release, x64, static CRT).
 #
-#   .\build.ps1            -> dist\Synchronus.exe
+#   .\build.ps1            -> dist\Synchronus-<version>.exe
+# The version is the FileVersion in Synchronus.rc, so the file you publish
+# matches the updater URL Synchronus-<version>.exe.
 #
 # Requires Visual Studio 2019+ or the C++ Build Tools (MSVC + Windows SDK).
 # No vcpkg / NuGet dependencies: the tool is Win32 only.
@@ -92,10 +94,18 @@ if ($LASTEXITCODE -ne 0) { throw "Build failed with exit code $LASTEXITCODE" }
 $built = Join-Path $root "x64\$Configuration\Synchronus.exe"
 if (-not (Test-Path $built)) { throw "Build reported success but $built was not produced." }
 
+$rc = Get-Content (Join-Path $root 'Synchronus.rc') -Raw
+if ($rc -notmatch 'VALUE "FileVersion", "([0-9]+(?:\.[0-9]+){1,3})"') {
+    throw "FileVersion was not found in Synchronus.rc."
+}
+$version = $Matches[1]
 $dist = Join-Path $root 'dist'
 New-Item -ItemType Directory -Force -Path $dist | Out-Null
-$target = Join-Path $dist 'Synchronus.exe'
+$target = Join-Path $dist "Synchronus-$version.exe"
 Copy-Item $built $target -Force
+# The linker output keeps the program name. The release copy is the versioned file.
+$plain = Join-Path $dist 'Synchronus.exe'
+if (Test-Path $plain) { Remove-Item $plain -Force }
 
 $size = [math]::Round((Get-Item $target).Length / 1KB)
 Write-Host ""

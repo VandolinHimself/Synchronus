@@ -173,8 +173,13 @@ Open `Synchronus.sln` in Visual Studio 2019 or 2022 with the
 Desktop development with C++ workload, or from this directory:
 
 ```powershell
-.\build.ps1            # -> dist\Synchronus.exe
+.\build.ps1            # -> dist\Synchronus-2.10.3.exe
 ```
+
+The script reads `FileVersion` from `Synchronus.rc` and writes
+`dist\Synchronus-<version>.exe`. That is the file to publish. The copy
+under `x64\Release\` stays `Synchronus.exe`, which is also the name used
+after install in `%ProgramFiles%\Synchronus\`.
 
 Needs Visual Studio 2019+ or the C++ Build Tools (MSVC + Windows SDK).
 The script locates MSBuild, the toolset, and the SDK itself. The program
