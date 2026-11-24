@@ -182,7 +182,7 @@ void UseHdr(bool on) {
         border = Rgb(0x0C2C70);
         grid = Rgb(0x051944);
         text = Rgb(0xF8FAFF);
-        muted = Rgb(0x9EC7FF);
+        muted = Rgb(0xD4EEFF);  // icy, brighter so it lifts off the panels
         dim = Rgb(0x5277BB);
         cyan = Rgb(0x3B87FF);
         red = Rgb(0xFF9BAB);
@@ -715,15 +715,28 @@ public:
         if (dc_) RebuildThemeBrushes();
     }
 
+    static bool SameRgb(D2D1_COLOR_F a, D2D1_COLOR_F b) {
+        return a.r == b.r && a.g == b.g && a.b == b.b;
+    }
+
     // Soft radial glow of `radius` around p. HDR opens the same glow.
+    // Icy blue spills a second, wider halo so the light leaves the control.
     void Glow(D2D1_POINT_2F p, float radius, D2D1_COLOR_F c, float opacity) {
+        const bool icy = col::hdr && SameRgb(c, col::muted);
         if (col::hdr) {
-            radius *= 1.18f;
-            opacity *= 1.55f;
+            radius *= icy ? 2.05f : 1.18f;
+            opacity *= icy ? 2.15f : 1.55f;
         }
         ID2D1RadialGradientBrush* br = GlowBrush(c);
         br->SetCenter(p);
         br->SetGradientOriginOffset(D2D1::Point2F(0, 0));
+        if (icy) {
+            const float outer = radius * 1.85f;
+            br->SetRadiusX(outer);
+            br->SetRadiusY(outer);
+            br->SetOpacity(Clamp01(opacity * 0.55f));
+            dc_->FillEllipse(D2D1::Ellipse(p, outer, outer), br);
+        }
         br->SetRadiusX(radius);
         br->SetRadiusY(radius);
         br->SetOpacity(Clamp01(opacity));
@@ -765,8 +778,12 @@ public:
     void GlowLine(const std::vector<D2D1_POINT_2F>& pts, D2D1_COLOR_F c, float w, float glow = 1) {
         auto g = Poly(pts.data(), pts.size());
         if (!g) return;
-        dc_->DrawGeometry(g.Get(), Brush(Alpha(c, 0.08f * glow)), w * 7, round_.Get());
-        dc_->DrawGeometry(g.Get(), Brush(Alpha(c, 0.22f * glow)), w * 3, round_.Get());
+        const bool icy = col::hdr && SameRgb(c, col::muted);
+        const float wide = icy ? 18.0f : 7.0f;
+        const float mid = icy ? 8.0f : 3.0f;
+        const float gain = icy ? glow * 1.8f : glow;
+        dc_->DrawGeometry(g.Get(), Brush(Alpha(c, (icy ? 0.16f : 0.08f) * gain)), w * wide, round_.Get());
+        dc_->DrawGeometry(g.Get(), Brush(Alpha(c, (icy ? 0.38f : 0.22f) * gain)), w * mid, round_.Get());
         dc_->DrawGeometry(g.Get(), Brush(c), w, round_.Get());
     }
 
@@ -839,6 +856,13 @@ public:
         if (s.empty()) return;
         f->SetTextAlignment(ha);
         f->SetParagraphAlignment(va);
+        // Short icy labels bloom past the line. Body paragraphs stay flat so a block of text does not fog the pane.
+        if (col::hdr && c.a > 0.45f && H(r) > 0.0f && H(r) <= 36.0f && SameRgb(c, col::muted)) {
+            const float cx = (r.left + r.right) * 0.5f;
+            const float cy = (r.top + r.bottom) * 0.5f;
+            const float span = std::min(std::max(W(r), H(r)), 200.0f);
+            Glow(D2D1::Point2F(cx, cy), std::max(22.0f, span * 0.42f), col::muted, 0.20f);
+        }
         dc_->DrawText(s.c_str(), static_cast<UINT32>(s.size()), f, r, Brush(c), D2D1_DRAW_TEXT_OPTIONS_CLIP);
     }
     void TextBrush(const std::wstring& s, const D2D1_RECT_F& r, IDWriteTextFormat* f, ID2D1Brush* b,
@@ -1091,10 +1115,10 @@ float4 ps(VSOut i) : SV_TARGET {
         float n = h.r;
 
         // Same hues. HDR is the wider scale: Blueprint #0C2C70, Electric #3B87FF,
-        // Icy #9EC7FF, Cool White #F8FAFF. Off: #123A91, #347BFF, #8DB8FF, #F4F7FF.
+        // Icy #D4EEFF, Cool White #F8FAFF. Off: #123A91, #347BFF, #8DB8FF, #F4F7FF.
         const float3 blueprint = hdr > 0.5 ? float3(0.047, 0.173, 0.439) : float3(0.071, 0.227, 0.569);
         const float3 electric = hdr > 0.5 ? float3(0.231, 0.529, 1.0) : float3(0.204, 0.482, 1.0);
-        const float3 icy = hdr > 0.5 ? float3(0.620, 0.780, 1.0) : float3(0.553, 0.722, 1.0);
+        const float3 icy = hdr > 0.5 ? float3(0.831, 0.933, 1.0) : float3(0.553, 0.722, 1.0);
         const float3 cool = hdr > 0.5 ? float3(0.973, 0.980, 1.0) : float3(0.957, 0.969, 1.0);
 
         if (st1.z > 0.5) {
