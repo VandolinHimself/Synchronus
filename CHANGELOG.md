@@ -1,11 +1,14 @@
 # Changelog
 
-Current release: **3.1.6**.
+Current release: **3.1.7**.
+
+## 3.1.7 — 2026-11-24
+
+- HDR uses the deep navy and bright cyan of the CPU overview. Metrics figures and the text in that color use that cyan and Bahnschrift.
 
 ## 3.1.6 — 2026-11-24
 
 - A finished step shows its result. It no longer stays on Preparing after the work is done.
-- HDR uses the deep navy and bright cyan of the CPU overview. Metrics figures and the text in that color use that cyan and Bahnschrift.
 
 ## 3.1.5 — 2026-11-24
 
