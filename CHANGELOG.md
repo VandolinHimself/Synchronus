@@ -1,6 +1,12 @@
 # Changelog
 
-Current release: **3.1.1**.
+Current release: **3.1.2**.
+
+## 3.1.2 — 2026-11-24
+
+- Each new step fills its own pane. Network, audio, profile, games, hardware, share, scripts, and focus draw cards, bars, and gauges instead of a block of text.
+- Bench draws the baseline and the latest run as paired bars for sleep, wake, DPC, CPU, memory, and disk.
+- Metrics fills the pane: four gauges, CPU, memory, DPC, and GPU or clock traces, and a strip for the timer, ISR, clock, and temperature.
 
 ## 3.1.1 — 2026-11-24
 

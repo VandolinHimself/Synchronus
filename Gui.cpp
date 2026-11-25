@@ -1653,6 +1653,54 @@ bool IsTuneStage(Stage s) {
     }
 }
 
+bool IsUtilityStage(Stage s) {
+    switch (s) {
+        case Stage::NetworkPrompt:
+        case Stage::NetworkApplying:
+        case Stage::NetworkDone:
+        case Stage::NetworkFailed:
+        case Stage::AudioPrompt:
+        case Stage::AudioApplying:
+        case Stage::AudioDone:
+        case Stage::AudioFailed:
+        case Stage::ProfilePrompt:
+        case Stage::ProfileApplying:
+        case Stage::ProfileDone:
+        case Stage::ProfileFailed:
+        case Stage::GamesPrompt:
+        case Stage::GamesApplying:
+        case Stage::GamesDone:
+        case Stage::GamesFailed:
+        case Stage::HardwarePrompt:
+        case Stage::HardwareApplying:
+        case Stage::HardwareDone:
+        case Stage::HardwareFailed:
+        case Stage::BenchPrompt:
+        case Stage::BenchApplying:
+        case Stage::BenchDone:
+        case Stage::BenchFailed:
+        case Stage::SharePrompt:
+        case Stage::ShareApplying:
+        case Stage::ShareDone:
+        case Stage::ShareFailed:
+        case Stage::ScriptsPrompt:
+        case Stage::ScriptsApplying:
+        case Stage::ScriptsDone:
+        case Stage::ScriptsFailed:
+        case Stage::MetricsPrompt:
+        case Stage::MetricsApplying:
+        case Stage::MetricsDone:
+        case Stage::MetricsFailed:
+        case Stage::FocusPrompt:
+        case Stage::FocusApplying:
+        case Stage::FocusDone:
+        case Stage::FocusFailed:
+            return true;
+        default:
+            return false;
+    }
+}
+
 int PaneFamily(Stage s) {
     switch (s) {
         case Stage::Welcome: return 0;
@@ -2352,6 +2400,8 @@ private:
         hubReturn_ = true;
         if (id == JobId::Network) netListed_ = false;
         if (id == JobId::Audio) audioListed_ = false;
+        if (id == JobId::Hardware) hwListed_ = false;
+        if (id == JobId::Bench) benchViewReady_ = false;
         stage_ = JobBusy(id) ? applying : prompt;
     }
 
@@ -4173,6 +4223,8 @@ private:
                 DrawHome(body, dt, liveHome);
             } else if (which == Stage::Monitor) {
                 DrawMonitor(body, dt);
+            } else if (IsUtilityStage(which)) {
+                DrawUtility(body, dt);
             } else {
                 const float gap = 12;
                 const float leftW = std::floor((W(body) - gap) * 0.62f);
@@ -7070,8 +7122,261 @@ private:
         if (Button(id + 1, btnB, L"Home", col::muted, false, true, dt)) OpenHome();
     }
 
+    void FillCard(const D2D1_RECT_F& r) {
+        rd_.FillRound(r, 14, Alpha(col::panel, 0.94f));
+        rd_.StrokeRound(r, 14, Alpha(col::cyan, 0.32f), 1.15f);
+    }
+
+    void DrawHBar(const D2D1_RECT_F& r, float frac, D2D1_COLOR_F c) {
+        const float rad = std::max(2.0f, H(r) * 0.5f);
+        rd_.FillRound(r, rad, Alpha(col::bg, 0.9f));
+        const float w = W(r) * Clamp01(frac);
+        if (w > 1.5f) rd_.FillRound(D2D1::RectF(r.left, r.top, r.left + w, r.bottom), rad, c);
+    }
+
+    void DrawGauge(D2D1_POINT_2F c, float radius, float frac, D2D1_COLOR_F color, const std::wstring& value,
+                   const wchar_t* label) {
+        const float a0 = 135.0f * kPi / 180.0f;
+        const float sweep = 270.0f * kPi / 180.0f;
+        rd_.Arc(c, radius, a0, a0 + sweep, Alpha(col::border, 0.9f), 8.0f);
+        if (frac > 0.004f) {
+            rd_.Glow(c, radius * 0.45f, color, 0.16f);
+            rd_.Arc(c, radius, a0, a0 + sweep * Clamp01(frac), color, 8.0f);
+        }
+        rd_.Text(value, D2D1::RectF(c.x - radius, c.y - 18, c.x + radius, c.y + 8), rd_.fPhase.Get(), col::text,
+                 DWRITE_TEXT_ALIGNMENT_CENTER, DWRITE_PARAGRAPH_ALIGNMENT_CENTER);
+        rd_.Text(label, D2D1::RectF(c.x - radius, c.y + 14, c.x + radius, c.y + 36), rd_.fSmall.Get(), col::muted,
+                 DWRITE_TEXT_ALIGNMENT_CENTER, DWRITE_PARAGRAPH_ALIGNMENT_CENTER);
+    }
+
+    void PushHist(std::vector<float>& series, float value) {
+        series.push_back(value);
+        if (series.size() > 180) series.erase(series.begin());
+    }
+
+    void DrawSpark(const D2D1_RECT_F& r, const std::vector<float>& series, float ymax, D2D1_COLOR_F c, const wchar_t* title,
+                   const wchar_t* now) {
+        FillCard(r);
+        rd_.Text(title, D2D1::RectF(r.left + 12, r.top + 6, r.right - 120, r.top + 26), rd_.fSmall.Get(), col::cyan);
+        if (now && *now)
+            rd_.Text(now, D2D1::RectF(r.right - 150, r.top + 6, r.right - 12, r.top + 26), rd_.fMonoSmall.Get(), col::text,
+                     DWRITE_TEXT_ALIGNMENT_TRAILING);
+        const D2D1_RECT_F plot = D2D1::RectF(r.left + 12, r.top + 32, r.right - 12, r.bottom - 12);
+        for (int i = 1; i <= 3; ++i) {
+            const float y = plot.top + H(plot) * static_cast<float>(i) / 4.0f;
+            rd_.Line(D2D1::Point2F(plot.left, y), D2D1::Point2F(plot.right, y), Alpha(col::border, 0.55f), 1.0f);
+        }
+        if (series.size() < 2) {
+            rd_.Text(L"Waiting for samples", plot, rd_.fSmall.Get(), col::dim, DWRITE_TEXT_ALIGNMENT_CENTER,
+                     DWRITE_PARAGRAPH_ALIGNMENT_CENTER);
+            return;
+        }
+        std::vector<D2D1_POINT_2F> pts;
+        pts.reserve(series.size());
+        const float top = std::max(ymax, 0.001f);
+        for (size_t i = 0; i < series.size(); ++i) {
+            const float x = plot.left + W(plot) * static_cast<float>(i) / static_cast<float>(series.size() - 1);
+            const float y = plot.bottom - H(plot) * Clamp01(series[i] / top);
+            pts.push_back(D2D1::Point2F(x, y));
+        }
+        rd_.GlowLine(pts, c, 1.8f, 1.0f);
+    }
+
+    void DrawMetricsBoard(const D2D1_RECT_F& B, float dt, Stage stage) {
+        (void)dt;
+        if (!meter_) meter_ = std::make_unique<LiveMeter>();
+        const unsigned long long now = GetTickCount64();
+        if (now >= nextMeterAt_) {
+            nextMeterAt_ = now + 200;
+            LiveSample sample;
+            const bool shares = meter_->Sample(sample);
+            meterSample_ = sample;
+            if (shares) {
+                PushHist(cpuHist_, static_cast<float>(sample.cpu));
+                PushHist(dpcHist_, static_cast<float>(sample.dpc));
+                PushHist(isrHist_, static_cast<float>(sample.isr));
+            }
+            PushHist(memHist_, static_cast<float>(sample.memory));
+            PushHist(clockHist_, static_cast<float>(sample.mhz));
+            if (sample.hasGpuLoad) PushHist(gpuHist_, static_cast<float>(sample.gpuLoad));
+        }
+        const LiveSample& s = meterSample_;
+        rd_.Text(L"METRICS", D2D1::RectF(B.left, B.top, B.left + 220, B.top + 32), rd_.fPhase.Get(), col::cyan,
+                 DWRITE_TEXT_ALIGNMENT_LEADING, DWRITE_PARAGRAPH_ALIGNMENT_CENTER);
+        rd_.Text(L"Live CPU, DPC, clock, memory, and GPU. The first sample only primes the counters.",
+                 D2D1::RectF(B.left + 200, B.top, B.right - 120, B.top + 32), rd_.fSmall.Get(), col::dim,
+                 DWRITE_TEXT_ALIGNMENT_LEADING, DWRITE_PARAGRAPH_ALIGNMENT_CENTER);
+        if (Button(80, D2D1::RectF(B.right - 108, B.top, B.right, B.top + 30), L"Home", col::muted, false, true, dt)) OpenHome();
+        if (stage == Stage::MetricsFailed)
+            rd_.Text(L"A sample failed. The last good readings stay on the gauges.",
+                     D2D1::RectF(B.left, B.top + 30, B.right, B.top + 48), rd_.fSmall.Get(), col::red);
+
+        const float gap = 12.0f;
+        float y = B.top + (stage == Stage::MetricsFailed ? 52.0f : 40.0f);
+        const float gaugeH = std::min(230.0f, std::max(156.0f, (B.bottom - y - 16.0f) * 0.36f));
+        const float gw = (W(B) - gap * 3.0f) / 4.0f;
+        const wchar_t* gLabel[4] = {L"CPU", L"MEMORY", L"DPC", L"GPU"};
+        const float gFrac[4] = {static_cast<float>(s.cpu / 100.0), static_cast<float>(s.memory / 100.0),
+                                static_cast<float>(std::min(1.0, s.dpc / 5.0)),
+                                s.hasGpuLoad ? static_cast<float>(s.gpuLoad / 100.0) : 0.0f};
+        const std::wstring gValue[4] = {Fmt(L"%.0f%%", s.cpu), Fmt(L"%.0f%%", s.memory), Fmt(L"%.2f%%", s.dpc),
+                                        s.hasGpuLoad ? Fmt(L"%.0f%%", s.gpuLoad) : L"—"};
+        D2D1_COLOR_F gColor[4] = {col::cyan, col::muted, s.dpc > 2.0 ? col::red : col::amber, col::green};
+        for (int i = 0; i < 4; ++i) {
+            const D2D1_RECT_F card = D2D1::RectF(B.left + i * (gw + gap), y, B.left + i * (gw + gap) + gw, y + gaugeH);
+            FillCard(card);
+            const float radius = std::min(gw, gaugeH) * 0.30f;
+            DrawGauge(D2D1::Point2F((card.left + card.right) * 0.5f, card.top + gaugeH * 0.48f), radius, gFrac[i], gColor[i],
+                      gValue[i], gLabel[i]);
+        }
+        y += gaugeH + gap;
+        const float remain = std::max(80.0f, B.bottom - y);
+        const float graphH = std::max(88.0f, (remain - 72.0f - gap) * 0.5f);
+        const float half = (W(B) - gap) * 0.5f;
+        float dpcTop = 1.0f;
+        for (float v : dpcHist_) dpcTop = std::max(dpcTop, v);
+        float clockTop = 1.0f;
+        for (float v : clockHist_) clockTop = std::max(clockTop, v);
+        if (s.maxMhz > 0) clockTop = std::max(clockTop, static_cast<float>(s.maxMhz));
+        DrawSpark(D2D1::RectF(B.left, y, B.left + half, y + graphH), cpuHist_, 100.0f, col::cyan, L"CPU",
+                  Fmt(L"%.0f%%", s.cpu).c_str());
+        DrawSpark(D2D1::RectF(B.left + half + gap, y, B.right, y + graphH), memHist_, 100.0f, col::muted, L"MEMORY",
+                  Fmt(L"%.0f%%", s.memory).c_str());
+        y += graphH + gap;
+        DrawSpark(D2D1::RectF(B.left, y, B.left + half, y + graphH), dpcHist_, dpcTop * 1.25f, col::amber, L"DPC",
+                  Fmt(L"%.2f%%", s.dpc).c_str());
+        DrawSpark(D2D1::RectF(B.left + half + gap, y, B.right, y + graphH), s.hasGpuLoad ? gpuHist_ : clockHist_,
+                  s.hasGpuLoad ? 100.0f : clockTop, col::green, s.hasGpuLoad ? L"GPU" : L"CLOCK",
+                  s.hasGpuLoad ? Fmt(L"%.0f%%", s.gpuLoad).c_str() : Fmt(L"%.0f MHz", s.mhz).c_str());
+        y += graphH + gap;
+        const float cardH = std::max(52.0f, B.bottom - y);
+        const wchar_t* names[4] = {L"TIMER", L"ISR", L"CLOCK", s.hasGpuTemp ? L"GPU TEMP" : L"ZONE"};
+        const std::wstring values[4] = {
+            s.timerMs > 0 ? Fmt(L"%.4f ms", s.timerMs) : L"—",
+            Fmt(L"%.2f%%", s.isr),
+            s.mhz > 0 ? Fmt(L"%.0f / %.0f MHz", s.mhz, s.maxMhz) : L"—",
+            s.hasGpuTemp ? Fmt(L"%.0f C", s.gpuTemp) : (s.hasZone ? Fmt(L"%.0f C", s.zoneTemp) : L"No sensor"),
+        };
+        const float sw = (W(B) - gap * 3.0f) / 4.0f;
+        for (int i = 0; i < 4; ++i) {
+            const D2D1_RECT_F card = D2D1::RectF(B.left + i * (sw + gap), y, B.left + i * (sw + gap) + sw, y + cardH);
+            FillCard(card);
+            rd_.Text(names[i], D2D1::RectF(card.left + 10, card.top + 6, card.right - 8, card.top + 24), rd_.fSmall.Get(), col::cyan);
+            rd_.Text(values[i], D2D1::RectF(card.left + 10, card.top + 24, card.right - 8, card.bottom - 18), rd_.fPhase.Get(), col::text,
+                     DWRITE_TEXT_ALIGNMENT_LEADING, DWRITE_PARAGRAPH_ALIGNMENT_CENTER);
+            if (i == 1)
+                DrawHBar(D2D1::RectF(card.left + 10, card.bottom - 14, card.right - 10, card.bottom - 6),
+                         static_cast<float>(std::min(1.0, s.isr / 5.0)), col::amber);
+        }
+    }
+
+    void DrawBenchBoard(const D2D1_RECT_F& B, float dt) {
+        const bool busy = JobBusy(JobId::Bench);
+        if (!benchViewReady_ || busy != benchViewBusy_) {
+            benchView_ = LoadBench(host_.dataDir);
+            benchViewReady_ = true;
+            benchViewBusy_ = busy;
+        }
+        const BenchResult* base = benchView_.hasBaseline ? &benchView_.baseline : nullptr;
+        const BenchResult* cur = benchView_.runs.empty() ? nullptr : &benchView_.runs.front();
+        rd_.Text(L"BENCH", D2D1::RectF(B.left, B.top, B.left + 160, B.top + 32), rd_.fPhase.Get(), col::cyan,
+                 DWRITE_TEXT_ALIGNMENT_LEADING, DWRITE_PARAGRAPH_ALIGNMENT_CENTER);
+        std::wstring sub = L"Baseline against the latest run";
+        if (cur && !cur->when.empty()) sub = L"Latest  " + cur->when;
+        if (base && !base->when.empty()) sub += L"    baseline  " + base->when;
+        rd_.Text(sub, D2D1::RectF(B.left + 150, B.top, B.right - 280, B.top + 32), rd_.fSmall.Get(), col::dim,
+                 DWRITE_TEXT_ALIGNMENT_LEADING, DWRITE_PARAGRAPH_ALIGNMENT_CENTER);
+        if (Button(72, D2D1::RectF(B.right - 268, B.top, B.right - 116, B.top + 30), busy ? L"Running" : L"Run bench", col::cyan,
+                   true, !busy, dt))
+            StartBenchJob();
+        if (Button(73, D2D1::RectF(B.right - 108, B.top, B.right, B.top + 30), L"Home", col::muted, false, true, dt)) OpenHome();
+
+        float y = B.top + 40;
+        if (busy) {
+            const D2D1_RECT_F bar = D2D1::RectF(B.left, y, B.right, y + 8);
+            DrawHBar(bar, static_cast<float>(snap_.progress), col::amber);
+            rd_.Text(snap_.detail.empty() ? L"Running the bench" : snap_.detail,
+                     D2D1::RectF(B.left, y + 10, B.right, y + 28), rd_.fSmall.Get(), col::amber);
+            y += 34;
+        }
+        struct Item {
+            const wchar_t* name;
+            double baseline;
+            double current;
+            bool lowerBetter;
+            const wchar_t* unit;
+            int digits;
+        };
+        const double z = 0;
+        const BenchResult empty;
+        const BenchResult& b = base ? *base : empty;
+        const BenchResult& c = cur ? *cur : empty;
+        const Item items[12] = {
+            {L"Sleep median", b.sleepMedianMs, c.sleepMedianMs, true, L"ms", 3},
+            {L"Sleep p99", b.sleepP99Ms, c.sleepP99Ms, true, L"ms", 3},
+            {L"Wake median", b.wakeMedianUs, c.wakeMedianUs, true, L"us", 1},
+            {L"Wake p99", b.wakeP99Us, c.wakeP99Us, true, L"us", 1},
+            {L"DPC", b.dpcPct, c.dpcPct, true, L"%", 2},
+            {L"ISR", b.isrPct, c.isrPct, true, L"%", 2},
+            {L"CPU one core", b.cpuSingle, c.cpuSingle, false, L"M/s", 1},
+            {L"CPU all cores", b.cpuAll, c.cpuAll, false, L"M/s", 1},
+            {L"Memory", b.memGbps, c.memGbps, false, L"GB/s", 1},
+            {L"Disk write", b.diskWriteMbps, c.diskWriteMbps, false, L"MB/s", 0},
+            {L"Disk read", b.diskReadMbps, c.diskReadMbps, false, L"MB/s", 0},
+            {L"Disk 4K", b.disk4kUs, c.disk4kUs, true, L"us", 0},
+        };
+        (void)z;
+        if (!base && !cur) {
+            FillCard(D2D1::RectF(B.left, y, B.right, B.bottom));
+            rd_.Text(L"No bench has been saved. Run bench to draw the baseline and the latest run.",
+                     D2D1::RectF(B.left + 24, y + 24, B.right - 24, B.bottom - 24), rd_.fPhase.Get(), col::muted,
+                     DWRITE_TEXT_ALIGNMENT_CENTER, DWRITE_PARAGRAPH_ALIGNMENT_CENTER);
+            return;
+        }
+        const float gap = 10.0f;
+        const float colW = (W(B) - gap) * 0.5f;
+        const float rowH = std::max(48.0f, (B.bottom - y - gap * 5.0f) / 6.0f);
+        for (int i = 0; i < 12; ++i) {
+            const int col = i / 6;
+            const int row = i % 6;
+            const D2D1_RECT_F card = D2D1::RectF(B.left + col * (colW + gap), y + row * (rowH + gap),
+                                                B.left + col * (colW + gap) + colW, y + row * (rowH + gap) + rowH);
+            FillCard(card);
+            const Item& it = items[i];
+            const double shown = cur ? it.current : it.baseline;
+            const wchar_t* fmt = it.digits >= 3 ? L"%.3f %s" : it.digits == 2 ? L"%.2f %s" : it.digits == 1 ? L"%.1f %s" : L"%.0f %s";
+            rd_.Text(it.name, D2D1::RectF(card.left + 12, card.top + 4, card.left + 150, card.top + 24), rd_.fSmall.Get(), col::cyan);
+            rd_.Text(Fmt(fmt, shown, it.unit), D2D1::RectF(card.right - 160, card.top + 4, card.right - 10, card.top + 24),
+                     rd_.fSmall.Get(), col::text, DWRITE_TEXT_ALIGNMENT_TRAILING);
+            const double peak = std::max(0.001, std::max(it.baseline, it.current));
+            const float barTop = card.top + 28;
+            const float barH = std::max(6.0f, (card.bottom - barTop - 8) * 0.5f);
+            if (base) DrawHBar(D2D1::RectF(card.left + 12, barTop, card.right - 12, barTop + barH),
+                               static_cast<float>(it.baseline / peak), Alpha(col::muted, 0.85f));
+            if (cur) {
+                D2D1_COLOR_F mark = col::cyan;
+                if (base && it.current != it.baseline) {
+                    const bool better = it.lowerBetter ? it.current < it.baseline : it.current > it.baseline;
+                    mark = better ? col::green : col::red;
+                }
+                DrawHBar(D2D1::RectF(card.left + 12, barTop + barH + 3, card.right - 12, barTop + barH * 2 + 3),
+                         static_cast<float>(it.current / peak), mark);
+            }
+        }
+    }
+
     void DrawUtility(const D2D1_RECT_F& B, float dt) {
         const Stage stage = stage_.load();
+        if (stage == Stage::MetricsPrompt || stage == Stage::MetricsApplying || stage == Stage::MetricsDone ||
+            stage == Stage::MetricsFailed) {
+            DrawMetricsBoard(B, dt, stage);
+            return;
+        }
+        if (stage == Stage::BenchPrompt || stage == Stage::BenchApplying || stage == Stage::BenchDone ||
+            stage == Stage::BenchFailed) {
+            DrawBenchBoard(B, dt);
+            return;
+        }
         auto progress = [&](Stage done) { DrawTweakProgress(B, dt, stage == done, false); };
         if (stage == Stage::NetworkApplying || stage == Stage::NetworkDone) return progress(Stage::NetworkDone);
         if (stage == Stage::AudioApplying || stage == Stage::AudioDone) return progress(Stage::AudioDone);
@@ -7104,69 +7409,136 @@ private:
         if (stage == Stage::FocusFailed)
             return DrawPackFail(B, dt, L"Notification policy could not be changed.", [this] { StartFocusJob(); }, [this] { OpenHome(); });
 
-        const D2D1_RECT_F body = D2D1::RectF(B.left + 12, B.top + 58, B.right - 12, B.bottom - 48);
+        const float foot = 46.0f;
         if (stage == Stage::NetworkPrompt) {
             if (!netListed_) {
-                const NetPlan plan = PlanNetwork(LoadNetOptions());
-                netBody_.clear();
-                if (plan.adapters.empty()) netBody_ = L"No Ethernet or Wi-Fi adapter was found.";
-                for (const auto& a : plan.adapters) {
-                    netBody_ += a.name + (a.wifi ? L"   Wi-Fi\n" : L"   Ethernet\n");
-                    if (a.changes.empty()) netBody_ += L"  This driver has none of the latency switches.\n";
-                    for (const auto& c : a.changes)
-                        netBody_ += L"  " + c.title + (c.already ? L"   already set\n" : L"   will change\n");
-                }
-                netBody_ += Fmt(L"\n%d change%s waiting. They apply after a restart. The link stays up now.", plan.pending,
-                                plan.pending == 1 ? L"" : L"s");
+                netPlan_ = PlanNetwork(LoadNetOptions());
                 netListed_ = true;
             }
-            rd_.Text(L"Network", D2D1::RectF(B.left, B.top + 6, B.right, B.top + 30), rd_.fPhase.Get(), col::cyan,
-                     DWRITE_TEXT_ALIGNMENT_CENTER);
-            rd_.Text(L"Adapter power saving, interrupt moderation, and update sharing.",
-                     D2D1::RectF(B.left, B.top + 30, B.right, B.top + 52), rd_.fSmall.Get(), col::text,
-                     DWRITE_TEXT_ALIGNMENT_CENTER);
-            rd_.Text(netBody_, body, rd_.fMonoSmall.Get(), col::muted);
+            int total = 0, set = 0;
+            for (const auto& a : netPlan_.adapters)
+                for (const auto& c : a.changes) {
+                    ++total;
+                    if (c.already) ++set;
+                }
+            rd_.Text(L"NETWORK", D2D1::RectF(B.left, B.top, B.left + 180, B.top + 32), rd_.fPhase.Get(), col::cyan);
+            rd_.Text(Fmt(L"%d waiting    %d already set    link stays up", netPlan_.pending, set),
+                     D2D1::RectF(B.left + 180, B.top, B.right, B.top + 32), rd_.fSmall.Get(), col::dim,
+                     DWRITE_TEXT_ALIGNMENT_LEADING, DWRITE_PARAGRAPH_ALIGNMENT_CENTER);
+            const D2D1_RECT_F area = D2D1::RectF(B.left, B.top + 40, B.right, B.bottom - foot);
+            if (netPlan_.adapters.empty()) {
+                FillCard(area);
+                rd_.Text(L"No Ethernet or Wi-Fi adapter was found.", area, rd_.fPhase.Get(), col::muted,
+                         DWRITE_TEXT_ALIGNMENT_CENTER, DWRITE_PARAGRAPH_ALIGNMENT_CENTER);
+            } else {
+                const int n = static_cast<int>(netPlan_.adapters.size());
+                const int cols = n > 2 ? 3 : n;
+                const int rows = (n + cols - 1) / cols;
+                const float gap = 10.0f;
+                const float cw = (W(area) - gap * (cols - 1)) / cols;
+                const float ch = (H(area) - gap * (rows - 1)) / rows;
+                for (int i = 0; i < n; ++i) {
+                    const auto& a = netPlan_.adapters[static_cast<size_t>(i)];
+                    const D2D1_RECT_F card = D2D1::RectF(area.left + (i % cols) * (cw + gap), area.top + (i / cols) * (ch + gap),
+                                                        area.left + (i % cols) * (cw + gap) + cw,
+                                                        area.top + (i / cols) * (ch + gap) + ch);
+                    FillCard(card);
+                    rd_.Text(a.name, D2D1::RectF(card.left + 12, card.top + 8, card.right - 12, card.top + 30), rd_.fSmall.Get(), col::text);
+                    rd_.Text(a.wifi ? L"Wi-Fi" : L"Ethernet", D2D1::RectF(card.left + 12, card.top + 28, card.right - 12, card.top + 46),
+                             rd_.fSmall.Get(), col::cyan);
+                    int local = 0, localSet = 0;
+                    for (const auto& c : a.changes) {
+                        ++local;
+                        if (c.already) ++localSet;
+                    }
+                    DrawHBar(D2D1::RectF(card.left + 12, card.top + 52, card.right - 12, card.top + 62),
+                             local ? static_cast<float>(localSet) / local : 1.0f, localSet == local ? col::green : col::amber);
+                    float ly = card.top + 70;
+                    const int shown = std::min(6, static_cast<int>(a.changes.size()));
+                    for (int k = 0; k < shown && ly + 16 < card.bottom - 6; ++k) {
+                        const auto& c = a.changes[static_cast<size_t>(k)];
+                        rd_.Dot(D2D1::Point2F(card.left + 18, ly + 8), 4.0f, c.already ? col::green : col::amber);
+                        rd_.Text(c.title, D2D1::RectF(card.left + 28, ly, card.right - 10, ly + 16), rd_.fMonoSmall.Get(), col::muted);
+                        ly += 18;
+                    }
+                    if (a.changes.empty())
+                        rd_.Text(L"This driver has none of the latency switches.",
+                                 D2D1::RectF(card.left + 12, card.top + 70, card.right - 12, card.bottom - 8), rd_.fSmall.Get(), col::dim);
+                }
+            }
+            (void)total;
             ToolButtons(B, dt, 60, L"Apply network", col::cyan, [this] { StartNetwork(); });
             return;
         }
         if (stage == Stage::AudioPrompt) {
             if (!audioListed_) {
-                audioBody_.clear();
-                const auto devices = ListAudioDevices();
-                if (devices.empty()) audioBody_ = L"No connected playback or recording device was found.";
-                for (const auto& d : devices) {
-                    audioBody_ += d.name + (d.capture ? L"   recording" : L"   playback");
-                    if (!d.readable) audioBody_ += L"   unreadable\n";
-                    else audioBody_ += d.enhancementsOff ? L"   enhancements already off\n" : L"   enhancements on\n";
-                }
-                audioBody_ += L"\nOff removes the driver's effects and the buffering they add. Windows already runs the audio engine at real-time priority.";
+                audioDevs_ = ListAudioDevices();
                 audioListed_ = true;
             }
-            rd_.Text(L"Audio", D2D1::RectF(B.left, B.top + 6, B.right, B.top + 30), rd_.fPhase.Get(), col::cyan,
-                     DWRITE_TEXT_ALIGNMENT_CENTER);
-            rd_.Text(L"Turn enhancements off on the devices that are connected.",
-                     D2D1::RectF(B.left, B.top + 30, B.right, B.top + 52), rd_.fSmall.Get(), col::text,
-                     DWRITE_TEXT_ALIGNMENT_CENTER);
-            rd_.Text(audioBody_, body, rd_.fMonoSmall.Get(), col::muted);
+            rd_.Text(L"AUDIO", D2D1::RectF(B.left, B.top, B.left + 140, B.top + 32), rd_.fPhase.Get(), col::cyan);
+            rd_.Text(L"Enhancements off removes the driver's extra buffering.",
+                     D2D1::RectF(B.left + 140, B.top, B.right, B.top + 32), rd_.fSmall.Get(), col::dim,
+                     DWRITE_TEXT_ALIGNMENT_LEADING, DWRITE_PARAGRAPH_ALIGNMENT_CENTER);
+            const D2D1_RECT_F area = D2D1::RectF(B.left, B.top + 40, B.right, B.bottom - foot);
+            if (audioDevs_.empty()) {
+                FillCard(area);
+                rd_.Text(L"No connected playback or recording device was found.", area, rd_.fPhase.Get(), col::muted,
+                         DWRITE_TEXT_ALIGNMENT_CENTER, DWRITE_PARAGRAPH_ALIGNMENT_CENTER);
+            } else {
+                const int n = static_cast<int>(audioDevs_.size());
+                const int cols = std::min(3, std::max(1, n));
+                const int rows = (n + cols - 1) / cols;
+                const float gap = 10.0f;
+                const float cw = (W(area) - gap * (cols - 1)) / cols;
+                const float ch = (H(area) - gap * (rows - 1)) / rows;
+                for (int i = 0; i < n; ++i) {
+                    const auto& d = audioDevs_[static_cast<size_t>(i)];
+                    const D2D1_RECT_F card = D2D1::RectF(area.left + (i % cols) * (cw + gap), area.top + (i / cols) * (ch + gap),
+                                                        area.left + (i % cols) * (cw + gap) + cw,
+                                                        area.top + (i / cols) * (ch + gap) + ch);
+                    FillCard(card);
+                    const bool off = d.readable && d.enhancementsOff;
+                    const D2D1_COLOR_F mark = !d.readable ? col::dim : off ? col::green : col::amber;
+                    DrawGauge(D2D1::Point2F(card.left + 58, card.top + std::min(78.0f, H(card) * 0.42f)),
+                              std::min(36.0f, H(card) * 0.22f), off ? 1.0f : 0.35f, mark, off ? L"OFF" : L"ON",
+                              d.capture ? L"RECORD" : L"PLAY");
+                    rd_.Text(d.name, D2D1::RectF(card.left + 108, card.top + 16, card.right - 12, card.top + 48), rd_.fSmall.Get(), col::text);
+                    rd_.Text(!d.readable ? L"Unreadable" : off ? L"Enhancements are off" : L"Enhancements are on",
+                             D2D1::RectF(card.left + 108, card.top + 48, card.right - 12, card.top + 72), rd_.fSmall.Get(), mark);
+                }
+            }
             ToolButtons(B, dt, 62, L"Turn enhancements off", col::cyan, [this] { StartAudio(); });
             return;
         }
         if (stage == Stage::ProfilePrompt) {
-            const bool perf = ChosenProfile() == Profile::Performance;
-            rd_.Text(L"Profile", D2D1::RectF(B.left, B.top + 6, B.right, B.top + 30), rd_.fPhase.Get(), col::cyan,
-                     DWRITE_TEXT_ALIGNMENT_CENTER);
-            rd_.Text(perf ? L"Performance is selected. The tuned power plan and the timer hold stay on."
-                          : L"Balanced is selected. The power plan goes back and the timer hold is released.",
-                     D2D1::RectF(B.left + 12, B.top + 36, B.right - 12, B.top + 80), rd_.fBody.Get(), col::muted,
-                     DWRITE_TEXT_ALIGNMENT_CENTER);
-            const float cx = (B.left + B.right) / 2;
-            const float bw = std::min(220.0f, (W(B) - 36) / 2);
-            if (Button(64, D2D1::RectF(cx - bw - 6, B.top + 96, cx - 6, B.top + 132), L"Performance", col::cyan, perf, true, dt)) {
+            const bool perf = ChosenProfile() == Profile::Performance || ActiveProfile() == Profile::Performance;
+            const float gap = 12.0f;
+            const float cw = (W(B) - gap) * 0.5f;
+            const D2D1_RECT_F left = D2D1::RectF(B.left, B.top, B.left + cw, B.bottom - foot);
+            const D2D1_RECT_F right = D2D1::RectF(B.left + cw + gap, B.top, B.right, B.bottom - foot);
+            FillCard(left);
+            FillCard(right);
+            if (perf) rd_.StrokeRound(left, 14, col::cyan, 2.0f);
+            else rd_.StrokeRound(right, 14, col::amber, 2.0f);
+            auto lines = [&](const D2D1_RECT_F& card, const wchar_t* title, D2D1_COLOR_F c, std::initializer_list<const wchar_t*> rows) {
+                rd_.Text(title, D2D1::RectF(card.left + 16, card.top + 14, card.right - 16, card.top + 48), rd_.fPhase.Get(), c);
+                float y = card.top + 64;
+                for (const wchar_t* row : rows) {
+                    rd_.Dot(D2D1::Point2F(card.left + 26, y + 8), 4.0f, c);
+                    rd_.Text(row, D2D1::RectF(card.left + 40, y, card.right - 16, y + 22), rd_.fSmall.Get(), col::text);
+                    y += 28;
+                }
+            };
+            lines(left, L"PERFORMANCE", col::cyan,
+                  {L"Tuned power plan stays on", L"Timer hold stays installed", L"Core parking stays off", L"The full tune writes this profile"});
+            lines(right, L"BALANCED", col::amber,
+                  {L"Power plan goes back", L"Timer hold is released", L"The rest of the tune stays", L"A game can lift this to Performance"});
+            if (Button(64, D2D1::RectF(left.left + 16, left.bottom - 48, left.right - 16, left.bottom - 12), L"Use Performance", col::cyan, perf, true, dt)) {
                 SetChosenProfile(Profile::Performance);
                 std::wstring detail;
                 ApplyProfile(Profile::Performance, detail);
             }
-            if (Button(65, D2D1::RectF(cx + 6, B.top + 96, cx + 6 + bw, B.top + 132), L"Balanced", col::amber, !perf, true, dt)) {
+            if (Button(65, D2D1::RectF(right.left + 16, right.bottom - 48, right.right - 16, right.bottom - 12), L"Use Balanced", col::amber, !perf, true, dt)) {
                 SetChosenProfile(Profile::Balanced);
                 std::wstring detail;
                 ApplyProfile(Profile::Balanced, detail);
@@ -7176,111 +7548,179 @@ private:
         }
         if (stage == Stage::GamesPrompt) {
             const GameRules rules = LoadGameRules();
-            std::wstring text = prefs_.gameBoost ? L"Watch is on. A game lifts Balanced to Performance until it exits.\n"
-                                                 : L"Watch is off. A game does not change the profile.\n";
-            text += rules.libraries ? L"Windows' game list and launcher folders count.\n" : L"Only names you add count as games.\n";
-            if (!rules.include.empty()) text += L"Always a game: " + rules.include.front() + L"\n";
-            if (!rules.exclude.empty()) text += L"Never a game: " + rules.exclude.front() + L"\n";
-            if (gameWas_) text += L"A game is running now.\n";
-            rd_.Text(L"Games", D2D1::RectF(B.left, B.top + 6, B.right, B.top + 30), rd_.fPhase.Get(), col::cyan,
+            rd_.Text(L"GAMES", D2D1::RectF(B.left, B.top, B.left + 140, B.top + 32), rd_.fPhase.Get(), col::cyan);
+            const float gap = 12.0f;
+            const D2D1_RECT_F area = D2D1::RectF(B.left, B.top + 40, B.right, B.bottom - foot);
+            const float cw = (W(area) - gap * 2) / 3.0f;
+            const D2D1_RECT_F a = D2D1::RectF(area.left, area.top, area.left + cw, area.bottom);
+            const D2D1_RECT_F b = D2D1::RectF(a.right + gap, area.top, a.right + gap + cw, area.bottom);
+            const D2D1_RECT_F c = D2D1::RectF(b.right + gap, area.top, area.right, area.bottom);
+            FillCard(a);
+            FillCard(b);
+            FillCard(c);
+            DrawGauge(D2D1::Point2F((a.left + a.right) * 0.5f, a.top + 90), 48.0f, prefs_.gameBoost ? 1.0f : 0.08f,
+                      prefs_.gameBoost ? col::green : col::dim, prefs_.gameBoost ? L"ON" : L"OFF", L"WATCH");
+            rd_.Text(gameWas_ ? L"A game is running" : L"No game is running",
+                     D2D1::RectF(a.left + 12, a.top + 170, a.right - 12, a.top + 196), rd_.fSmall.Get(), gameWas_ ? col::green : col::muted,
                      DWRITE_TEXT_ALIGNMENT_CENTER);
-            rd_.Text(text, body, rd_.fBody.Get(), col::muted);
+            rd_.Text(rules.libraries ? L"LIBRARIES" : L"NAMES ONLY", D2D1::RectF(b.left + 12, b.top + 12, b.right - 12, b.top + 34),
+                     rd_.fSmall.Get(), col::cyan);
+            rd_.Text(rules.libraries ? L"Windows' list and launcher folders count as games."
+                                    : L"Only the names you added count as games.",
+                     D2D1::RectF(b.left + 12, b.top + 40, b.right - 12, b.top + 90), rd_.fSmall.Get(), col::text);
+            float y = b.top + 100;
+            rd_.Text(L"Always", D2D1::RectF(b.left + 12, y, b.right - 12, y + 18), rd_.fMonoSmall.Get(), col::green);
+            y += 20;
+            if (rules.include.empty()) rd_.Text(L"None added", D2D1::RectF(b.left + 12, y, b.right - 12, y + 18), rd_.fSmall.Get(), col::dim);
+            for (size_t i = 0; i < rules.include.size() && i < 6; ++i) {
+                rd_.Text(rules.include[i], D2D1::RectF(b.left + 12, y, b.right - 12, y + 18), rd_.fMonoSmall.Get(), col::text);
+                y += 18;
+            }
+            rd_.Text(L"LISTS", D2D1::RectF(c.left + 12, c.top + 12, c.right - 12, c.top + 34), rd_.fSmall.Get(), col::cyan);
+            y = c.top + 44;
+            rd_.Text(L"Never", D2D1::RectF(c.left + 12, y, c.right - 12, y + 18), rd_.fMonoSmall.Get(), col::red);
+            y += 20;
+            if (rules.exclude.empty()) rd_.Text(L"None excluded", D2D1::RectF(c.left + 12, y, c.right - 12, y + 18), rd_.fSmall.Get(), col::dim);
+            for (size_t i = 0; i < rules.exclude.size() && i < 8; ++i) {
+                rd_.Text(rules.exclude[i], D2D1::RectF(c.left + 12, y, c.right - 12, y + 18), rd_.fMonoSmall.Get(), col::text);
+                y += 18;
+            }
             ToolButtons(B, dt, 68, prefs_.gameBoost ? L"Watch is on" : L"Turn watch on", col::cyan, [this] { StartGamesJob(); });
             return;
         }
         if (stage == Stage::HardwarePrompt) {
-            rd_.Text(L"Hardware", D2D1::RectF(B.left, B.top + 6, B.right, B.top + 30), rd_.fPhase.Get(), col::cyan,
-                     DWRITE_TEXT_ALIGNMENT_CENTER);
-            rd_.Text(hardwareNote_.empty() ? HardwareSummary() : hardwareNote_, body, rd_.fBody.Get(), col::muted);
-            ToolButtons(B, dt, 70, L"Check again", col::cyan, [this] { StartHardwareJob(); });
-            return;
-        }
-        if (stage == Stage::BenchPrompt) {
-            const BenchHistory history = LoadBench(host_.dataDir);
-            std::wstring text = history.hasBaseline ? L"A baseline is saved.\n" : L"No baseline yet. The first full tune that includes Bench can take one before anything else changes.\n";
-            if (!history.runs.empty()) {
-                const auto& r = history.runs.front();
-                text += Fmt(L"Last run: sleep median %.3f ms, DPC %.2f%%, disk write %.0f MB/s", r.sleepMedianMs, r.dpcPct,
-                            r.diskWriteMbps);
+            if (!hwListed_) {
+                hwChanges_ = DetectHardwareChanges();
+                hwListed_ = true;
             }
-            rd_.Text(L"Bench", D2D1::RectF(B.left, B.top + 6, B.right, B.top + 30), rd_.fPhase.Get(), col::cyan,
-                     DWRITE_TEXT_ALIGNMENT_CENTER);
-            rd_.Text(text, body, rd_.fBody.Get(), col::muted);
-            ToolButtons(B, dt, 72, L"Run bench", col::cyan, [this] { StartBenchJob(); });
+            rd_.Text(L"HARDWARE", D2D1::RectF(B.left, B.top, B.left + 180, B.top + 32), rd_.fPhase.Get(), col::cyan);
+            rd_.Text(HardwareSummary(), D2D1::RectF(B.left + 180, B.top, B.right, B.top + 32), rd_.fSmall.Get(), col::dim,
+                     DWRITE_TEXT_ALIGNMENT_LEADING, DWRITE_PARAGRAPH_ALIGNMENT_CENTER);
+            const wchar_t* parts[5] = {L"GPU", L"DRIVER", L"CPU", L"BIOS", L"WINDOWS"};
+            const wchar_t* keys[5] = {L"gpu", L"driver", L"cpu", L"bios", L"windows"};
+            const float gap = 10.0f;
+            const D2D1_RECT_F area = D2D1::RectF(B.left, B.top + 40, B.right, B.bottom - foot);
+            const float cw = (W(area) - gap * 4) / 5.0f;
+            for (int i = 0; i < 5; ++i) {
+                const HardwareChange* hit = nullptr;
+                for (const auto& change : hwChanges_)
+                    if (change.part == keys[i]) hit = &change;
+                const D2D1_RECT_F card = D2D1::RectF(area.left + i * (cw + gap), area.top, area.left + i * (cw + gap) + cw, area.bottom);
+                FillCard(card);
+                const D2D1_COLOR_F mark = hit ? col::amber : col::green;
+                DrawGauge(D2D1::Point2F((card.left + card.right) * 0.5f, card.top + 78), 36.0f, hit ? 0.72f : 1.0f, mark,
+                          hit ? L"NEW" : L"SAME", parts[i]);
+                rd_.Text(hit ? hit->what : L"Unchanged since the last tune",
+                         D2D1::RectF(card.left + 10, card.top + 150, card.right - 10, card.bottom - 12), rd_.fSmall.Get(), col::text,
+                         DWRITE_TEXT_ALIGNMENT_CENTER);
+            }
+            ToolButtons(B, dt, 70, L"Check again", col::cyan, [this] {
+                hwListed_ = false;
+                StartHardwareJob();
+            });
             return;
         }
         if (stage == Stage::SharePrompt) {
-            rd_.Text(L"Share", D2D1::RectF(B.left, B.top + 6, B.right, B.top + 30), rd_.fPhase.Get(), col::cyan,
-                     DWRITE_TEXT_ALIGNMENT_CENTER);
-            rd_.Text(shareCode_.empty() ? L"Export writes the step choices and preferences. It does not include a user name or device id."
-                                        : shareCode_,
-                     body, rd_.fMonoSmall.Get(), col::muted);
-            const float yb = B.bottom - 78;
-            if (Button(74, D2D1::RectF(B.left + 12, yb, B.left + 160, yb + 30), L"Copy code", col::cyan, false, !shareCode_.empty(), dt))
+            rd_.Text(L"SHARE", D2D1::RectF(B.left, B.top, B.left + 120, B.top + 32), rd_.fPhase.Get(), col::cyan);
+            const float gap = 12.0f;
+            const D2D1_RECT_F area = D2D1::RectF(B.left, B.top + 40, B.right, B.bottom - foot - 36);
+            const D2D1_RECT_F code = D2D1::RectF(area.left, area.top, area.left + W(area) * 0.62f, area.bottom);
+            const D2D1_RECT_F steps = D2D1::RectF(code.right + gap, area.top, area.right, area.bottom);
+            FillCard(code);
+            FillCard(steps);
+            rd_.Text(L"CODE", D2D1::RectF(code.left + 12, code.top + 8, code.right - 12, code.top + 28), rd_.fSmall.Get(), col::cyan);
+            rd_.Text(shareCode_.empty() ? L"Export writes the choices. No user name and no device id." : shareCode_,
+                     D2D1::RectF(code.left + 12, code.top + 36, code.right - 12, code.bottom - 12), rd_.fMonoSmall.Get(), col::text);
+            rd_.Text(L"INCLUDED", D2D1::RectF(steps.left + 12, steps.top + 8, steps.right - 12, steps.top + 28), rd_.fSmall.Get(), col::cyan);
+            const wchar_t* names[8] = {L"Network", L"Audio", L"Profile", L"Games", L"Bench", L"Scripts", L"Metrics", L"Focus"};
+            const bool on[8] = {Want(kWantNetwork), Want(kWantAudio), Want(kWantProfile), Want(kWantGames),
+                                Want(kWantBench), Want(kWantScripts), Want(kWantMetrics), Want(kWantFocus)};
+            for (int i = 0; i < 8; ++i) {
+                const float y = steps.top + 40 + i * 28.0f;
+                rd_.Dot(D2D1::Point2F(steps.left + 22, y + 8), 5.0f, on[i] ? col::green : col::dim);
+                rd_.Text(names[i], D2D1::RectF(steps.left + 36, y, steps.right - 12, y + 20), rd_.fSmall.Get(), on[i] ? col::text : col::dim);
+            }
+            const float yb = B.bottom - foot - 32;
+            if (Button(74, D2D1::RectF(B.left, yb, B.left + 150, yb + 28), L"Copy code", col::cyan, false, !shareCode_.empty(), dt))
                 CopyText(shareCode_);
-            if (Button(75, D2D1::RectF(B.left + 168, yb, B.left + 330, yb + 30), L"Import clipboard", col::amber, false, true, dt)) {
+            if (Button(75, D2D1::RectF(B.left + 158, yb, B.left + 340, yb + 28), L"Import clipboard", col::amber, false, true, dt)) {
                 std::wstring text, json, summary, err;
                 if (PasteText(text) && ReadShareCode(text, json) && ImportSettings(json, summary, err)) shareBody_ = summary;
                 else if (!text.empty() && ImportSettings(text, summary, err)) shareBody_ = summary;
                 else shareBody_ = err.empty() ? L"The clipboard is not a Synchronus share." : err;
             }
-            if (!shareBody_.empty() && shareCode_.empty())
-                rd_.Text(shareBody_, D2D1::RectF(B.left + 12, B.top + 36, B.right - 12, yb - 6), rd_.fSmall.Get(), col::muted);
+            if (!shareBody_.empty())
+                rd_.Text(shareBody_, D2D1::RectF(B.left + 350, yb, B.right, yb + 28), rd_.fSmall.Get(), col::muted,
+                         DWRITE_TEXT_ALIGNMENT_LEADING, DWRITE_PARAGRAPH_ALIGNMENT_CENTER);
             ToolButtons(B, dt, 76, L"Export", col::cyan, [this] { StartShareJob(); });
             return;
         }
         if (stage == Stage::ScriptsPrompt) {
             EnsureScriptFolders();
             const auto scripts = ListScripts();
-            rd_.Text(L"Scripts", D2D1::RectF(B.left, B.top + 6, B.right, B.top + 30), rd_.fPhase.Get(), col::cyan,
-                     DWRITE_TEXT_ALIGNMENT_CENTER);
-            rd_.Text(scripts.empty() ? (L"No scripts yet. Put a .ps1 or .bat file in " + ScriptsDir()) : L"A script runs only after it is approved.",
-                     D2D1::RectF(B.left + 12, B.top + 32, B.right - 12, B.top + 54), rd_.fSmall.Get(), col::muted);
-            float y = B.top + 58;
-            const int shown = std::min(8, static_cast<int>(scripts.size()));
-            for (int i = 0; i < shown; ++i) {
-                const D2D1_RECT_F row = D2D1::RectF(B.left + 8, y, B.right - 8, y + 28);
-                const std::wstring label = scripts[static_cast<size_t>(i)].hook + L"  " + scripts[static_cast<size_t>(i)].name;
-                if (CheckRow(760 + i, row, scripts[static_cast<size_t>(i)].approved, false, label.c_str(), dt)) {
-                    ApproveScript(scripts[static_cast<size_t>(i)], !scripts[static_cast<size_t>(i)].approved);
+            rd_.Text(L"SCRIPTS", D2D1::RectF(B.left, B.top, B.left + 150, B.top + 32), rd_.fPhase.Get(), col::cyan);
+            rd_.Text(ScriptsDir(), D2D1::RectF(B.left + 150, B.top, B.right, B.top + 32), rd_.fMonoSmall.Get(), col::dim,
+                     DWRITE_TEXT_ALIGNMENT_LEADING, DWRITE_PARAGRAPH_ALIGNMENT_CENTER);
+            const D2D1_RECT_F area = D2D1::RectF(B.left, B.top + 40, B.right, B.bottom - foot);
+            if (scripts.empty()) {
+                FillCard(area);
+                rd_.Text(L"No scripts yet. Add a .ps1 or .bat under a hook folder.", area, rd_.fPhase.Get(), col::muted,
+                         DWRITE_TEXT_ALIGNMENT_CENTER, DWRITE_PARAGRAPH_ALIGNMENT_CENTER);
+            } else {
+                const int n = std::min(8, static_cast<int>(scripts.size()));
+                const int cols = n > 4 ? 2 : 1;
+                const int rows = (n + cols - 1) / cols;
+                const float gap = 8.0f;
+                const float cw = (W(area) - gap * (cols - 1)) / cols;
+                const float ch = (H(area) - gap * (rows - 1)) / rows;
+                for (int i = 0; i < n; ++i) {
+                    const auto& script = scripts[static_cast<size_t>(i)];
+                    const D2D1_RECT_F card = D2D1::RectF(area.left + (i % cols) * (cw + gap), area.top + (i / cols) * (ch + gap),
+                                                        area.left + (i % cols) * (cw + gap) + cw,
+                                                        area.top + (i / cols) * (ch + gap) + ch);
+                    FillCard(card);
+                    DrawHBar(D2D1::RectF(card.left + 12, card.top + 12, card.left + 12 + std::min(120.0f, W(card) * 0.35f), card.top + 22),
+                             script.approved ? 1.0f : 0.15f, script.approved ? col::green : col::dim);
+                    rd_.Text(script.approved ? L"Approved" : L"Not approved",
+                             D2D1::RectF(card.left + 140, card.top + 8, card.right - 12, card.top + 26), rd_.fSmall.Get(),
+                             script.approved ? col::green : col::dim);
+                    rd_.Text(script.hook, D2D1::RectF(card.left + 12, card.top + 30, card.right - 12, card.top + 50), rd_.fSmall.Get(), col::cyan);
+                    rd_.Text(script.name, D2D1::RectF(card.left + 12, card.top + 50, card.right - 12, card.bottom - 8), rd_.fMonoSmall.Get(), col::text);
+                    if (Button(760 + i, D2D1::RectF(card.right - 110, card.bottom - 32, card.right - 10, card.bottom - 6),
+                               script.approved ? L"Revoke" : L"Approve", col::cyan, script.approved, true, dt, false, false, rd_.fSmall.Get()))
+                        ApproveScript(script, !script.approved);
                 }
-                y += 30;
             }
             ToolButtons(B, dt, 78, L"Run after-tune", col::cyan, [this] { StartScriptsJob(); });
             return;
         }
-        if (stage == Stage::MetricsPrompt) {
-            if (!meter_) meter_ = std::make_unique<LiveMeter>();
-            const unsigned long long now = GetTickCount64();
-            if (now >= nextMeterAt_) {
-                nextMeterAt_ = now + 500;
-                meter_->Sample(meterSample_);
-            }
-            const LiveSample& s = meterSample_;
-            rd_.Text(L"Metrics", D2D1::RectF(B.left, B.top + 6, B.right, B.top + 30), rd_.fPhase.Get(), col::cyan,
-                     DWRITE_TEXT_ALIGNMENT_CENTER);
-            rd_.Text(Fmt(L"CPU  %.0f%%\nDPC  %.2f%%    ISR  %.2f%%\nClock  %.0f MHz\nMemory  %.0f%%\nTimer  %.4f ms",
-                         s.cpu, s.dpc, s.isr, s.mhz, s.memory, s.timerMs),
-                     body, rd_.fPhase.Get(), col::text);
-            ToolButtons(B, dt, 80, L"Sample once", col::cyan, [this] { StartMetricsJob(); });
-            return;
-        }
         if (stage == Stage::FocusPrompt) {
-            rd_.Text(L"Focus", D2D1::RectF(B.left, B.top + 6, B.right, B.top + 30), rd_.fPhase.Get(), col::cyan,
+            const bool quiet = QuietHeld();
+            const bool bar = GameBarButtonOff();
+            const float gap = 12.0f;
+            const float cw = (W(B) - gap) * 0.5f;
+            const D2D1_RECT_F left = D2D1::RectF(B.left, B.top, B.left + cw, B.bottom - foot);
+            const D2D1_RECT_F right = D2D1::RectF(B.left + cw + gap, B.top, B.right, B.bottom - foot);
+            FillCard(left);
+            FillCard(right);
+            DrawGauge(D2D1::Point2F((left.left + left.right) * 0.5f, left.top + H(left) * 0.38f), std::min(78.0f, H(left) * 0.22f),
+                      quiet ? 1.0f : 0.08f, quiet ? col::cyan : col::dim, quiet ? L"HELD" : L"OPEN", L"BANNERS");
+            rd_.Text(L"Notification banners. Uninstall puts the previous policy back.",
+                     D2D1::RectF(left.left + 20, left.bottom - 92, left.right - 20, left.bottom - 56), rd_.fSmall.Get(), col::muted,
                      DWRITE_TEXT_ALIGNMENT_CENTER);
-            rd_.Text(L"Holds Windows notification banners and turns the Game Bar button off. Uninstall puts both back.",
-                     D2D1::RectF(B.left + 12, B.top + 36, B.right - 12, B.top + 80), rd_.fBody.Get(), col::muted,
-                     DWRITE_TEXT_ALIGNMENT_CENTER);
-            const float yb = B.top + 96;
-            if (Button(82, D2D1::RectF(B.left + 12, yb, B.left + 220, yb + 32), QuietHeld() ? L"Banners held" : L"Hold banners",
-                       col::cyan, QuietHeld(), true, dt)) {
-                if (QuietHeld()) QuietEnd();
+            if (Button(82, D2D1::RectF(left.left + 24, left.bottom - 48, left.right - 24, left.bottom - 12),
+                       quiet ? L"Release banners" : L"Hold banners", col::cyan, quiet, true, dt)) {
+                if (quiet) QuietEnd();
                 else QuietBegin();
             }
-            if (Button(83, D2D1::RectF(B.left + 232, yb, B.left + 460, yb + 32),
-                       GameBarButtonOff() ? L"Game Bar button off" : L"Turn Game Bar button off", col::amber,
-                       GameBarButtonOff(), true, dt))
-                SetGameBarButtonOff(!GameBarButtonOff());
+            DrawGauge(D2D1::Point2F((right.left + right.right) * 0.5f, right.top + H(right) * 0.38f), std::min(78.0f, H(right) * 0.22f),
+                      bar ? 1.0f : 0.08f, bar ? col::amber : col::dim, bar ? L"OFF" : L"ON", L"GAME BAR");
+            rd_.Text(L"The Game Bar button. The rest of Game Bar capture is still the GPU step.",
+                     D2D1::RectF(right.left + 20, right.bottom - 92, right.right - 20, right.bottom - 56), rd_.fSmall.Get(), col::muted,
+                     DWRITE_TEXT_ALIGNMENT_CENTER);
+            if (Button(83, D2D1::RectF(right.left + 24, right.bottom - 48, right.right - 24, right.bottom - 12),
+                       bar ? L"Turn the button on" : L"Turn the button off", col::amber, bar, true, dt))
+                SetGameBarButtonOff(!bar);
             ToolButtons(B, dt, 84, L"Hold both", col::cyan, [this] { StartFocusJob(); });
         }
     }
@@ -7915,6 +8355,14 @@ private:
     std::wstring shareCode_;
     bool netListed_ = false;
     bool audioListed_ = false;
+    bool hwListed_ = false;
+    bool benchViewReady_ = false;
+    bool benchViewBusy_ = false;
+    NetPlan netPlan_{};
+    std::vector<AudioDevice> audioDevs_;
+    std::vector<HardwareChange> hwChanges_;
+    BenchHistory benchView_{};
+    std::vector<float> cpuHist_, dpcHist_, isrHist_, memHist_, gpuHist_, clockHist_;
     std::unique_ptr<LiveMeter> meter_;
     LiveSample meterSample_{};
     unsigned long long nextMeterAt_ = 0;
