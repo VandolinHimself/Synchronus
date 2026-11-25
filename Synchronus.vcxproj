@@ -48,7 +48,7 @@
     <Link>
       <SubSystem>Windows</SubSystem>
       <GenerateDebugInformation>true</GenerateDebugInformation>
-      <AdditionalDependencies>ntdll.lib;advapi32.lib;shell32.lib;ole32.lib;powrprof.lib;windowscodecs.lib;d2d1.lib;d3d11.lib;d3dcompiler.lib;dwrite.lib;dxgi.lib;dwmapi.lib;winhttp.lib;bcrypt.lib;version.lib;%(AdditionalDependencies)</AdditionalDependencies>
+      <AdditionalDependencies>ntdll.lib;advapi32.lib;shell32.lib;ole32.lib;powrprof.lib;windowscodecs.lib;d2d1.lib;d3d11.lib;d3dcompiler.lib;dwrite.lib;dxgi.lib;dwmapi.lib;winhttp.lib;bcrypt.lib;version.lib;setupapi.lib;pdh.lib;%(AdditionalDependencies)</AdditionalDependencies>
     </Link>
   </ItemDefinitionGroup>
   <ItemDefinitionGroup Condition="'$(Configuration)|$(Platform)'=='Release|x64'">
@@ -68,7 +68,7 @@
       <EnableCOMDATFolding>true</EnableCOMDATFolding>
       <OptimizeReferences>true</OptimizeReferences>
       <GenerateDebugInformation>false</GenerateDebugInformation>
-      <AdditionalDependencies>ntdll.lib;advapi32.lib;shell32.lib;ole32.lib;powrprof.lib;windowscodecs.lib;d2d1.lib;d3d11.lib;d3dcompiler.lib;dwrite.lib;dxgi.lib;dwmapi.lib;winhttp.lib;bcrypt.lib;version.lib;%(AdditionalDependencies)</AdditionalDependencies>
+      <AdditionalDependencies>ntdll.lib;advapi32.lib;shell32.lib;ole32.lib;powrprof.lib;windowscodecs.lib;d2d1.lib;d3d11.lib;d3dcompiler.lib;dwrite.lib;dxgi.lib;dwmapi.lib;winhttp.lib;bcrypt.lib;version.lib;setupapi.lib;pdh.lib;%(AdditionalDependencies)</AdditionalDependencies>
     </Link>
   </ItemDefinitionGroup>
   <ItemGroup>
@@ -78,11 +78,18 @@
     <ClCompile Include="Update.cpp" />
     <ClCompile Include="Health.cpp" />
     <ClCompile Include="Aggregate.cpp" />
+    <ClCompile Include="Network.cpp" />
+    <ClCompile Include="Audio.cpp" />
+    <ClCompile Include="Profile.cpp" />
+    <ClCompile Include="Watch.cpp" />
+    <ClCompile Include="Bench.cpp" />
   </ItemGroup>
   <ItemGroup>
     <ClInclude Include="Gui.h" />
     <ClInclude Include="Health.h" />
     <ClInclude Include="Aggregate.h" />
+    <ClInclude Include="Extras.h" />
+    <ClInclude Include="Util.h" />
   </ItemGroup>
   <ItemGroup>
     <ResourceCompile Include="Synchronus.rc" />

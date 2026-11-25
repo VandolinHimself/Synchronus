@@ -29,8 +29,9 @@ struct HealthCheck {
     HealthStatus status = HealthStatus::Unknown;
     int severity = 0;  // 0 info, 1 attention, 2 error
     std::wstring explanation;
-    std::wstring repair;  // empty, or ppm/gpu/memory/storage/timer/afterburner
+    std::wstring repair;  // empty, or ppm/gpu/memory/storage/timer/afterburner/network/audio
     unsigned long long checkedAt = 0;
+    bool relaxed = false;  // left untuned on purpose by the Balanced profile
 };
 
 struct HealthSummary {
@@ -58,6 +59,9 @@ struct MonitorPrefs {
     std::wstring driverDir;
     std::wstring afterburnerDir;
     bool hdr = false;
+    bool gameBoost = false;      // lift Balanced to Performance while a game runs
+    bool gameQuiet = false;      // hold notification banners while a game runs
+    bool watchHardware = true;   // say so when the hardware is not what was tuned
 };
 
 const wchar_t* HealthStatusText(HealthStatus status);
@@ -91,6 +95,8 @@ struct StepChoices {
     bool afterburner = true;
     bool memory = true;
     bool storage = true;
+    bool network = true;
+    bool audio = false;  // changes how devices sound, so it is a choice
 };
 
 bool SetupComplete();

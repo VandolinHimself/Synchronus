@@ -13,6 +13,7 @@
 #include "Gui.h"
 #include "Health.h"
 #include "Aggregate.h"
+#include "Extras.h"
 #ifndef SHTDN_REASON_MAJOR_APPLICATION
 #define SHTDN_REASON_MAJOR_APPLICATION 0x00040000
 #define SHTDN_REASON_MINOR_MAINTENANCE 0x00000001
@@ -1456,13 +1457,15 @@ enum class Stage {
     AfterburnerPrompt, AfterburnerApplying, AfterburnerDone, AfterburnerFailed,
     MemoryPrompt, MemoryApplying, MemoryDone, MemoryFailed,
     StoragePrompt, StorageApplying, StorageDone, StorageFailed,
+    NetworkPrompt, NetworkApplying, NetworkDone, NetworkFailed,
+    AudioPrompt, AudioApplying, AudioDone, AudioFailed,
     Review,
     Monitor,
     Home,
     Fleet
 };
 
-constexpr int kStepCount = 10;
+constexpr int kStepCount = 12;
 
 struct StepMeta {
     int number;
@@ -1515,8 +1518,18 @@ StepMeta Meta(Stage s) {
         case Stage::StorageDone:
         case Stage::StorageFailed:
             return {9, L"Storage", L"SSD, PCIe, USB, TRIM"};
+        case Stage::NetworkPrompt:
+        case Stage::NetworkApplying:
+        case Stage::NetworkDone:
+        case Stage::NetworkFailed:
+            return {10, L"Network", L"Adapter power, packet delivery"};
+        case Stage::AudioPrompt:
+        case Stage::AudioApplying:
+        case Stage::AudioDone:
+        case Stage::AudioFailed:
+            return {11, L"Audio", L"Enhancements off"};
         case Stage::Review:
-            return {10, L"Review", L"BIOS, then restart"};
+            return {12, L"Review", L"BIOS, then restart"};
         case Stage::Monitor:
             return {0, L"Health", L"live settings"};
         case Stage::Fleet:
@@ -1524,7 +1537,7 @@ StepMeta Meta(Stage s) {
         case Stage::Home:
             return {0, L"Home", L"functions and live tweaks"};
         default:
-            return {10, L"Review", L"BIOS, then restart"};
+            return {12, L"Review", L"BIOS, then restart"};
     }
 }
 
@@ -1555,6 +1568,14 @@ bool IsTuneStage(Stage s) {
         case Stage::StorageApplying:
         case Stage::StorageDone:
         case Stage::StorageFailed:
+        case Stage::NetworkPrompt:
+        case Stage::NetworkApplying:
+        case Stage::NetworkDone:
+        case Stage::NetworkFailed:
+        case Stage::AudioPrompt:
+        case Stage::AudioApplying:
+        case Stage::AudioDone:
+        case Stage::AudioFailed:
         case Stage::Review:
         case Stage::Monitor:
             return true;
@@ -1598,10 +1619,18 @@ int PaneFamily(Stage s) {
         case Stage::StorageApplying:
         case Stage::StorageDone:
         case Stage::StorageFailed: return 8;
-        case Stage::Review: return 9;
-        case Stage::Home: return 10;
-        case Stage::Monitor: return 11;
-        case Stage::Fleet: return 12;
+        case Stage::NetworkPrompt:
+        case Stage::NetworkApplying:
+        case Stage::NetworkDone:
+        case Stage::NetworkFailed: return 9;
+        case Stage::AudioPrompt:
+        case Stage::AudioApplying:
+        case Stage::AudioDone:
+        case Stage::AudioFailed: return 10;
+        case Stage::Review: return 11;
+        case Stage::Home: return 12;
+        case Stage::Monitor: return 13;
+        case Stage::Fleet: return 14;
     }
     return 0;
 }
@@ -1616,6 +1645,8 @@ enum {
     kWantAfterburner,
     kWantMemory,
     kWantStorage,
+    kWantNetwork,
+    kWantAudio,
     kWantCount
 };
 
@@ -1629,8 +1660,15 @@ enum class JobId : int {
     Afterburner,
     Memory,
     Storage,
+    Network,
+    Audio,
     Count
 };
+
+// Every step in the order a full tune counts them. Index i is the step for want i.
+constexpr JobId kStepJobs[kWantCount] = {JobId::Prepare, JobId::Measure,     JobId::Hold,   JobId::Cpu,
+                                         JobId::GpuClean, JobId::Gpu,        JobId::Afterburner, JobId::Memory,
+                                         JobId::Storage,  JobId::Network,    JobId::Audio};
 
 enum class JobPhase : int { Idle = 0, Waiting, Running, Done, Failed, Cancelled };
 
@@ -1665,12 +1703,15 @@ public:
     explicit App(const Host& host) : host_(host) {
         fidelity_ = host_.fidelity;
         for (int i = 0; i < kWantCount; ++i) want_[i] = true;
+        // Audio changes how devices sound, so it starts unchecked.
+        want_[kWantAudio] = host_.audioForce;
         if (host_.prepareSkip) want_[kWantPrepare] = false;
         if (host_.ppmSkip) want_[kWantCpu] = false;
         if (host_.gpuSkip) want_[kWantGpu] = false;
         if (host_.afterburnerSkip) want_[kWantAfterburner] = false;
         if (host_.memorySkip) want_[kWantMemory] = false;
         if (host_.storageSkip) want_[kWantStorage] = false;
+        if (host_.networkSkip) want_[kWantNetwork] = false;
     }
 
     int Run() {
@@ -1960,6 +2001,8 @@ private:
             case JobId::Afterburner: return L"AFTERBURNER";
             case JobId::Memory: return L"MEMORY";
             case JobId::Storage: return L"STORAGE";
+            case JobId::Network: return L"NETWORK";
+            case JobId::Audio: return L"AUDIO";
             default: return L"SYNCHRONUS";
         }
     }
@@ -1975,6 +2018,8 @@ private:
             case JobId::Afterburner: return L"Afterburner";
             case JobId::Memory: return L"Memory";
             case JobId::Storage: return L"Storage";
+            case JobId::Network: return L"Network";
+            case JobId::Audio: return L"Audio";
             default: return L"";
         }
     }
@@ -2013,6 +2058,14 @@ private:
             case Stage::StorageApplying:
             case Stage::StorageDone:
             case Stage::StorageFailed: return JobId::Storage;
+            case Stage::NetworkPrompt:
+            case Stage::NetworkApplying:
+            case Stage::NetworkDone:
+            case Stage::NetworkFailed: return JobId::Network;
+            case Stage::AudioPrompt:
+            case Stage::AudioApplying:
+            case Stage::AudioDone:
+            case Stage::AudioFailed: return JobId::Audio;
             default: return JobId::Count;
         }
     }
@@ -2503,6 +2556,24 @@ private:
                     stage_ = Stage::StoragePrompt;
                     state_.Phase(L"STORAGE", L"SSD, PCIe, USB, TRIM");
                     return;
+                case kWantNetwork:
+                    if (!host_.applyNetwork) continue;
+                    if (host_.autoInstall) {
+                        StartNetwork();
+                        return;
+                    }
+                    stage_ = Stage::NetworkPrompt;
+                    state_.Phase(L"NETWORK", L"adapter power saving and packet delivery");
+                    return;
+                case kWantAudio:
+                    if (!host_.applyAudio) continue;
+                    if (host_.autoInstall) {
+                        StartAudio();
+                        return;
+                    }
+                    stage_ = Stage::AudioPrompt;
+                    state_.Phase(L"AUDIO", L"enhancements off");
+                    return;
                 default:
                     break;
             }
@@ -2517,7 +2588,7 @@ private:
     void MaybeStartMemory() { StartAtOrAfter(kWantMemory); }
     void MaybeStartStorage() { StartAtOrAfter(kWantStorage); }
 
-    void BeginWorkflow() {
+    StepChoices CurrentChoices() const {
         StepChoices choices;
         choices.prepare = Want(kWantPrepare);
         choices.measure = Want(kWantMeasure);
@@ -2528,8 +2599,19 @@ private:
         choices.afterburner = Want(kWantAfterburner);
         choices.memory = Want(kWantMemory);
         choices.storage = Want(kWantStorage);
-        SaveStepChoices(choices);
+        choices.network = Want(kWantNetwork);
+        choices.audio = Want(kWantAudio);
+        return choices;
+    }
+
+    void BeginWorkflow() {
+        SaveStepChoices(CurrentChoices());
         MarkSetupComplete();
+        // A full tune is the tuned plan and the timer hold, which is the Performance profile.
+        if (ActiveProfile() == Profile::Balanced || ChosenProfile() == Profile::Balanced) SetProfile(Profile::Performance, false);
+        tuneScripts_ = true;
+        baselinePending_ = !LoadBench(host_.dataDir).hasBaseline;
+        baselineStarted_ = false;
         chainAuto_ = false;
         hubReturn_ = false;
         deferGpu_ = false;
@@ -2565,6 +2647,8 @@ private:
         want_[kWantAfterburner] = choices.afterburner;
         want_[kWantMemory] = choices.memory;
         want_[kWantStorage] = choices.storage;
+        want_[kWantNetwork] = choices.network;
+        want_[kWantAudio] = choices.audio;
     }
 
     void OpenHome() {
@@ -2697,6 +2781,35 @@ private:
         if (show) stage_ = Stage::StorageApplying;
     }
 
+    // The Wi-Fi level is a power-plan value, so this step takes the same turn as CPU power and storage.
+    void StartNetwork(bool show = true) {
+        if (!JobBusy(JobId::Network)) {
+            LaunchJob(JobId::Network, [this](SharedState& feed) {
+                HeldLock power;
+                if (!AcquireGate(JobId::Network, powerMu_, L"another step is writing the power plan", feed, power)) return 1;
+                feed.Phase(L"NETWORK", L"adapter power saving and packet delivery");
+                const int rc = host_.applyNetwork ? host_.applyNetwork(feed) : 1;
+                feed.Phase(rc == 0 ? L"NETWORK" : L"NETWORK FAILED",
+                           rc == 0 ? L"written. Adapters pick it up at the next restart" : L"see the log for details");
+                return rc;
+            });
+        }
+        if (show) stage_ = Stage::NetworkApplying;
+    }
+
+    void StartAudio(bool show = true) {
+        if (!JobBusy(JobId::Audio)) {
+            LaunchJob(JobId::Audio, [this](SharedState& feed) {
+                feed.Phase(L"AUDIO", L"enhancements off on the connected devices");
+                const int rc = host_.applyAudio ? host_.applyAudio(feed) : 1;
+                feed.Phase(rc == 0 ? L"AUDIO" : L"AUDIO FAILED",
+                           rc == 0 ? L"enhancements are off" : L"see the log for details");
+                return rc;
+            });
+        }
+        if (show) stage_ = Stage::AudioApplying;
+    }
+
     bool PhaseIdle(JobId id) const {
         return jobs_[static_cast<int>(id)].phase.load() == static_cast<int>(JobPhase::Idle);
     }
@@ -2709,7 +2822,7 @@ private:
     bool VolumeBusy() const {
         return JobBusy(JobId::Prepare) || JobBusy(JobId::Memory) || GpuPhase() == GpuDl::Installing;
     }
-    bool PowerBusy() const { return JobBusy(JobId::Cpu) || JobBusy(JobId::Storage); }
+    bool PowerBusy() const { return JobBusy(JobId::Cpu) || JobBusy(JobId::Storage) || JobBusy(JobId::Network); }
     bool TimerBusy() const { return JobBusy(JobId::Measure) || JobBusy(JobId::Hold); }
     bool GpuResourceBusy() const {
         return JobBusy(JobId::Gpu) || JobBusy(JobId::Afterburner) || GpuPhase() == GpuDl::Installing;
@@ -2785,13 +2898,9 @@ private:
     }
 
     bool FleetComplete() const {
-        const JobId ids[] = {JobId::Prepare, JobId::Measure, JobId::Hold, JobId::Cpu, JobId::GpuClean,
-                             JobId::Gpu, JobId::Afterburner, JobId::Memory, JobId::Storage};
-        const int wants[] = {kWantPrepare, kWantMeasure, kWantHold, kWantCpu, kWantGpuClean,
-                             kWantGpu, kWantAfterburner, kWantMemory, kWantStorage};
         for (int i = 0; i < kWantCount; ++i) {
-            if (!Want(wants[i])) continue;
-            if (!JobSettled(ids[i])) return false;
+            if (!Want(i)) continue;
+            if (!JobSettled(kStepJobs[i])) return false;
         }
         return !afterburnerPrompt_ && !DriverNeedsChoice() && !PrepareNeedsChoice();
     }
@@ -2817,6 +2926,17 @@ private:
     }
 
     bool StartNextSafe() {
+        // The first full tune measures the PC before anything is changed, so there is something to compare with.
+        if (baselinePending_) {
+            if (benchBusy_.load()) return false;
+            if (baselineStarted_) {
+                baselinePending_ = false;
+            } else {
+                baselineStarted_ = true;
+                StartBench(true);
+                return false;
+            }
+        }
         if (Want(kWantPrepare) && !prepareWaived_ && PhaseIdle(JobId::Prepare) && !VolumeBusy()) {
             StartPrepare(false);
             return true;
@@ -2837,6 +2957,14 @@ private:
         }
         if (Want(kWantStorage) && PhaseIdle(JobId::Storage) && CpuSettled() && !PowerBusy()) {
             StartStorage(false);
+            return true;
+        }
+        if (Want(kWantNetwork) && PhaseIdle(JobId::Network) && CpuSettled() && !PowerBusy()) {
+            StartNetwork(false);
+            return true;
+        }
+        if (Want(kWantAudio) && PhaseIdle(JobId::Audio)) {
+            StartAudio(false);
             return true;
         }
         if (HoldReady()) {
@@ -3283,14 +3411,10 @@ private:
         if (stage == Stage::Fleet) {
             int wanted = 0;
             int settled = 0;
-            const JobId ids[] = {JobId::Prepare, JobId::Measure, JobId::Hold, JobId::Cpu, JobId::GpuClean,
-                                 JobId::Gpu, JobId::Afterburner, JobId::Memory, JobId::Storage};
-            const int wants[] = {kWantPrepare, kWantMeasure, kWantHold, kWantCpu, kWantGpuClean,
-                                 kWantGpu, kWantAfterburner, kWantMemory, kWantStorage};
             for (int i = 0; i < kWantCount; ++i) {
-                if (!Want(wants[i])) continue;
+                if (!Want(i)) continue;
                 ++wanted;
-                if (JobSettled(ids[i])) ++settled;
+                if (JobSettled(kStepJobs[i])) ++settled;
             }
             std::wstring detail = JobBanner();
             std::wstring finished;
@@ -3339,7 +3463,9 @@ private:
             else if (id == JobId::Gpu) StartAtOrAfter(kWantAfterburner);
             else if (id == JobId::Afterburner) StartAtOrAfter(kWantMemory);
             else if (id == JobId::Memory) StartAtOrAfter(kWantStorage);
-            else if (id == JobId::Storage) {
+            else if (id == JobId::Storage) StartAtOrAfter(kWantNetwork);
+            else if (id == JobId::Network) StartAtOrAfter(kWantAudio);
+            else if (id == JobId::Audio) {
                 stage_ = Stage::Review;
                 state_.Phase(L"REVIEW", L"set BIOS, then restart");
             }
@@ -3364,6 +3490,8 @@ private:
             {JobId::Afterburner, Stage::AfterburnerApplying, Stage::AfterburnerDone, Stage::AfterburnerFailed, Stage::AfterburnerFailed},
             {JobId::Memory, Stage::MemoryApplying, Stage::MemoryDone, Stage::MemoryFailed, Stage::MemoryFailed},
             {JobId::Storage, Stage::StorageApplying, Stage::StorageDone, Stage::StorageFailed, Stage::StorageFailed},
+            {JobId::Network, Stage::NetworkApplying, Stage::NetworkDone, Stage::NetworkFailed, Stage::NetworkFailed},
+            {JobId::Audio, Stage::AudioApplying, Stage::AudioDone, Stage::AudioFailed, Stage::AudioFailed},
         };
         const Stage stage = stage_.load();
         for (const Map& map : maps) {
@@ -3453,10 +3581,18 @@ private:
             } else if (id == JobId::Storage) {
                 kind = L"Storage";
                 detail = L"ASPM, USB suspend, TRIM, and SysMain applied";
+            } else if (id == JobId::Network) {
+                kind = L"Network";
+                detail = L"Adapter power saving, interrupt moderation, and update sharing applied";
+            } else if (id == JobId::Audio) {
+                kind = L"Audio";
+                detail = L"Enhancements turned off on the connected devices";
             }
             if (kind.empty()) continue;
             NoteTuneEvent(host_.dataDir, kind, detail);
             aggregateLoaded_ = false;
+            // A step that ran is tuned for the hardware that is here now.
+            if (id == JobId::Gpu || id == JobId::GpuClean || id == JobId::Cpu || id == JobId::Hold) hardwareSettled_ = true;
         }
     }
 
@@ -3657,19 +3793,7 @@ private:
         SetAfterburnerRoot(prefs_.afterburnerDir);
     }
 
-    void SaveCurrentChoices() {
-        StepChoices choices;
-        choices.prepare = Want(kWantPrepare);
-        choices.measure = Want(kWantMeasure);
-        choices.hold = Want(kWantHold);
-        choices.cpu = Want(kWantCpu);
-        choices.gpuClean = Want(kWantGpuClean);
-        choices.gpu = Want(kWantGpu);
-        choices.afterburner = Want(kWantAfterburner);
-        choices.memory = Want(kWantMemory);
-        choices.storage = Want(kWantStorage);
-        SaveStepChoices(choices);
-    }
+    void SaveCurrentChoices() { SaveStepChoices(CurrentChoices()); }
 
     bool DrawSettingsButton(const D2D1_RECT_F& r, float dt) {
         const bool clicked = HitTarget(251, r, true, dt);
@@ -4900,6 +5024,8 @@ private:
         else if (kind == L"gpu") id = JobId::Gpu;
         else if (kind == L"memory") id = JobId::Memory;
         else if (kind == L"storage") id = JobId::Storage;
+        else if (kind == L"network") id = JobId::Network;
+        else if (kind == L"audio") id = JobId::Audio;
         else if (kind == L"afterburner") id = JobId::Afterburner;
         else if (kind == L"timer") {
             id = JobId::Hold;
@@ -4925,6 +5051,8 @@ private:
         else if (id == JobId::Gpu) StartGpu(false);
         else if (id == JobId::Memory) StartMemory(false);
         else if (id == JobId::Storage) StartStorage(false);
+        else if (id == JobId::Network) StartNetwork(false);
+        else if (id == JobId::Audio) StartAudio(false);
         else if (id == JobId::Afterburner) StartAfterburner(false);
         else if (id == JobId::Hold) StartInstall(false, timerUnits);
     }

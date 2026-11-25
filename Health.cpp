@@ -1,4 +1,5 @@
 #include "Health.h"
+#include "Extras.h"
 
 #include <windows.h>
 #include <powrprof.h>
@@ -346,6 +347,9 @@ MonitorPrefs LoadMonitorPrefs() {
     if (ReadSz(HKEY_CURRENT_USER, kMonitor, L"DriverDir", path)) p.driverDir = path;
     if (ReadSz(HKEY_CURRENT_USER, kMonitor, L"AfterburnerDir", path)) p.afterburnerDir = path;
     if (ReadDword(HKEY_CURRENT_USER, kMonitor, L"HdrColors", v)) p.hdr = v != 0;
+    if (ReadDword(HKEY_CURRENT_USER, kMonitor, L"GameBoost", v)) p.gameBoost = v != 0;
+    if (ReadDword(HKEY_CURRENT_USER, kMonitor, L"GameQuiet", v)) p.gameQuiet = v != 0;
+    if (ReadDword(HKEY_CURRENT_USER, kMonitor, L"WatchHardware", v)) p.watchHardware = v != 0;
     return p;
 }
 
@@ -382,6 +386,9 @@ void SaveMonitorPrefs(const MonitorPrefs& prefs) {
     putSz(L"DriverDir", prefs.driverDir);
     putSz(L"AfterburnerDir", prefs.afterburnerDir);
     put(L"HdrColors", prefs.hdr ? 1 : 0);
+    put(L"GameBoost", prefs.gameBoost ? 1 : 0);
+    put(L"GameQuiet", prefs.gameQuiet ? 1 : 0);
+    put(L"WatchHardware", prefs.watchHardware ? 1 : 0);
     RegCloseKey(key);
     ApplyLaunchAtLogin(prefs.launchAtLogin);
 }
@@ -475,6 +482,8 @@ void SaveStepChoices(const StepChoices& choices) {
     put(L"afterburner", choices.afterburner);
     put(L"memory", choices.memory);
     put(L"storage", choices.storage);
+    put(L"network", choices.network);
+    put(L"audio", choices.audio);
     RegCloseKey(key);
 }
 
@@ -494,6 +503,8 @@ StepChoices LoadStepChoices() {
     get(L"afterburner", c.afterburner);
     get(L"memory", c.memory);
     get(L"storage", c.storage);
+    get(L"network", c.network);
+    get(L"audio", c.audio);
     return c;
 }
 
@@ -501,7 +512,8 @@ bool StepChosen(const wchar_t* name) {
     DWORD v = 1;
     const std::wstring full = std::wstring(L"Want_") + name;
     if (ReadDword(HKEY_CURRENT_USER, kMonitor, full.c_str(), v)) return v != 0;
-    return true;
+    // Audio is off until it is chosen. Every other step is on.
+    return _wcsicmp(name, L"audio") != 0;
 }
 
 void AppendHealthLog(const std::wstring& line) {
@@ -761,6 +773,12 @@ std::vector<HealthCheck> RunHealth(const std::atomic<bool>* cancelled) {
         }
         push(c);
     }
+    if (Stopped(cancelled)) return out;
+    AppendNetworkChecks(out, cancelled);
+    AppendAudioChecks(out, cancelled);
+    if (Stopped(cancelled)) return out;
+    // Balanced leaves the power plan and the timer to Windows. Those rows are not drift.
+    RelaxForProfile(out);
 
     AppendHealthLog(Summarize(out).headline);
     return out;

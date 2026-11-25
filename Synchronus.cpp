@@ -32,6 +32,7 @@
 #include "Gui.h"
 #include "Aggregate.h"
 #include "Health.h"
+#include "Extras.h"
 
 #include <algorithm>
 #include <mutex>
@@ -77,7 +78,7 @@ gui::MeasurePlan gui::MeasurePlanFor(int fidelity) {
 
 namespace {
 
-constexpr wchar_t kVersion[] = L"2.10.3";
+constexpr wchar_t kVersion[] = L"3.0.1";
 constexpr wchar_t kProduct[] = L"Synchronus";
 constexpr wchar_t kCompany[] = L"Lucius & Wayne Systems";
 constexpr wchar_t kCompanyUrl[] = L"https://luciuswayne.com";
@@ -103,8 +104,13 @@ constexpr wchar_t kKernelRegKey[] = L"SYSTEM\\CurrentControlSet\\Control\\Sessio
 constexpr wchar_t kGlobalFlagName[] = L"GlobalTimerResolutionRequests";
 constexpr wchar_t kThreadDpcName[] = L"ThreadDpcEnable";
 
+// The installed service accepts this control and re-reads the profile.
+constexpr DWORD kServiceControlProfile = 128;
+
 void HardenRepeatedDriftImpl(const std::wstring& kind);
 void RemoveUnusedServicesImpl();
+bool ApplyProfileImpl(gui::Profile target, std::wstring& detail);
+bool GuardFlag(const wchar_t* name);
 int CmdGuard();
 void EnsureGuardTask();
 std::wstring StartupTarget();
@@ -179,12 +185,25 @@ bool HasConsole(DWORD which) {
     return h && h != INVALID_HANDLE_VALUE && GetConsoleMode(h, &mode) != 0;
 }
 
+// Output sent to a file or a pipe, as in  Synchronus.exe --probe > report.txt
+bool WriteRedirected(DWORD which, const std::wstring& line) {
+    const HANDLE h = GetStdHandle(which);
+    if (!h || h == INVALID_HANDLE_VALUE) return false;
+    const DWORD type = GetFileType(h);
+    if (type != FILE_TYPE_PIPE && type != FILE_TYPE_DISK) return false;
+    const std::string bytes = ToUtf8(line) + "\r\n";
+    DWORD wrote = 0;
+    return WriteFile(h, bytes.data(), static_cast<DWORD>(bytes.size()), &wrote, nullptr) != 0;
+}
+
 // Console (when attached) + log + GUI feed. Not used inside the QPC-Sleep-QPC
 // window of a sample (I/O would skew timings).
 void Out(const std::wstring& line) {
     if (HasConsole(STD_OUTPUT_HANDLE)) {
         fwprintf(stdout, L"%s\n", line.c_str());
         fflush(stdout);
+    } else {
+        WriteRedirected(STD_OUTPUT_HANDLE, line);
     }
     LogLine(line);
     if (g_feed) g_feed->Log(line);
@@ -194,6 +213,8 @@ void Err(const std::wstring& line) {
     if (HasConsole(STD_ERROR_HANDLE) || HasConsole(STD_OUTPUT_HANDLE)) {
         fwprintf(stderr, L"%s\n", line.c_str());
         fflush(stderr);
+    } else if (!WriteRedirected(STD_ERROR_HANDLE, L"ERROR: " + line)) {
+        WriteRedirected(STD_OUTPUT_HANDLE, L"ERROR: " + line);
     }
     LogLine(L"ERROR: " + line);
     if (g_feed) g_feed->Log(L"ERROR: " + line);
@@ -850,6 +871,7 @@ bool StartServiceNamed(const wchar_t* name) {
 
 SERVICE_STATUS_HANDLE g_statusHandle = nullptr;
 HANDLE g_stopEvent = nullptr;
+HANDLE g_profileEvent = nullptr;
 ULONG g_serviceResolution = 0;
 
 void ReportServiceStatus(DWORD state, DWORD exitCode = 0) {
@@ -871,6 +893,9 @@ DWORD WINAPI ServiceCtrlHandler(DWORD control, DWORD, LPVOID, LPVOID) {
             ReportServiceStatus(SERVICE_STOP_PENDING);
             if (g_stopEvent) SetEvent(g_stopEvent);
             return NO_ERROR;
+        case kServiceControlProfile:
+            if (g_profileEvent) SetEvent(g_profileEvent);
+            return NO_ERROR;
         case SERVICE_CONTROL_INTERROGATE:
             return NO_ERROR;
         default:
@@ -885,6 +910,7 @@ void WINAPI ServiceMain(DWORD, LPWSTR*) {
     LogLine(L"service: starting");
 
     g_stopEvent = CreateEventW(nullptr, TRUE, FALSE, nullptr);
+    g_profileEvent = CreateEventW(nullptr, FALSE, FALSE, nullptr);
 
     // Resolution chosen at install time; fall back to the fastest the
     // kernel offers if the value is missing/corrupt.
@@ -922,30 +948,51 @@ void WINAPI ServiceMain(DWORD, LPWSTR*) {
     // NtQueryTimerResolution instead.
     RegSetDword(HKEY_LOCAL_MACHINE, kAppRegKey, L"AppliedResolution", 0);
     ULONG ignored = 0;
-    if (NtSetTimerResolution(g_serviceResolution, TRUE, &ignored) != 0) {
-        LogLine(L"service: NtSetTimerResolution failed");
-        ReportServiceStatus(SERVICE_STOPPED, 1);
-        return;
+    // The Balanced profile leaves the timer to Windows. The service stays running and
+    // takes the request up again the moment Performance is selected.
+    bool holding = false;
+    if (gui::ActiveProfile() == gui::Profile::Balanced) {
+        LogLine(L"service: the Balanced profile is active; the timer is left to Windows");
+    } else {
+        if (NtSetTimerResolution(g_serviceResolution, TRUE, &ignored) != 0) {
+            LogLine(L"service: NtSetTimerResolution failed");
+            ReportServiceStatus(SERVICE_STOPPED, 1);
+            return;
+        }
+        holding = true;
     }
     Sleep(5);
     QueryResolutions(slowest, fastest, current);
     RegSetDword(HKEY_LOCAL_MACHINE, kAppRegKey, L"AppliedResolution", current);
-    LogLine(Format(L"service: holding resolution %lu (%.4f ms); kernel reports %.4f ms", g_serviceResolution,
-                   UnitsToMs(g_serviceResolution), UnitsToMs(current)));
+    if (holding) {
+        LogLine(Format(L"service: holding resolution %lu (%.4f ms); kernel reports %.4f ms", g_serviceResolution,
+                       UnitsToMs(g_serviceResolution), UnitsToMs(current)));
+    }
     ReportServiceStatus(SERVICE_RUNNING);
 
     // Hold the request for the life of the process. Re-assert every 30 s:
     // cheap insurance against anything releasing/altering the effective
     // resolution, and it refreshes the AppliedResolution heartbeat that
-    // --status and the installer poll.
-    while (WaitForSingleObject(g_stopEvent, 30000) == WAIT_TIMEOUT) {
-        NtSetTimerResolution(g_serviceResolution, TRUE, &ignored);
+    // --status and the installer poll. A profile change wakes the loop early.
+    const HANDLE waits[2] = {g_stopEvent, g_profileEvent};
+    for (;;) {
+        const DWORD wait = WaitForMultipleObjects(2, waits, FALSE, 30000);
+        if (wait == WAIT_OBJECT_0 || wait == WAIT_FAILED) break;
+        const bool want = gui::ActiveProfile() != gui::Profile::Balanced;
+        if (want) {
+            NtSetTimerResolution(g_serviceResolution, TRUE, &ignored);
+            if (!holding) LogLine(L"service: Performance profile; holding the timer again");
+        } else if (holding) {
+            NtSetTimerResolution(g_serviceResolution, FALSE, &ignored);
+            LogLine(L"service: Balanced profile; timer released");
+        }
+        holding = want;
         Sleep(5);
         QueryResolutions(slowest, fastest, current);
         RegSetDword(HKEY_LOCAL_MACHINE, kAppRegKey, L"AppliedResolution", current);
     }
 
-    NtSetTimerResolution(g_serviceResolution, FALSE, &ignored);
+    if (holding) NtSetTimerResolution(g_serviceResolution, FALSE, &ignored);
     RegSetDword(HKEY_LOCAL_MACHINE, kAppRegKey, L"AppliedResolution", 0);
     LogLine(L"service: stopped, resolution released");
     ReportServiceStatus(SERVICE_STOPPED);
@@ -1083,7 +1130,10 @@ bool InstallService(ULONG desired, bool userPin = false) {
 
     // Confirm the kernel really runs at the requested resolution (or finer,
     // if some other process currently asks for even more).
-    if (ok) {
+    if (ok && gui::ActiveProfile() == gui::Profile::Balanced) {
+        Out(L"The Balanced profile is active, so the service is installed and waiting. It holds the timer "
+            L"when Performance is selected.");
+    } else if (ok) {
         DWORD applied = 0;
         bool confirmed = false;
         const ULONGLONG deadline = GetTickCount64() + 10000;
@@ -1444,10 +1494,21 @@ bool ActivateUltimatePerformance(std::wstring& detail) {
 }
 
 bool ApplyPpmTweaks() {
+    // Asking for the CPU step is asking for the tuned plan, so Balanced gives way first.
+    if (gui::ActiveProfile() == gui::Profile::Balanced) {
+        std::wstring detail;
+        gui::SetChosenProfile(gui::Profile::Performance);
+        ApplyProfileImpl(gui::Profile::Performance, detail);
+        Out(L"The Balanced profile was active. Switched to Performance for this step.");
+    }
+    // What was there before is kept from the first run only. A later run finds its own
+    // values in place, and saving those would leave nothing to go back to.
+    DWORD appliedBefore = 0;
+    const bool keepSaved = RegGetDword(HKEY_LOCAL_MACHINE, kAppRegKey, L"PpmApplied", appliedBefore) && appliedBefore != 0;
     GUID* previous = nullptr;
     if (PowerGetActiveScheme(nullptr, &previous) == ERROR_SUCCESS && previous) {
         wchar_t guidText[64] = {};
-        if (StringFromGUID2(*previous, guidText, _countof(guidText)) > 0) {
+        if (!keepSaved && StringFromGUID2(*previous, guidText, _countof(guidText)) > 0) {
             RegSetString(HKEY_LOCAL_MACHINE, kAppRegKey, L"PpmPreviousScheme", guidText);
         }
         LocalFree(previous);
@@ -1545,11 +1606,11 @@ bool ApplyPpmTweaks() {
             return false;
         }
 
-        if (hadAc) {
+        if (hadAc && !keepSaved) {
             RegSetDword(HKEY_LOCAL_MACHINE, kAppRegKey, Format(L"Ppm_%s_ac", t.alias).c_str(), ac);
             RegSetDword(HKEY_LOCAL_MACHINE, kAppRegKey, Format(L"Ppm_%s_hadAc", t.alias).c_str(), 1);
         }
-        if (hadDc) {
+        if (hadDc && !keepSaved) {
             RegSetDword(HKEY_LOCAL_MACHINE, kAppRegKey, Format(L"Ppm_%s_dc", t.alias).c_str(), dc);
             RegSetDword(HKEY_LOCAL_MACHINE, kAppRegKey, Format(L"Ppm_%s_hadDc", t.alias).c_str(), 1);
         }
@@ -1590,8 +1651,10 @@ bool ApplyPpmTweaks() {
         Dwell(1800);
         DWORD prev = 0;
         const bool had = RegGetDword(HKEY_LOCAL_MACHINE, kKernelRegKey, kThreadDpcName, prev);
-        RegSetDword(HKEY_LOCAL_MACHINE, kAppRegKey, L"ThreadDpcHad", had ? 1 : 0);
-        if (had) RegSetDword(HKEY_LOCAL_MACHINE, kAppRegKey, L"ThreadDpcPrev", prev);
+        if (!keepSaved) {
+            RegSetDword(HKEY_LOCAL_MACHINE, kAppRegKey, L"ThreadDpcHad", had ? 1 : 0);
+            if (had) RegSetDword(HKEY_LOCAL_MACHINE, kAppRegKey, L"ThreadDpcPrev", prev);
+        }
         const bool ok = RegSetDword(HKEY_LOCAL_MACHINE, kKernelRegKey, kThreadDpcName, 0);
         steps[ti].status = ok ? 2 : 3;
         steps[ti].change = had ? Format(L"%lu  \u2192  0", prev) : L"(unset)  \u2192  0";
@@ -1674,7 +1737,7 @@ bool RestorePpmTweaks() {
 bool DisableServiceTracked(const wchar_t* name);
 
 bool ApplyPowerTable(const PpmTweak* table, size_t count, std::vector<gui::PpmStepView>& steps, size_t start,
-                     const wchar_t* phase, int& wrote, int& failed) {
+                     const wchar_t* phase, int& wrote, int& failed, bool keepSaved) {
     GUID* scheme = nullptr;
     if (PowerGetActiveScheme(nullptr, &scheme) != ERROR_SUCCESS || !scheme) return false;
     for (size_t i = 0; i < count; ++i) {
@@ -1699,11 +1762,11 @@ bool ApplyPowerTable(const PpmTweak* table, size_t count, std::vector<gui::PpmSt
         Out(Format(L"    %s", t.why));
         Out(Format(L"    %s", steps[si].change.c_str()));
         Dwell(t.dwellMs);
-        if (hadAc) {
+        if (hadAc && !keepSaved) {
             RegSetDword(HKEY_LOCAL_MACHINE, kAppRegKey, Format(L"Pwr_%s_ac", t.alias).c_str(), ac);
             RegSetDword(HKEY_LOCAL_MACHINE, kAppRegKey, Format(L"Pwr_%s_hadAc", t.alias).c_str(), 1);
         }
-        if (hadDc) {
+        if (hadDc && !keepSaved) {
             RegSetDword(HKEY_LOCAL_MACHINE, kAppRegKey, Format(L"Pwr_%s_dc", t.alias).c_str(), dc);
             RegSetDword(HKEY_LOCAL_MACHINE, kAppRegKey, Format(L"Pwr_%s_hadDc", t.alias).c_str(), 1);
         }
@@ -1986,7 +2049,17 @@ bool ApplyStorageTweaks() {
     Dwell(1200);
 
     int wrote = 0, failed = 0;
-    if (!ApplyPowerTable(kStorageTweaks, _countof(kStorageTweaks), steps, 0, L"STORAGE", wrote, failed)) {
+    DWORD storageBefore = 0;
+    const bool keepSaved = RegGetDword(HKEY_LOCAL_MACHINE, kAppRegKey, L"StorageApplied", storageBefore) && storageBefore != 0;
+    if (gui::ActiveProfile() == gui::Profile::Balanced) {
+        // These three live in the power plan, and Balanced has handed the plan back to Windows.
+        for (size_t k = 0; k < _countof(kStorageTweaks); ++k) {
+            steps[k].status = 2;
+            steps[k].change = L"left to the Balanced profile";
+        }
+        PublishPpm(steps);
+        Out(L"  The Balanced profile is active, so the power-plan storage settings are left to Windows.");
+    } else if (!ApplyPowerTable(kStorageTweaks, _countof(kStorageTweaks), steps, 0, L"STORAGE", wrote, failed, keepSaved)) {
         Err(L"Could not open the active power scheme for storage tweaks.");
     }
 
@@ -2073,6 +2146,185 @@ bool RestoreStorageTweaks() {
         Out(L"Restored SysMain start type.");
     }
     Out(L"Restored storage power settings. Hibernate and TRIM were not reverted.");
+    return true;
+}
+
+// ---- network and audio steps ----------------------------------------------
+
+gui::StepIo MakeStepIo() {
+    gui::StepIo io;
+    io.feed = g_feed;
+    io.dwell = g_ppmDwell;
+    io.out = [](const std::wstring& line) { Out(line); };
+    io.err = [](const std::wstring& line) { Err(line); };
+    return io;
+}
+
+bool ApplyNetworkTweaks() {
+    gui::NetOptions options = gui::LoadNetOptions();
+    // The Wi-Fi level lives in the power plan, and Balanced has handed the plan back to Windows.
+    options.skipPlan = gui::ActiveProfile() == gui::Profile::Balanced;
+    return gui::ApplyNetwork(MakeStepIo(), options);
+}
+
+bool ApplyAudioTweaks() { return gui::ApplyAudio(MakeStepIo()); }
+
+// ---- profiles -------------------------------------------------------------
+//
+// Performance is the tuned power plan with the timer held. Balanced puts the
+// power plan back the way it was before the tune and lets the timer go. The
+// service keeps running in both and is told when the profile changes.
+
+bool PlanExists(const GUID& plan) {
+    for (ULONG index = 0; index < 64; ++index) {
+        ULONG size = sizeof(GUID);
+        GUID scheme{};
+        if (PowerEnumerate(nullptr, nullptr, nullptr, ACCESS_SCHEME, index, reinterpret_cast<UCHAR*>(&scheme), &size) !=
+            ERROR_SUCCESS)
+            break;
+        if (IsEqualGUID(scheme, plan)) return true;
+    }
+    return false;
+}
+
+std::wstring PlanName(const GUID& plan) {
+    UCHAR buf[512] = {};
+    DWORD size = sizeof(buf) - sizeof(wchar_t);
+    if (PowerReadFriendlyName(nullptr, &plan, nullptr, nullptr, buf, &size) != ERROR_SUCCESS) return L"previous";
+    return reinterpret_cast<const wchar_t*>(buf);
+}
+
+// 1 the service took the control, 0 there is no running service, -1 an older service that does not know it.
+int TellServiceProfile() {
+    SC_HANDLE scm = OpenSCManagerW(nullptr, nullptr, SC_MANAGER_CONNECT);
+    if (!scm) return 0;
+    SC_HANDLE svc = OpenServiceW(scm, kServiceName, SERVICE_USER_DEFINED_CONTROL | SERVICE_QUERY_STATUS);
+    if (!svc) {
+        CloseServiceHandle(scm);
+        return 0;
+    }
+    SERVICE_STATUS status{};
+    const BOOL ok = ControlService(svc, kServiceControlProfile, &status);
+    const DWORD rc = ok ? ERROR_SUCCESS : GetLastError();
+    CloseServiceHandle(svc);
+    CloseServiceHandle(scm);
+    if (ok) return 1;
+    return rc == ERROR_SERVICE_NOT_ACTIVE ? 0 : -1;
+}
+
+void WriteTableTargets(GUID* scheme, const PpmTweak* table, size_t count) {
+    for (size_t i = 0; i < count; ++i) {
+        WritePowerIndex(scheme, table[i].subgroup, table[i].setting, true, table[i].target);
+        WritePowerIndex(scheme, table[i].subgroup, table[i].setting, false, table[i].target);
+    }
+}
+
+// Undoes tuned values found in `scheme`. inPlace means the tuned plan is the plan the PC
+// had all along, so the values saved at the first tune go back. Otherwise only a plan that
+// the repeated-drift fix wrote into is touched, and it returns to that plan's own defaults.
+int RelaxTable(GUID* scheme, const PpmTweak* table, size_t count, const wchar_t* saved, bool inPlace, bool hardened) {
+    int changed = 0;
+    for (size_t i = 0; i < count; ++i) {
+        const PpmTweak& t = table[i];
+        for (int pass = 0; pass < 2; ++pass) {
+            const bool ac = pass == 0;
+            DWORD current = 0;
+            if (!ReadPowerIndex(scheme, t.subgroup, t.setting, ac, current) || current != t.target) continue;
+            DWORD back = 0;
+            bool have = false;
+            if (inPlace) {
+                DWORD flag = 0;
+                have = RegGetDword(HKEY_LOCAL_MACHINE, kAppRegKey,
+                                   Format(L"%s_%s_had%s", saved, t.alias, ac ? L"Ac" : L"Dc").c_str(), flag) &&
+                       flag &&
+                       RegGetDword(HKEY_LOCAL_MACHINE, kAppRegKey, Format(L"%s_%s_%s", saved, t.alias, ac ? L"ac" : L"dc").c_str(),
+                                   back);
+            } else if (hardened) {
+                have = (ac ? PowerReadACDefaultIndex(nullptr, scheme, &t.subgroup, &t.setting, &back)
+                           : PowerReadDCDefaultIndex(nullptr, scheme, &t.subgroup, &t.setting, &back)) == ERROR_SUCCESS;
+            }
+            if (have && back != current && WritePowerIndex(scheme, t.subgroup, t.setting, ac, back)) ++changed;
+        }
+    }
+    return changed;
+}
+
+bool ApplyProfileImpl(gui::Profile target, std::wstring& detail) {
+    static std::mutex gate;
+    std::lock_guard<std::mutex> lock(gate);
+    const gui::Profile now = gui::ActiveProfile();
+    DWORD flag = 0;
+    const bool ppmApplied = RegGetDword(HKEY_LOCAL_MACHINE, kAppRegKey, L"PpmApplied", flag) && flag != 0;
+    flag = 0;
+    const bool storageApplied = RegGetDword(HKEY_LOCAL_MACHINE, kAppRegKey, L"StorageApplied", flag) && flag != 0;
+
+    GUID* active = nullptr;
+    if (PowerGetActiveScheme(nullptr, &active) != ERROR_SUCCESS || !active) {
+        detail = L"The active power plan could not be read, so the profile was not changed.";
+        return false;
+    }
+    const GUID was = *active;
+    LocalFree(active);
+
+    std::wstring plan;
+    if (target == gui::Profile::Balanced) {
+        bool inPlace = false;
+        if (now != gui::Profile::Balanced) {
+            wchar_t text[64] = {};
+            if (StringFromGUID2(was, text, _countof(text)) > 0) RegSetString(HKEY_LOCAL_MACHINE, kAppRegKey, L"ProfileTunedPlan", text);
+            GUID before{};
+            std::wstring saved;
+            const bool other = RegGetString(HKEY_LOCAL_MACHINE, kAppRegKey, L"PpmPreviousScheme", saved) &&
+                               CLSIDFromString(saved.c_str(), &before) == NOERROR && PlanExists(before) && !IsEqualGUID(before, was);
+            if (other && PowerSetActiveScheme(nullptr, &before) == ERROR_SUCCESS) plan = PlanName(before);
+            else inPlace = true;
+            RegSetDword(HKEY_LOCAL_MACHINE, kAppRegKey, L"ProfileInPlace", inPlace ? 1 : 0);
+        } else {
+            DWORD v = 0;
+            inPlace = RegGetDword(HKEY_LOCAL_MACHINE, kAppRegKey, L"ProfileInPlace", v) && v != 0;
+        }
+        int changed = 0;
+        GUID* current = nullptr;
+        if (PowerGetActiveScheme(nullptr, &current) == ERROR_SUCCESS && current) {
+            if (ppmApplied) changed += RelaxTable(current, kPpmTweaks, _countof(kPpmTweaks), L"Ppm", inPlace, GuardFlag(L"GuardPpm"));
+            if (storageApplied)
+                changed += RelaxTable(current, kStorageTweaks, _countof(kStorageTweaks), L"Pwr", inPlace, GuardFlag(L"GuardStorage"));
+            if (changed) PowerSetActiveScheme(nullptr, current);
+            LocalFree(current);
+        }
+        RegSetDword(HKEY_LOCAL_MACHINE, kAppRegKey, L"Profile", 1);
+        const int told = TellServiceProfile();
+        if (told < 0) StopInstalledService();
+        detail = L"Balanced. ";
+        if (!plan.empty()) detail += L"Windows is back on the " + plan + L" power plan.";
+        else if (changed) detail += L"The power plan has the values it had before the tune.";
+        else detail += L"The power plan was not tuned, so it is unchanged.";
+        if (told != 0) detail += L" The timer hold is released.";
+    } else {
+        if (now == gui::Profile::Balanced) {
+            GUID tuned{};
+            std::wstring saved;
+            if (RegGetString(HKEY_LOCAL_MACHINE, kAppRegKey, L"ProfileTunedPlan", saved) &&
+                CLSIDFromString(saved.c_str(), &tuned) == NOERROR && PlanExists(tuned) && !IsEqualGUID(tuned, was))
+                PowerSetActiveScheme(nullptr, &tuned);
+            GUID* current = nullptr;
+            if (PowerGetActiveScheme(nullptr, &current) == ERROR_SUCCESS && current) {
+                if (ppmApplied) WriteTableTargets(current, kPpmTweaks, _countof(kPpmTweaks));
+                if (storageApplied) WriteTableTargets(current, kStorageTweaks, _countof(kStorageTweaks));
+                PowerSetActiveScheme(nullptr, current);
+                plan = PlanName(*current);
+                LocalFree(current);
+            }
+        }
+        RegSetDword(HKEY_LOCAL_MACHINE, kAppRegKey, L"Profile", 0);
+        const int told = TellServiceProfile();
+        if (told < 0) StartServiceNamed(kServiceName);
+        detail = L"Performance. ";
+        if (ppmApplied || storageApplied) detail += plan.empty() ? L"The tuned power plan is active." : L"The tuned " + plan + L" power plan is active.";
+        else detail += L"The power plan has not been tuned yet. Run CPU power to tune it.";
+        if (told != 0) detail += L" The timer is held again.";
+    }
+    LogLine(L"Profile: " + detail);
     return true;
 }
 
@@ -2714,10 +2966,19 @@ bool UninstallService() {
 
     DeleteServiceNamed(kLegacyServiceName);
     RunHiddenWait(L"C:\\Windows\\System32\\schtasks.exe", L"/Delete /F /TN \"Synchronus Guard\"", 15000);
+    // The saved values belong to the tuned plan, so that plan has to be the active one before they go back.
+    if (gui::ActiveProfile() == gui::Profile::Balanced) {
+        std::wstring detail;
+        ApplyProfileImpl(gui::Profile::Performance, detail);
+    }
     RestorePpmTweaks();
     RestoreGpuTweaks();
     RestoreMemoryTweaks();
     RestoreStorageTweaks();
+    const gui::StepIo io = MakeStepIo();
+    gui::RestoreNetwork(&io);
+    gui::RestoreAudio(&io);
+    gui::RestoreGameSettings();
 
     // Restore GlobalTimerResolutionRequests to whatever it was before us.
     DWORD saved = 0, hadValue = 0, previous = 0;
@@ -3437,8 +3698,21 @@ void PrintHelp() {
         L"      --no-afterburner                 Skip the Afterburner step.\n"
         L"  Synchronus.exe --apply-memory        Pagefile + disable memory compression only.\n"
         L"  Synchronus.exe --apply-storage       PCIe/USB/disk/TRIM/SysMain tweaks only.\n"
-        L"      --no-prepare / --no-memory / --no-storage\n"
+        L"  Synchronus.exe --apply-network       Adapter power saving and interrupt moderation off,\n"
+        L"                                       Windows Update sharing off. Live after a restart.\n"
+        L"  Synchronus.exe --apply-audio         Audio enhancements off on the connected devices.\n"
+        L"      --audio                          Include the Audio step in the full flow.\n"
+        L"  Synchronus.exe --restore-network     Put the network settings back.\n"
+        L"  Synchronus.exe --restore-audio       Put the audio enhancements back.\n"
+        L"      --no-prepare / --no-memory / --no-storage / --no-network\n"
         L"                                       Skip that step in the full flow.\n"
+        L"  Synchronus.exe --profile performance|balanced\n"
+        L"                                       Performance holds the tuned power plan and the timer.\n"
+        L"                                       Balanced hands both back to Windows.\n"
+        L"  Synchronus.exe --export FILE         Save step choices and preferences to FILE.\n"
+        L"  Synchronus.exe --import FILE         Load them from FILE.\n"
+        L"  Synchronus.exe --probe               Show what the Network and Audio steps would change,\n"
+        L"                                       the hardware, and any game running. Changes nothing.\n"
         L"  Synchronus.exe --yes                 Do not prompt for confirmation.\n"
         L"  Synchronus.exe --no-pause            Do not pause at the end, and skip the\n"
         L"                                       per-tweak dwell (scripting).\n"
@@ -3465,6 +3739,9 @@ struct Options {
     bool noPrepare = false;
     bool noMemory = false;
     bool noStorage = false;
+    bool noNetwork = false;
+    bool audio = false;        // include the Audio step in the full flow
+    std::wstring value;        // --profile name, or the --export / --import file
     int fidelity = 1;          // 0 low, 1 medium (default), 2 high
     bool fidelitySet = false;
     bool samplesSet = false;
@@ -3516,6 +3793,31 @@ bool ParseOptions(const std::vector<std::wstring>& args, Options& opts) {
             opts.command = L"memory";
         } else if (a == L"--apply-storage") {
             opts.command = L"storage";
+        } else if (a == L"--apply-network") {
+            opts.command = L"network";
+        } else if (a == L"--apply-audio") {
+            opts.command = L"audio";
+        } else if (a == L"--restore-network") {
+            opts.command = L"restore-network";
+        } else if (a == L"--restore-audio") {
+            opts.command = L"restore-audio";
+        } else if (a == L"--probe") {
+            opts.command = L"probe";
+        } else if (a == L"--no-network") {
+            opts.noNetwork = true;
+        } else if (a == L"--audio") {
+            opts.audio = true;
+        } else if (a == L"--profile" || a == L"--export" || a == L"--import") {
+            if (i + 1 >= args.size()) {
+                Err(a == L"--profile" ? L"--profile requires performance or balanced." : a + L" requires a file name.");
+                return false;
+            }
+            opts.command = a.substr(2);
+            opts.value = args[++i];
+            if (a == L"--profile" && opts.value != L"performance" && opts.value != L"balanced") {
+                Err(L"--profile requires performance or balanced.");
+                return false;
+            }
         } else if (a == L"--resolution") {
             if (!needValue(opts.resolution, 1, L"--resolution (100-ns units, e.g. 5070 = 0.507 ms)")) return false;
         } else if (a == L"--measured") {
@@ -3991,6 +4293,21 @@ int CmdInstall(const Options& opts, bool interactiveDefault) {
             ApplyStorageTweaks();
         }
     }
+    if (!opts.noNetwork) {
+        if (opts.yes || Confirm(opts, L"Apply network tweaks (adapter power saving off, interrupt moderation off, "
+                                      L"Windows Update sharing off)? They take effect after a restart.")) {
+            g_ppmDwell = !opts.noPause;
+            ApplyNetworkTweaks();
+        }
+    }
+    // Audio changes how devices sound, so it runs only when it is asked for.
+    if (opts.audio || (!opts.yes && Confirm(opts,
+                                            L"Turn off audio enhancements on the connected devices? A device that relies "
+                                            L"on an effect will sound plainer.",
+                                            false))) {
+        g_ppmDwell = !opts.noPause;
+        ApplyAudioTweaks();
+    }
     Out(L"Restart when you are ready. Windows cannot change BIOS, so set these by hand:");
     Out(L"  Lock the CPU multiplier. Disable Intel Turbo / EIST / Speed Shift, or AMD PBO / Precision Boost.");
     Out(L"  Disable deep C-states. Leave C1 if the machine will not POST without it.");
@@ -4067,6 +4384,12 @@ void EnsureConsole() {
         g_console = true;
         return;
     }
+    // Output that was sent to a file or a pipe stays there. Attaching a console would take it away.
+    const HANDLE redirected = GetStdHandle(STD_OUTPUT_HANDLE);
+    if (redirected && redirected != INVALID_HANDLE_VALUE) {
+        const DWORD type = GetFileType(redirected);
+        if (type == FILE_TYPE_PIPE || type == FILE_TYPE_DISK) return;
+    }
     if (AttachConsole(ATTACH_PARENT_PROCESS)) {
         g_console = true;
     } else if (AllocConsole()) {
@@ -4084,6 +4407,65 @@ void EnsureConsole() {
     freopen_s(&in, "CONIN$", "r", stdin);
 }
 
+// Read-only. Prints what the newer steps would do on this PC without doing it.
+int CmdProbe() {
+    Out(Format(L"Synchronus %s probe. Nothing is changed.", kVersion));
+    Out(L"");
+    Out(L"Hardware: " + gui::HardwareSummary());
+    Out(Format(L"Profile: %s chosen, %s active", gui::ProfileName(gui::ChosenProfile()), gui::ProfileName(gui::ActiveProfile())));
+
+    Out(L"");
+    Out(L"Network step");
+    const gui::NetPlan plan = gui::PlanNetwork(gui::NetOptions{});
+    if (plan.adapters.empty()) Out(L"  no physical network adapter found");
+    for (const auto& a : plan.adapters) {
+        Out(Format(L"  %s%s", a.name.c_str(), a.wifi ? L"  (Wi-Fi)" : L""));
+        if (a.changes.empty()) Out(L"    this driver has none of the settings the step changes");
+        for (const auto& c : a.changes) {
+            Out(Format(L"    %-34s %s  ->  %s%s", c.title.c_str(), c.from.empty() ? L"(default)" : c.from.c_str(), c.to.c_str(),
+                       c.already ? L"   already set" : L""));
+        }
+    }
+    if (plan.hasWifi) {
+        Out(plan.wifiPowerReadable ? Format(L"  Wi-Fi power plan level: %u  ->  0%s", plan.wifiPowerAc,
+                                            plan.wifiPowerAc == 0 ? L"   already set" : L"")
+                                   : L"  Wi-Fi power plan level: unreadable");
+    }
+    Out(plan.deliveryPolicySet ? Format(L"  Windows Update sharing: download mode %u  ->  0%s", plan.deliveryMode,
+                                        plan.deliveryMode == 0 ? L"   already set" : L"")
+                               : L"  Windows Update sharing: not set  ->  0");
+    Out(Format(L"  %d change(s) pending. Applied before: %s", plan.pending, gui::NetworkApplied() ? L"yes" : L"no"));
+
+    Out(L"");
+    Out(L"Audio step");
+    const auto devices = gui::ListAudioDevices();
+    if (devices.empty()) Out(L"  no active audio device found");
+    for (const auto& d : devices) {
+        Out(Format(L"  %-9s %-52s enhancements %s", d.capture ? L"recording" : L"playback", d.name.c_str(),
+                   !d.readable ? L"unreadable" : (d.enhancementsOff ? L"off" : L"on  ->  off")));
+    }
+    Out(Format(L"  Applied before: %s", gui::AudioApplied() ? L"yes" : L"no"));
+
+    Out(L"");
+    Out(L"Games");
+    const gui::GameRules rules = gui::LoadGameRules();
+    const auto known = gui::WindowsKnownGames();
+    Out(Format(L"  Windows lists %u game(s). You added %u and excluded %u.", static_cast<unsigned>(known.size()),
+               static_cast<unsigned>(rules.include.size()), static_cast<unsigned>(rules.exclude.size())));
+    std::vector<std::pair<DWORD, int>> verdicts;
+    gui::GameHit hit;
+    if (gui::FindRunningGame(rules, known, verdicts, hit)) Out(L"  Running now: " + hit.path);
+    else Out(L"  No game is running now.");
+
+    Out(L"");
+    const auto scripts = gui::ListScripts();
+    int approved = 0;
+    for (const auto& s : scripts)
+        if (s.approved) ++approved;
+    Out(Format(L"Scripts: %u found in %s, %d approved", static_cast<unsigned>(scripts.size()), gui::ScriptsDir().c_str(), approved));
+    return 0;
+}
+
 int RunCli(const Options& opts, const std::vector<std::wstring>& args) {
     if (opts.command == L"help") {
         PrintHelp();
@@ -4093,6 +4475,7 @@ int RunCli(const Options& opts, const std::vector<std::wstring>& args) {
         wprintf(L"Synchronus %s\n%s\n%s\n", kVersion, kCompany, kCompanyUrl);
         return 0;
     }
+    if (opts.command == L"probe") return CmdProbe();
     if (opts.command == L"status") return CmdStatus();
     if (opts.command == L"guard") return CmdGuard();
     if (opts.command == L"apply") return CmdApply(opts);
@@ -4105,7 +4488,9 @@ int RunCli(const Options& opts, const std::vector<std::wstring>& args) {
                             opts.command == L"gpu" || opts.command == L"afterburner" ||
                             opts.command == L"benchmark" ||
                             opts.command == L"prepare" || opts.command == L"memory" ||
-                            opts.command == L"storage";
+                            opts.command == L"storage" || opts.command == L"network" || opts.command == L"audio" ||
+                            opts.command == L"restore-network" || opts.command == L"restore-audio" ||
+                            opts.command == L"profile" || opts.command == L"import";
 
     // One tuner at a time: two benchmarks fighting over the resolution
     // would invalidate each other's measurements.
@@ -4161,6 +4546,42 @@ int RunCli(const Options& opts, const std::vector<std::wstring>& args) {
         } else if (opts.command == L"storage") {
             g_ppmDwell = !opts.noPause;
             exitCode = ApplyStorageTweaks() ? 0 : 1;
+        } else if (opts.command == L"network") {
+            g_ppmDwell = !opts.noPause;
+            exitCode = ApplyNetworkTweaks() ? 0 : 1;
+        } else if (opts.command == L"audio") {
+            g_ppmDwell = !opts.noPause;
+            exitCode = ApplyAudioTweaks() ? 0 : 1;
+        } else if (opts.command == L"restore-network") {
+            const gui::StepIo io = MakeStepIo();
+            gui::RestoreNetwork(&io);
+            Out(L"Network settings are back to what they were. Adapter settings return at the next restart.");
+        } else if (opts.command == L"restore-audio") {
+            const gui::StepIo io = MakeStepIo();
+            gui::RestoreAudio(&io);
+            Out(L"Audio enhancements are back to what they were.");
+        } else if (opts.command == L"profile") {
+            const gui::Profile target = opts.value == L"balanced" ? gui::Profile::Balanced : gui::Profile::Performance;
+            std::wstring detail;
+            gui::SetChosenProfile(target);
+            exitCode = ApplyProfileImpl(target, detail) ? 0 : 1;
+            Out(detail);
+        } else if (opts.command == L"export") {
+            exitCode = gui::WriteTextFile(opts.value, gui::ExportSettings(kVersion)) ? 0 : 1;
+            Out(exitCode == 0 ? L"Saved step choices and preferences to " + opts.value : L"Could not write " + opts.value);
+        } else if (opts.command == L"import") {
+            std::wstring text, summary, err;
+            if (!gui::ReadTextFile(opts.value, text)) {
+                Err(L"Could not read " + opts.value);
+                exitCode = 1;
+            } else if (!gui::ImportSettings(text, summary, err)) {
+                Err(err);
+                exitCode = 1;
+            } else {
+                Out(summary);
+                std::wstring detail;
+                if (ApplyProfileImpl(gui::ChosenProfile(), detail)) Out(detail);
+            }
         } else if (opts.command == L"health") {
             const auto checks = gui::RunHealth(nullptr);
             const gui::HealthSummary sum = gui::Summarize(checks);
@@ -4173,6 +4594,7 @@ int RunCli(const Options& opts, const std::vector<std::wstring>& args) {
         } else if (opts.command == L"self-test") {
             exitCode = gui::SelfTestHealth();
             if (exitCode == 0) exitCode = SelfTestAggregate();
+            if (exitCode == 0) exitCode = gui::SelfTestExtras();
             Out(exitCode == 0 ? L"Self-test passed." : L"Self-test failed.");
         }
     }
@@ -4885,6 +5307,32 @@ int RunGui(const Options& opts, const std::vector<std::wstring>& args) {
         g_feed = nullptr;
         return ok ? 0 : 1;
     };
+    host.applyNetwork = [](gui::Feed& feed) -> int {
+        g_feed = &feed;
+        g_ppmDwell = true;
+        feed.Phase(L"NETWORK", L"adapter power saving, packet delivery, update sharing");
+        const bool ok = ApplyNetworkTweaks();
+        g_feed = nullptr;
+        return ok ? 0 : 1;
+    };
+    host.applyAudio = [](gui::Feed& feed) -> int {
+        g_feed = &feed;
+        g_ppmDwell = true;
+        feed.Phase(L"AUDIO", L"enhancements off on the connected devices");
+        const bool ok = ApplyAudioTweaks();
+        g_feed = nullptr;
+        return ok ? 0 : 1;
+    };
+    host.restoreNetwork = [] {
+        const gui::StepIo io = MakeStepIo();
+        gui::RestoreNetwork(&io);
+    };
+    host.restoreAudio = [] {
+        const gui::StepIo io = MakeStepIo();
+        gui::RestoreAudio(&io);
+    };
+    host.networkSkip = opts.noNetwork;
+    host.audioForce = opts.audio;
     host.restartService = [] { RestartInstalledService(); };
     host.harden = [](const std::wstring& kind) { HardenRepeatedDriftImpl(kind); };
     host.tidyServices = [] { RemoveUnusedServicesImpl(); };
@@ -5133,9 +5581,12 @@ void HardenTimerPersistent() {
 
 void HardenPowerPersistent(bool storage) {
     g_ppmDwell = false;
-    if (!storage) WriteTweaksEveryScheme(kPpmTweaks, _countof(kPpmTweaks));
-    else {
-        WriteTweaksEveryScheme(kStorageTweaks, _countof(kStorageTweaks));
+    // Balanced has handed the power plans back, so nothing is written into them here.
+    const bool plans = gui::ActiveProfile() != gui::Profile::Balanced;
+    if (!storage) {
+        if (plans) WriteTweaksEveryScheme(kPpmTweaks, _countof(kPpmTweaks));
+    } else {
+        if (plans) WriteTweaksEveryScheme(kStorageTweaks, _countof(kStorageTweaks));
         PinServiceOff(L"SysMain");
     }
     MarkGuard(storage ? L"GuardStorage" : L"GuardPpm");
@@ -5218,10 +5669,12 @@ void RemoveUnusedServicesImpl() {
 int CmdGuard() {
     g_ppmDwell = false;
     LogLine(L"Startup guard");
+    // Under Balanced the power plans belong to Windows. The guard still keeps services pinned.
+    const bool plans = gui::ActiveProfile() != gui::Profile::Balanced;
     if (GuardFlag(L"GuardTimer")) HardenTimerPersistent();
-    if (GuardFlag(L"GuardPpm")) WriteTweaksEveryScheme(kPpmTweaks, _countof(kPpmTweaks));
+    if (GuardFlag(L"GuardPpm") && plans) WriteTweaksEveryScheme(kPpmTweaks, _countof(kPpmTweaks));
     if (GuardFlag(L"GuardStorage")) {
-        WriteTweaksEveryScheme(kStorageTweaks, _countof(kStorageTweaks));
+        if (plans) WriteTweaksEveryScheme(kStorageTweaks, _countof(kStorageTweaks));
         PinServiceOff(L"SysMain");
     }
     if (GuardFlag(L"GuardGpu")) {
@@ -5242,6 +5695,7 @@ namespace gui {
 void AppendTuneChecks(std::vector<HealthCheck>& out, const std::atomic<bool>* cancelled) {
     FillTuneChecks(out, cancelled);
 }
+bool ApplyProfile(Profile p, std::wstring& detail) { return ApplyProfileImpl(p, detail); }
 }  // namespace gui
 
 static bool LooksLikeCli(const std::vector<std::wstring>& args, const Options& opts) {
@@ -5275,7 +5729,8 @@ int WINAPI wWinMain(HINSTANCE, HINSTANCE, PWSTR, int) {
         return 1;
     }
 
-    const bool allowUnelevated = opts.command == L"help" || opts.command == L"version" || opts.command == L"self-test";
+    const bool allowUnelevated = opts.command == L"help" || opts.command == L"version" || opts.command == L"self-test" ||
+                                 opts.command == L"probe";
     if (!allowUnelevated && !IsAdmin()) {
         if (opts.elevated) {
             if (LooksLikeCli(args, opts)) {

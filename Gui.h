@@ -203,6 +203,8 @@ struct Host {
     bool prepareSkip = false;
     bool memorySkip = false;
     bool storageSkip = false;
+    bool networkSkip = false;                                   // --no-network
+    bool audioForce = false;                                    // --audio
     unsigned pinnedResolution = 0;                              // skip the benchmark, install this (100-ns units)
     bool measuredHandoff = false;                               // pinnedResolution was already chosen from a run
     int fidelity = 1;                                           // 0 low, 1 medium, 2 high
@@ -219,6 +221,10 @@ struct Host {
     std::function<int(Feed&)> applyPrepare;
     std::function<int(Feed&)> applyMemory;
     std::function<int(Feed&)> applyStorage;
+    std::function<int(Feed&)> applyNetwork;
+    std::function<int(Feed&)> applyAudio;
+    std::function<void()> restoreNetwork;                       // put back what the Network step replaced
+    std::function<void()> restoreAudio;
     std::function<void()> restartService;                       // undo a benchmark's service stop
     // Stronger, repeatable protection after the same setting drifts again.
     // Does not install a driver or run the Afterburner scan.
