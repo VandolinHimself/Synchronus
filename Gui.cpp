@@ -1994,6 +1994,7 @@ public:
         updateStop_.store(true);
         state_.Cancel();
         CancelAllJobs();
+        StopMeterThread();
         if (updateThread_.joinable()) updateThread_.join();
         healthStop_.store(true);
         if (healthThread_.joinable()) healthThread_.join();
@@ -4152,6 +4153,10 @@ private:
 
         PollJobs();
         Stage stage = stage_.load();
+        const bool metrics =
+            stage == Stage::MetricsPrompt || stage == Stage::MetricsApplying || stage == Stage::MetricsDone ||
+            stage == Stage::MetricsFailed;
+        if (!metrics) StopMeterThread();
         PublishSnap(stage);
         if (revealT_ > 0) revealT_ = std::min(1.0f, revealT_ + dt * 0.8f);
         if (installT_ > 0) installT_ = std::min(1.0f, installT_ + dt * 1.2f);
@@ -7155,10 +7160,15 @@ private:
         return D2D1::Point2F(axis(p0.x, p1.x, p2.x, p3.x), axis(p0.y, p1.y, p2.y, p3.y));
     }
 
+    struct MeterPoint {
+        double t = 0;
+        float cpu = 0, mem = 0, dpc = 0, isr = 0, clock = 0, gpu = 0;
+    };
+
     // Same axes, cyan stroke, and head mark as the home aggregate curve. The line is a
     // spline, and its place on the plot moves with the clock so it slides every frame.
-    void DrawSlidingCurve(const D2D1_RECT_F& plot, double now, double window, int field, float ymax, D2D1_COLOR_F color,
-                          float width, bool axes, bool head) {
+    void DrawSlidingCurve(const D2D1_RECT_F& plot, const std::deque<MeterPoint>& trace, double now, double window, int field,
+                          float ymax, D2D1_COLOR_F color, float width, bool axes, bool head) {
         const D2D1_RECT_F inner = D2D1::RectF(plot.left + 36, plot.top + 8, plot.right - 8, plot.bottom - 22);
         if (axes) {
             rd_.Line(D2D1::Point2F(inner.left, inner.top), D2D1::Point2F(inner.left, inner.bottom), Alpha(col::border, 0.8f), 1);
@@ -7169,7 +7179,7 @@ private:
             rd_.Text(Fmt(L"%.2f", ymax), D2D1::RectF(plot.left, inner.top - 2, inner.left - 2, inner.top + 14), rd_.fMonoSmall.Get(),
                      col::dim, DWRITE_TEXT_ALIGNMENT_TRAILING);
         }
-        if (meterTrace_.size() < 2 || !(inner.right > inner.left) || !(inner.bottom > inner.top)) {
+        if (trace.size() < 2 || !(inner.right > inner.left) || !(inner.bottom > inner.top)) {
             if (axes)
                 rd_.Text(L"Waiting for samples", inner, rd_.fSmall.Get(), col::dim, DWRITE_TEXT_ALIGNMENT_CENTER,
                          DWRITE_PARAGRAPH_ALIGNMENT_CENTER);
@@ -7183,9 +7193,9 @@ private:
             return p.cpu;
         };
         std::vector<D2D1_POINT_2F> raw;
-        raw.reserve(meterTrace_.size());
+        raw.reserve(trace.size());
         const float top = std::max(ymax, 0.001f);
-        for (const auto& p : meterTrace_) {
+        for (const auto& p : trace) {
             if (p.t < start) continue;
             const float x = inner.left + static_cast<float>((p.t - start) / window) * (inner.right - inner.left);
             const float y = inner.bottom - (inner.bottom - inner.top) * Clamp01(valueOf(p) / top);
@@ -7212,42 +7222,96 @@ private:
         }
     }
 
+    static double MeterClock() {
+        static double inv = 0;
+        if (inv == 0) {
+            LARGE_INTEGER freq{};
+            QueryPerformanceFrequency(&freq);
+            inv = 1.0 / static_cast<double>(freq.QuadPart ? freq.QuadPart : 1);
+        }
+        LARGE_INTEGER now{};
+        QueryPerformanceCounter(&now);
+        return static_cast<double>(now.QuadPart) * inv;
+    }
+
+    void StartMeterThread() {
+        if (meterThread_.joinable()) return;
+        meterStop_.store(false);
+        meterThread_ = std::thread([this] {
+            LiveMeter meter;
+            while (!meterStop_.load()) {
+                LiveSample sample;
+                const bool shares = meter.Sample(sample);
+                {
+                    std::lock_guard<std::mutex> lock(meterMu_);
+                    if (shares || meterTrace_.empty()) meterSample_ = sample;
+                    else {
+                        meterSample_.mhz = sample.mhz;
+                        meterSample_.maxMhz = sample.maxMhz;
+                        meterSample_.timerMs = sample.timerMs;
+                        meterSample_.memory = sample.memory;
+                        meterSample_.gpuTemp = sample.gpuTemp;
+                        meterSample_.gpuLoad = sample.gpuLoad;
+                        meterSample_.zoneTemp = sample.zoneTemp;
+                        meterSample_.hasGpuTemp = sample.hasGpuTemp;
+                        meterSample_.hasGpuLoad = sample.hasGpuLoad;
+                        meterSample_.hasZone = sample.hasZone;
+                    }
+                    if (shares) {
+                        MeterPoint point;
+                        point.t = MeterClock();
+                        point.cpu = static_cast<float>(meterSample_.cpu);
+                        point.mem = static_cast<float>(meterSample_.memory);
+                        point.dpc = static_cast<float>(meterSample_.dpc);
+                        point.isr = static_cast<float>(meterSample_.isr);
+                        point.clock = static_cast<float>(meterSample_.mhz);
+                        point.gpu = meterSample_.hasGpuLoad ? static_cast<float>(meterSample_.gpuLoad) : 0;
+                        meterTrace_.push_back(point);
+                        const double keep = point.t - 14.0;
+                        while (meterTrace_.size() > 2 && meterTrace_.front().t < keep) meterTrace_.pop_front();
+                    }
+                }
+                const unsigned long long until = GetTickCount64() + 250;
+                while (!meterStop_.load() && GetTickCount64() < until) Sleep(15);
+            }
+        });
+    }
+
+    void StopMeterThread() {
+        if (!meterThread_.joinable()) return;
+        meterStop_.store(true);
+        meterThread_.join();
+    }
+
     void DrawMetricsBoard(const D2D1_RECT_F& B, float dt, Stage stage) {
-        (void)dt;
-        if (!meter_) meter_ = std::make_unique<LiveMeter>();
+        StartMeterThread();
         LiveSample sample;
-        const bool shares = meter_->Sample(sample);
-        if (shares || meterTrace_.empty()) meterSample_ = sample;
-        else {
-            meterSample_.mhz = sample.mhz;
-            meterSample_.maxMhz = sample.maxMhz;
-            meterSample_.timerMs = sample.timerMs;
-            meterSample_.memory = sample.memory;
-            meterSample_.gpuTemp = sample.gpuTemp;
-            meterSample_.gpuLoad = sample.gpuLoad;
-            meterSample_.zoneTemp = sample.zoneTemp;
-            meterSample_.hasGpuTemp = sample.hasGpuTemp;
-            meterSample_.hasGpuLoad = sample.hasGpuLoad;
-            meterSample_.hasZone = sample.hasZone;
+        std::deque<MeterPoint> trace;
+        {
+            std::lock_guard<std::mutex> lock(meterMu_);
+            sample = meterSample_;
+            trace = meterTrace_;
         }
-        if (shares) {
-            MeterPoint point;
-            point.t = time_;
-            point.cpu = static_cast<float>(meterSample_.cpu);
-            point.mem = static_cast<float>(meterSample_.memory);
-            point.dpc = static_cast<float>(meterSample_.dpc);
-            point.isr = static_cast<float>(meterSample_.isr);
-            point.clock = static_cast<float>(meterSample_.mhz);
-            point.gpu = static_cast<float>(meterSample_.gpuLoad);
-            meterTrace_.push_back(point);
-            const double keep = time_ - 14.0;
-            while (meterTrace_.size() > 2 && meterTrace_.front().t < keep) meterTrace_.pop_front();
-            float peak = 0.5f;
-            for (const auto& p : meterTrace_)
-                if (p.t >= time_ - 12.0) peak = std::max(peak, p.dpc);
-            dpcScale_ += (std::max(0.5f, peak * 1.2f) - dpcScale_) * std::min(1.0f, dt * 1.5f);
+        const float glide = 1.0f - std::exp(-dt / 0.16f);
+        shownCpu_ += (static_cast<float>(sample.cpu) - shownCpu_) * glide;
+        shownMem_ += (static_cast<float>(sample.memory) - shownMem_) * glide;
+        shownDpc_ += (static_cast<float>(sample.dpc) - shownDpc_) * glide;
+        shownGpu_ += (static_cast<float>(sample.hasGpuLoad ? sample.gpuLoad : 0) - shownGpu_) * glide;
+        if (!trace.empty()) {
+            MeterPoint tip = trace.back();
+            tip.t = MeterClock();
+            tip.cpu = shownCpu_;
+            tip.mem = shownMem_;
+            tip.dpc = shownDpc_;
+            tip.gpu = shownGpu_;
+            trace.push_back(tip);
         }
-        const LiveSample& s = meterSample_;
+        float peak = 0.5f;
+        const double clock = trace.empty() ? MeterClock() : trace.back().t;
+        for (const auto& p : trace)
+            if (p.t >= clock - 12.0) peak = std::max(peak, p.dpc);
+        dpcScale_ += (std::max(0.5f, peak * 1.2f) - dpcScale_) * std::min(1.0f, dt * 1.5f);
+        const LiveSample& s = sample;
         rd_.Text(L"METRICS", D2D1::RectF(B.left, B.top, B.left + 220, B.top + 32), rd_.fPhase.Get(), col::cyan,
                  DWRITE_TEXT_ALIGNMENT_LEADING, DWRITE_PARAGRAPH_ALIGNMENT_CENTER);
         rd_.Text(L"Live CPU, DPC, clock, memory, and GPU. The first sample only primes the counters.",
@@ -7263,11 +7327,10 @@ private:
         const float gaugeH = std::min(230.0f, std::max(156.0f, (B.bottom - y - 16.0f) * 0.36f));
         const float gw = (W(B) - gap * 3.0f) / 4.0f;
         const wchar_t* gLabel[4] = {L"CPU", L"MEMORY", L"DPC", L"GPU"};
-        const float gFrac[4] = {static_cast<float>(s.cpu / 100.0), static_cast<float>(s.memory / 100.0),
-                                static_cast<float>(std::min(1.0, s.dpc / 5.0)),
-                                s.hasGpuLoad ? static_cast<float>(s.gpuLoad / 100.0) : 0.0f};
-        const std::wstring gValue[4] = {Fmt(L"%.0f%%", s.cpu), Fmt(L"%.0f%%", s.memory), Fmt(L"%.2f%%", s.dpc),
-                                        s.hasGpuLoad ? Fmt(L"%.0f%%", s.gpuLoad) : L"—"};
+        const float gFrac[4] = {shownCpu_ / 100.0f, shownMem_ / 100.0f, std::min(1.0f, shownDpc_ / 5.0f),
+                                s.hasGpuLoad ? shownGpu_ / 100.0f : 0.0f};
+        const std::wstring gValue[4] = {Fmt(L"%.0f%%", shownCpu_), Fmt(L"%.0f%%", shownMem_), Fmt(L"%.2f%%", shownDpc_),
+                                        s.hasGpuLoad ? Fmt(L"%.0f%%", shownGpu_) : L"—"};
         D2D1_COLOR_F gColor[4] = {col::cyan, col::muted, s.dpc > 2.0 ? col::red : col::amber, col::green};
         for (int i = 0; i < 4; ++i) {
             const D2D1_RECT_F card = D2D1::RectF(B.left + i * (gw + gap), y, B.left + i * (gw + gap) + gw, y + gaugeH);
@@ -7285,12 +7348,12 @@ private:
                  col::cyan);
         rd_.Text(L"Memory", D2D1::RectF(cpuCard.left + 70, cpuCard.top + 6, cpuCard.left + 160, cpuCard.top + 24), rd_.fSmall.Get(),
                  col::violet);
-        rd_.Text(Fmt(L"%.0f%%    %.0f%%", s.cpu, s.memory),
+        rd_.Text(Fmt(L"%.0f%%    %.0f%%", shownCpu_, shownMem_),
                  D2D1::RectF(cpuCard.right - 160, cpuCard.top + 6, cpuCard.right - 12, cpuCard.top + 24), rd_.fMonoSmall.Get(),
                  col::text, DWRITE_TEXT_ALIGNMENT_TRAILING);
         const D2D1_RECT_F cpuPlot = D2D1::RectF(cpuCard.left + 4, cpuCard.top + 26, cpuCard.right - 4, cpuCard.bottom - 4);
-        DrawSlidingCurve(cpuPlot, time_, 12.0, 1, 100.0f, Alpha(col::violet, 0.85f), 1.2f, false, false);
-        DrawSlidingCurve(cpuPlot, time_, 12.0, 0, 100.0f, col::cyan, 1.8f, true, true);
+        DrawSlidingCurve(cpuPlot, trace, clock, 12.0, 1, 100.0f, Alpha(col::violet, 0.85f), 1.2f, false, false);
+        DrawSlidingCurve(cpuPlot, trace, clock, 12.0, 0, 100.0f, col::cyan, 1.8f, true, true);
         y += graphH + gap;
         const float cardH = std::max(52.0f, B.bottom - y);
         const wchar_t* names[4] = {L"TIMER", L"ISR", L"CLOCK", s.hasGpuTemp ? L"GPU TEMP" : L"ZONE"};
@@ -8405,11 +8468,11 @@ private:
     std::vector<AudioDevice> audioDevs_;
     std::vector<HardwareChange> hwChanges_;
     BenchHistory benchView_{};
-    struct MeterPoint {
-        double t = 0;
-        float cpu = 0, mem = 0, dpc = 0, isr = 0, clock = 0, gpu = 0;
-    };
     std::deque<MeterPoint> meterTrace_;
+    std::mutex meterMu_;
+    std::thread meterThread_;
+    std::atomic<bool> meterStop_{false};
+    float shownCpu_ = 0, shownMem_ = 0, shownDpc_ = 0, shownGpu_ = 0;
     float dpcScale_ = 1.0f;
     unsigned long long nextZoneAt_ = 0;
     bool benchHasRun_ = false;

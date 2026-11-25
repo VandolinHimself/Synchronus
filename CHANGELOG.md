@@ -1,6 +1,10 @@
 # Changelog
 
-Current release: **3.1.3**.
+Current release: **3.1.4**.
+
+## 3.1.4 — 2026-11-24
+
+- Metrics samples on its own thread every quarter second. The window keeps drawing at the display rate, and the curve glides between those samples.
 
 ## 3.1.3 — 2026-11-24
 
