@@ -7,6 +7,8 @@ Current release: **3.1.2**.
 - Each new step fills its own pane. Network, audio, profile, games, hardware, share, scripts, and focus draw cards, bars, and gauges instead of a block of text.
 - Bench draws the baseline and the latest run as paired bars for sleep, wake, DPC, CPU, memory, and disk.
 - Metrics fills the pane: four gauges, CPU, memory, DPC, and GPU or clock traces, and a strip for the timer, ISR, clock, and temperature.
+- The metrics curve samples every frame, slides with the clock, and uses a smooth line in the same cyan and violet as the home timing curve.
+- The home list is one row per tune zone, with a green or red box. The detail is on the pointer.
 
 ## 3.1.1 — 2026-11-24
 

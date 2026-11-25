@@ -6533,107 +6533,98 @@ private:
         rd_.Text(L"Not every item applies on all hardware.",
                  D2D1::RectF(rx, B.top + 42, B.right, B.top + 58), rd_.fSmall.Get(), col::dim,
                  DWRITE_TEXT_ALIGNMENT_TRAILING);
-        const wchar_t* groupNames[] = {L"Hold timer", L"CPU power", L"GPU driver", L"GPU settings",
-                                       L"Afterburner", L"Memory", L"Storage"};
-        const wchar_t* groupCats[] = {L"Timer Resolution", L"Power and Performance", L"Graphics Drivers",
-                                      L"Windows Configuration", L"Supporting Utilities", L"Memory and CPU", L"Storage"};
-        struct Group {
-            const wchar_t* title;
-            std::vector<int> items;
-        };
-        Group groups[8]{};
-        for (int g = 0; g < 7; ++g) groups[g].title = groupNames[g];
-        groups[7].title = L"Other";
-        for (int i = 0; i < static_cast<int>(rows.size()); ++i) {
-            int g = 7;
-            for (int k = 0; k < 7; ++k) {
-                if (rows[static_cast<size_t>(i)].category == groupCats[k]) g = k;
+        if (GetTickCount64() >= nextZoneAt_) {
+            nextZoneAt_ = GetTickCount64() + 4000;
+            const BenchHistory history = LoadBench(host_.dataDir);
+            benchHasRun_ = history.hasBaseline || !history.runs.empty();
+            scriptsApproved_ = false;
+            for (const auto& script : ListScripts()) {
+                if (script.approved) scriptsApproved_ = true;
             }
-            groups[g].items.push_back(i);
         }
+        struct Zone {
+            const wchar_t* title;
+            const wchar_t* category;
+            const wchar_t* about;
+            int kind;
+        };
+        const Zone zones[] = {
+            {L"Timer", L"Timer Resolution", L"The boot service and the resolution Windows is holding.", 0},
+            {L"CPU", L"Power and Performance", L"The processor power plan, core parking, and throttling.", 0},
+            {L"GPU driver", L"Graphics Drivers", L"The installed graphics driver.", 0},
+            {L"GPU settings", L"Windows Configuration", L"Scheduling, capture, and the vendor profile.", 0},
+            {L"Afterburner", L"Supporting Utilities", L"Afterburner and RivaTuner set to start at sign-in.", 0},
+            {L"Memory", L"Memory and CPU", L"The page file and memory compression.", 0},
+            {L"Storage", L"Storage", L"SysMain, TRIM, and drive power.", 0},
+            {L"Network", L"Network", L"Adapter power saving, interrupt moderation, and update sharing.", 0},
+            {L"Audio", L"Audio", L"Enhancements on the connected playback and recording devices.", 0},
+            {L"Profile", nullptr, L"Performance keeps the tuned plan and the timer hold. Balanced hands them back.", 1},
+            {L"Games", nullptr, L"A running game lifts Balanced to Performance, then returns it.", 2},
+            {L"Hardware", nullptr, L"GPU, driver, CPU, BIOS, and Windows still match the last tune.", 3},
+            {L"Bench", nullptr, L"A saved run to compare sleep, DPC, CPU, memory, and disk.", 4},
+            {L"Scripts", nullptr, L"Approved scripts under the Synchronus scripts folder.", 5},
+            {L"Focus", nullptr, L"Notification banners held, or the Game Bar button off.", 6},
+        };
+        const int zoneCount = static_cast<int>(sizeof(zones) / sizeof(zones[0]));
         const float listTop = B.top + 64;
         const float availH = std::max(40.0f, B.bottom - listTop);
-        float itemH = 20.0f;
-        const float headH = 22.0f;
-        auto groupHeight = [&](size_t n) { return 8.0f + headH + n * itemH + 6.0f; };
-        float tallest = 0;
-        for (const auto& g : groups) {
-            if (!g.items.empty()) tallest = std::max(tallest, groupHeight(g.items.size()));
-        }
-        while (tallest > availH - 4.0f && itemH > 12.0f) {
-            itemH -= 1.0f;
-            tallest = 0;
-            for (const auto& g : groups) {
-                if (!g.items.empty()) tallest = std::max(tallest, groupHeight(g.items.size()));
+        const int cols = 2;
+        const int zoneRows = (zoneCount + cols - 1) / cols;
+        const float rowGap = 6.0f;
+        const float rowH = std::min(34.0f, (availH - rowGap * (zoneRows - 1)) / zoneRows);
+        const float zoneGap = 8.0f;
+        const float zoneW = (B.right - rx - zoneGap) / cols;
+        for (int i = 0; i < zoneCount; ++i) {
+            const Zone& zone = zones[i];
+            const int col = i / zoneRows;
+            const int row = i % zoneRows;
+            const D2D1_RECT_F cell = D2D1::RectF(rx + col * (zoneW + zoneGap), listTop + row * (rowH + rowGap),
+                                                rx + col * (zoneW + zoneGap) + zoneW, listTop + row * (rowH + rowGap) + rowH);
+            bool applied = false;
+            int seen = 0, open = 0;
+            std::wstring detail = zone.about;
+            if (zone.kind == 0) {
+                for (const auto& c : rows) {
+                    if (c.category != zone.category) continue;
+                    ++seen;
+                    if (HealthNeedsAttention(c.status)) {
+                        ++open;
+                        if (open <= 6) detail += L"\n" + c.name;
+                    }
+                }
+                applied = seen > 0 && open == 0;
+                if (seen == 0) detail += L"\nNot read yet.";
+                else if (open == 0) detail += L"\nIn place.";
+                else detail += Fmt(L"\n%d still open.", open);
+            } else if (zone.kind == 1) {
+                applied = ActiveProfile() == ChosenProfile();
+                detail += applied ? L"\nThe selected profile is the one in effect." : L"\nThe selected profile is not the one in effect.";
+            } else if (zone.kind == 2) {
+                applied = prefs_.gameBoost;
+                detail += applied ? L"\nWatch is on." : L"\nWatch is off.";
+            } else if (zone.kind == 3) {
+                applied = prefs_.watchHardware && hardwareNote_.empty();
+                detail += hardwareNote_.empty() ? L"\nNothing new since the last tune." : L"\n" + hardwareNote_;
+            } else if (zone.kind == 4) {
+                applied = benchHasRun_;
+                detail += applied ? L"\nA run is saved." : L"\nNo run is saved yet.";
+            } else if (zone.kind == 5) {
+                applied = scriptsApproved_;
+                detail += applied ? L"\nAt least one script is approved." : L"\nNo script is approved.";
+            } else {
+                applied = QuietHeld() || GameBarButtonOff();
+                detail += applied ? L"\nBanners are held or the Game Bar button is off." : L"\nBanners and the Game Bar button are still as Windows left them.";
             }
-        }
-        const float cardGap = 8.0f;
-        const float paneW = std::max(80.0f, B.right - rx);
-        int columns = 1;
-        float used = 0;
-        for (const auto& g : groups) {
-            if (g.items.empty()) continue;
-            const float h = groupHeight(g.items.size()) + cardGap;
-            if (used > 0 && used + h > availH) {
-                ++columns;
-                used = 0;
-            }
-            used += h;
-        }
-        float groupW = 228.0f;
-        if (columns * (groupW + cardGap) > paneW) groupW = std::max(128.0f, (paneW - cardGap * columns) / columns);
-        float xRight = B.right;
-        float y = listTop;
-        bool placed = false;
-        for (int gi = 0; gi < 8; ++gi) {
-            const auto& g = groups[gi];
-            if (g.items.empty()) continue;
-            const float h = groupHeight(g.items.size());
-            if (placed && y + h > B.bottom - 2) {
-                xRight -= groupW + cardGap;
-                y = listTop;
-            }
-            placed = true;
-            const D2D1_RECT_F card = D2D1::RectF(xRight - groupW, y, xRight, y + h);
-            const wchar_t* groupBlurbs[] = {
-                L"The boot service and the global flag that hold the chosen timer resolution, plus the resolution Windows is using right now.",
-                L"Each processor power setting from the CPU step. Green means the live value still matches the tune. Red means it has drifted.",
-                L"The installed graphics driver. This check does not decide whether a newer driver exists.",
-                L"Hardware-accelerated GPU scheduling, Game DVR, Game Bar, and the vendor profile.",
-                L"Whether Afterburner and RivaTuner are installed and set to start at sign-in. A green box does not by itself mean an overclock is active.",
-                L"The page file and memory compression.",
-                L"SysMain and TRIM.",
-                L"Checks that do not belong to one of the steps above.",
-            };
-            NoteTip(card, g.title, groupBlurbs[gi]);
-            rd_.FillRound(card, 12, Alpha(col::panel, 0.92f));
-            rd_.StrokeRound(card, 12, Alpha(col::cyan, 0.35f), 1.2f);
-            rd_.Text(g.title, D2D1::RectF(card.left + 8, card.top + 4, card.right - 8, card.top + 4 + headH),
-                     itemH >= 16.0f ? rd_.fSmall.Get() : rd_.fMonoSmall.Get(), col::cyan,
+            NoteTip(cell, zone.title, detail);
+            rd_.FillRound(cell, 8, Alpha(col::panel, 0.92f));
+            rd_.StrokeRound(cell, 8, Alpha(col::cyan, 0.28f), 1.0f);
+            const float box = std::max(8.0f, rowH - 14.0f);
+            const D2D1_RECT_F mark = D2D1::RectF(cell.right - 8 - box, cell.top + (rowH - box) * 0.5f, cell.right - 8,
+                                                cell.top + (rowH + box) * 0.5f);
+            const D2D1_COLOR_F markC = applied ? col::green : col::red;
+            rd_.FillRound(mark, 2, markC);
+            rd_.Text(zone.title, D2D1::RectF(cell.left + 10, cell.top, mark.left - 6, cell.bottom), rd_.fSmall.Get(), col::text,
                      DWRITE_TEXT_ALIGNMENT_TRAILING, DWRITE_PARAGRAPH_ALIGNMENT_CENTER);
-            float iy = card.top + 6 + headH;
-            for (int index : g.items) {
-                const auto& c = rows[static_cast<size_t>(index)];
-                const bool applied = c.status == HealthStatus::Pass;
-                const D2D1_COLOR_F mark = applied ? col::green : col::red;
-                const D2D1_RECT_F row = D2D1::RectF(card.left + 4, iy, card.right - 4, iy + itemH);
-                std::wstring about = c.explanation.empty() ? std::wstring(L"This check only reads the live value.") : c.explanation;
-                about += L"\n\nStatus: ";
-                about += HealthStatusText(c.status);
-                if (!c.observed.empty()) about += L"\nLive: " + c.observed;
-                if (!c.expected.empty()) about += L"\nExpected: " + c.expected;
-                NoteTip(row, c.name, about);
-                const float box = std::max(8.0f, itemH - 6.0f);
-                const D2D1_RECT_F markR = D2D1::RectF(card.right - 8 - box, iy + (itemH - box) * 0.5f, card.right - 8,
-                                                     iy + (itemH + box) * 0.5f);
-                rd_.Glow(D2D1::Point2F((markR.left + markR.right) * 0.5f, (markR.top + markR.bottom) * 0.5f), box, mark, 0.35f);
-                rd_.FillRound(markR, 2, mark);
-                rd_.Text(c.name, D2D1::RectF(card.left + 8, iy, markR.left - 6, iy + itemH),
-                         itemH >= 16.0f ? rd_.fSmall.Get() : rd_.fMonoSmall.Get(), col::text,
-                         DWRITE_TEXT_ALIGNMENT_TRAILING, DWRITE_PARAGRAPH_ALIGNMENT_CENTER);
-                iy += itemH;
-            }
-            y += h + cardGap;
         }
         DrawGuide(D2D1::RectF(centerL, B.top, centerR, std::max(B.top + 48.0f, heat.top - 10.0f)));
         const D2D1_RECT_F aggR = D2D1::RectF(centerL, heat.top, centerR, B.bottom);
@@ -7154,51 +7145,107 @@ private:
         if (series.size() > 180) series.erase(series.begin());
     }
 
-    void DrawSpark(const D2D1_RECT_F& r, const std::vector<float>& series, float ymax, D2D1_COLOR_F c, const wchar_t* title,
-                   const wchar_t* now) {
-        FillCard(r);
-        rd_.Text(title, D2D1::RectF(r.left + 12, r.top + 6, r.right - 120, r.top + 26), rd_.fSmall.Get(), col::cyan);
-        if (now && *now)
-            rd_.Text(now, D2D1::RectF(r.right - 150, r.top + 6, r.right - 12, r.top + 26), rd_.fMonoSmall.Get(), col::text,
+    static D2D1_POINT_2F CurvePoint(D2D1_POINT_2F p0, D2D1_POINT_2F p1, D2D1_POINT_2F p2, D2D1_POINT_2F p3, float t) {
+        const float t2 = t * t;
+        const float t3 = t2 * t;
+        auto axis = [&](float a, float b, float c, float d) {
+            return 0.5f * ((2.0f * b) + (-a + c) * t + (2.0f * a - 5.0f * b + 4.0f * c - d) * t2 +
+                           (-a + 3.0f * b - 3.0f * c + d) * t3);
+        };
+        return D2D1::Point2F(axis(p0.x, p1.x, p2.x, p3.x), axis(p0.y, p1.y, p2.y, p3.y));
+    }
+
+    // Same axes, cyan stroke, and head mark as the home aggregate curve. The line is a
+    // spline, and its place on the plot moves with the clock so it slides every frame.
+    void DrawSlidingCurve(const D2D1_RECT_F& plot, double now, double window, int field, float ymax, D2D1_COLOR_F color,
+                          float width, bool axes, bool head) {
+        const D2D1_RECT_F inner = D2D1::RectF(plot.left + 36, plot.top + 8, plot.right - 8, plot.bottom - 22);
+        if (axes) {
+            rd_.Line(D2D1::Point2F(inner.left, inner.top), D2D1::Point2F(inner.left, inner.bottom), Alpha(col::border, 0.8f), 1);
+            rd_.Line(D2D1::Point2F(inner.left, inner.bottom), D2D1::Point2F(inner.right, inner.bottom), Alpha(col::border, 0.8f), 1);
+            rd_.Text(L"-12s", D2D1::RectF(inner.left, inner.bottom + 2, inner.left + 40, plot.bottom), rd_.fMonoSmall.Get(), col::dim);
+            rd_.Text(L"now", D2D1::RectF(inner.right - 36, inner.bottom + 2, inner.right, plot.bottom), rd_.fMonoSmall.Get(), col::dim,
                      DWRITE_TEXT_ALIGNMENT_TRAILING);
-        const D2D1_RECT_F plot = D2D1::RectF(r.left + 12, r.top + 32, r.right - 12, r.bottom - 12);
-        for (int i = 1; i <= 3; ++i) {
-            const float y = plot.top + H(plot) * static_cast<float>(i) / 4.0f;
-            rd_.Line(D2D1::Point2F(plot.left, y), D2D1::Point2F(plot.right, y), Alpha(col::border, 0.55f), 1.0f);
+            rd_.Text(Fmt(L"%.2f", ymax), D2D1::RectF(plot.left, inner.top - 2, inner.left - 2, inner.top + 14), rd_.fMonoSmall.Get(),
+                     col::dim, DWRITE_TEXT_ALIGNMENT_TRAILING);
         }
-        if (series.size() < 2) {
-            rd_.Text(L"Waiting for samples", plot, rd_.fSmall.Get(), col::dim, DWRITE_TEXT_ALIGNMENT_CENTER,
-                     DWRITE_PARAGRAPH_ALIGNMENT_CENTER);
+        if (meterTrace_.size() < 2 || !(inner.right > inner.left) || !(inner.bottom > inner.top)) {
+            if (axes)
+                rd_.Text(L"Waiting for samples", inner, rd_.fSmall.Get(), col::dim, DWRITE_TEXT_ALIGNMENT_CENTER,
+                         DWRITE_PARAGRAPH_ALIGNMENT_CENTER);
             return;
         }
-        std::vector<D2D1_POINT_2F> pts;
-        pts.reserve(series.size());
+        const double start = now - window;
+        auto valueOf = [&](const MeterPoint& p) {
+            if (field == 1) return p.mem;
+            if (field == 2) return p.dpc;
+            if (field == 3) return p.gpu;
+            return p.cpu;
+        };
+        std::vector<D2D1_POINT_2F> raw;
+        raw.reserve(meterTrace_.size());
         const float top = std::max(ymax, 0.001f);
-        for (size_t i = 0; i < series.size(); ++i) {
-            const float x = plot.left + W(plot) * static_cast<float>(i) / static_cast<float>(series.size() - 1);
-            const float y = plot.bottom - H(plot) * Clamp01(series[i] / top);
-            pts.push_back(D2D1::Point2F(x, y));
+        for (const auto& p : meterTrace_) {
+            if (p.t < start) continue;
+            const float x = inner.left + static_cast<float>((p.t - start) / window) * (inner.right - inner.left);
+            const float y = inner.bottom - (inner.bottom - inner.top) * Clamp01(valueOf(p) / top);
+            raw.push_back(D2D1::Point2F(x, y));
         }
-        rd_.GlowLine(pts, c, 1.8f, 1.0f);
+        if (raw.size() < 2) return;
+        std::vector<D2D1_POINT_2F> smooth;
+        smooth.reserve(raw.size() * 8);
+        const int n = static_cast<int>(raw.size());
+        auto at = [&](int i) { return raw[static_cast<size_t>(std::max(0, std::min(n - 1, i)))]; };
+        for (int i = 0; i < n - 1; ++i) {
+            for (int s = 0; s < 8; ++s) {
+                D2D1_POINT_2F p = CurvePoint(at(i - 1), at(i), at(i + 1), at(i + 2), s / 8.0f);
+                p.y = std::min(inner.bottom, std::max(inner.top, p.y));
+                smooth.push_back(p);
+            }
+        }
+        smooth.push_back(raw.back());
+        rd_.Polyline(smooth, color, width);
+        if (head) {
+            const D2D1_POINT_2F dot = smooth.back();
+            rd_.Glow(dot, 10, col::green, 0.7f);
+            rd_.Dot(dot, 3.2f, col::white);
+        }
     }
 
     void DrawMetricsBoard(const D2D1_RECT_F& B, float dt, Stage stage) {
         (void)dt;
         if (!meter_) meter_ = std::make_unique<LiveMeter>();
-        const unsigned long long now = GetTickCount64();
-        if (now >= nextMeterAt_) {
-            nextMeterAt_ = now + 200;
-            LiveSample sample;
-            const bool shares = meter_->Sample(sample);
-            meterSample_ = sample;
-            if (shares) {
-                PushHist(cpuHist_, static_cast<float>(sample.cpu));
-                PushHist(dpcHist_, static_cast<float>(sample.dpc));
-                PushHist(isrHist_, static_cast<float>(sample.isr));
-            }
-            PushHist(memHist_, static_cast<float>(sample.memory));
-            PushHist(clockHist_, static_cast<float>(sample.mhz));
-            if (sample.hasGpuLoad) PushHist(gpuHist_, static_cast<float>(sample.gpuLoad));
+        LiveSample sample;
+        const bool shares = meter_->Sample(sample);
+        if (shares || meterTrace_.empty()) meterSample_ = sample;
+        else {
+            meterSample_.mhz = sample.mhz;
+            meterSample_.maxMhz = sample.maxMhz;
+            meterSample_.timerMs = sample.timerMs;
+            meterSample_.memory = sample.memory;
+            meterSample_.gpuTemp = sample.gpuTemp;
+            meterSample_.gpuLoad = sample.gpuLoad;
+            meterSample_.zoneTemp = sample.zoneTemp;
+            meterSample_.hasGpuTemp = sample.hasGpuTemp;
+            meterSample_.hasGpuLoad = sample.hasGpuLoad;
+            meterSample_.hasZone = sample.hasZone;
+        }
+        if (shares) {
+            MeterPoint point;
+            point.t = time_;
+            point.cpu = static_cast<float>(meterSample_.cpu);
+            point.mem = static_cast<float>(meterSample_.memory);
+            point.dpc = static_cast<float>(meterSample_.dpc);
+            point.isr = static_cast<float>(meterSample_.isr);
+            point.clock = static_cast<float>(meterSample_.mhz);
+            point.gpu = static_cast<float>(meterSample_.gpuLoad);
+            meterTrace_.push_back(point);
+            const double keep = time_ - 14.0;
+            while (meterTrace_.size() > 2 && meterTrace_.front().t < keep) meterTrace_.pop_front();
+            float peak = 0.5f;
+            for (const auto& p : meterTrace_)
+                if (p.t >= time_ - 12.0) peak = std::max(peak, p.dpc);
+            dpcScale_ += (std::max(0.5f, peak * 1.2f) - dpcScale_) * std::min(1.0f, dt * 1.5f);
         }
         const LiveSample& s = meterSample_;
         rd_.Text(L"METRICS", D2D1::RectF(B.left, B.top, B.left + 220, B.top + 32), rd_.fPhase.Get(), col::cyan,
@@ -7231,23 +7278,19 @@ private:
         }
         y += gaugeH + gap;
         const float remain = std::max(80.0f, B.bottom - y);
-        const float graphH = std::max(88.0f, (remain - 72.0f - gap) * 0.5f);
-        const float half = (W(B) - gap) * 0.5f;
-        float dpcTop = 1.0f;
-        for (float v : dpcHist_) dpcTop = std::max(dpcTop, v);
-        float clockTop = 1.0f;
-        for (float v : clockHist_) clockTop = std::max(clockTop, v);
-        if (s.maxMhz > 0) clockTop = std::max(clockTop, static_cast<float>(s.maxMhz));
-        DrawSpark(D2D1::RectF(B.left, y, B.left + half, y + graphH), cpuHist_, 100.0f, col::cyan, L"CPU",
-                  Fmt(L"%.0f%%", s.cpu).c_str());
-        DrawSpark(D2D1::RectF(B.left + half + gap, y, B.right, y + graphH), memHist_, 100.0f, col::muted, L"MEMORY",
-                  Fmt(L"%.0f%%", s.memory).c_str());
-        y += graphH + gap;
-        DrawSpark(D2D1::RectF(B.left, y, B.left + half, y + graphH), dpcHist_, dpcTop * 1.25f, col::amber, L"DPC",
-                  Fmt(L"%.2f%%", s.dpc).c_str());
-        DrawSpark(D2D1::RectF(B.left + half + gap, y, B.right, y + graphH), s.hasGpuLoad ? gpuHist_ : clockHist_,
-                  s.hasGpuLoad ? 100.0f : clockTop, col::green, s.hasGpuLoad ? L"GPU" : L"CLOCK",
-                  s.hasGpuLoad ? Fmt(L"%.0f%%", s.gpuLoad).c_str() : Fmt(L"%.0f MHz", s.mhz).c_str());
+        const float graphH = std::max(120.0f, (remain - 64.0f - gap) * 0.72f);
+        const D2D1_RECT_F cpuCard = D2D1::RectF(B.left, y, B.right, y + graphH);
+        FillCard(cpuCard);
+        rd_.Text(L"CPU", D2D1::RectF(cpuCard.left + 12, cpuCard.top + 6, cpuCard.left + 80, cpuCard.top + 24), rd_.fSmall.Get(),
+                 col::cyan);
+        rd_.Text(L"Memory", D2D1::RectF(cpuCard.left + 70, cpuCard.top + 6, cpuCard.left + 160, cpuCard.top + 24), rd_.fSmall.Get(),
+                 col::violet);
+        rd_.Text(Fmt(L"%.0f%%    %.0f%%", s.cpu, s.memory),
+                 D2D1::RectF(cpuCard.right - 160, cpuCard.top + 6, cpuCard.right - 12, cpuCard.top + 24), rd_.fMonoSmall.Get(),
+                 col::text, DWRITE_TEXT_ALIGNMENT_TRAILING);
+        const D2D1_RECT_F cpuPlot = D2D1::RectF(cpuCard.left + 4, cpuCard.top + 26, cpuCard.right - 4, cpuCard.bottom - 4);
+        DrawSlidingCurve(cpuPlot, time_, 12.0, 1, 100.0f, Alpha(col::violet, 0.85f), 1.2f, false, false);
+        DrawSlidingCurve(cpuPlot, time_, 12.0, 0, 100.0f, col::cyan, 1.8f, true, true);
         y += graphH + gap;
         const float cardH = std::max(52.0f, B.bottom - y);
         const wchar_t* names[4] = {L"TIMER", L"ISR", L"CLOCK", s.hasGpuTemp ? L"GPU TEMP" : L"ZONE"};
@@ -8362,7 +8405,15 @@ private:
     std::vector<AudioDevice> audioDevs_;
     std::vector<HardwareChange> hwChanges_;
     BenchHistory benchView_{};
-    std::vector<float> cpuHist_, dpcHist_, isrHist_, memHist_, gpuHist_, clockHist_;
+    struct MeterPoint {
+        double t = 0;
+        float cpu = 0, mem = 0, dpc = 0, isr = 0, clock = 0, gpu = 0;
+    };
+    std::deque<MeterPoint> meterTrace_;
+    float dpcScale_ = 1.0f;
+    unsigned long long nextZoneAt_ = 0;
+    bool benchHasRun_ = false;
+    bool scriptsApproved_ = false;
     std::unique_ptr<LiveMeter> meter_;
     LiveSample meterSample_{};
     unsigned long long nextMeterAt_ = 0;
