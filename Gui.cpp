@@ -183,9 +183,9 @@ void UseHdr(bool on) {
         border = Rgb(0x0C2C70);
         grid = Rgb(0x051944);
         text = Rgb(0xF8FAFF);
-        muted = Rgb(0xD4EEFF);  // icy, brighter so it lifts off the panels
+        muted = Rgb(0x6EC8FF);  // light blue, brighter, still blue
         dim = Rgb(0x5277BB);
-        cyan = Rgb(0x3B87FF);
+        cyan = Rgb(0x4A96FF);
         red = Rgb(0xFF9BAB);
     }
     teal = muted;
@@ -708,6 +708,10 @@ public:
         if (c.r == col::green.r && c.g == col::green.g && c.b == col::green.b) return glowGreen_.Get();
         if (c.r == col::teal.r && c.g == col::teal.g && c.b == col::teal.b) return glowTeal_.Get();
         if (c.r == col::red.r && c.g == col::red.g && c.b == col::red.b) return glowRed_.Get();
+        if (SameRgb(c, col::muted) || SameRgb(c, col::teal) || SameRgb(c, col::amber) || SameRgb(c, col::green))
+            return glowTeal_.Get();
+        // A blue that missed the exact stops still glows blue. White is only for white.
+        if (c.b >= c.r && c.b >= c.g * 0.92f) return glowTeal_.Get();
         return glowWhite_.Get();
     }
 
@@ -720,24 +724,15 @@ public:
         return a.r == b.r && a.g == b.g && a.b == b.b;
     }
 
-    // Soft radial glow of `radius` around p. HDR opens the same glow.
-    // Icy blue spills a second, wider halo so the light leaves the control.
+    // Soft radial glow of `radius` around p, in that color. HDR only opens it a little.
     void Glow(D2D1_POINT_2F p, float radius, D2D1_COLOR_F c, float opacity) {
-        const bool icy = col::hdr && SameRgb(c, col::muted);
         if (col::hdr) {
-            radius *= icy ? 2.05f : 1.18f;
-            opacity *= icy ? 2.15f : 1.55f;
+            radius *= 1.06f;
+            opacity *= 1.08f;
         }
         ID2D1RadialGradientBrush* br = GlowBrush(c);
         br->SetCenter(p);
         br->SetGradientOriginOffset(D2D1::Point2F(0, 0));
-        if (icy) {
-            const float outer = radius * 1.85f;
-            br->SetRadiusX(outer);
-            br->SetRadiusY(outer);
-            br->SetOpacity(Clamp01(opacity * 0.55f));
-            dc_->FillEllipse(D2D1::Ellipse(p, outer, outer), br);
-        }
         br->SetRadiusX(radius);
         br->SetRadiusY(radius);
         br->SetOpacity(Clamp01(opacity));
@@ -780,11 +775,11 @@ public:
         auto g = Poly(pts.data(), pts.size());
         if (!g) return;
         const bool icy = col::hdr && SameRgb(c, col::muted);
-        const float wide = icy ? 18.0f : 7.0f;
-        const float mid = icy ? 8.0f : 3.0f;
-        const float gain = icy ? glow * 1.8f : glow;
-        dc_->DrawGeometry(g.Get(), Brush(Alpha(c, (icy ? 0.16f : 0.08f) * gain)), w * wide, round_.Get());
-        dc_->DrawGeometry(g.Get(), Brush(Alpha(c, (icy ? 0.38f : 0.22f) * gain)), w * mid, round_.Get());
+        const float wide = icy ? 8.0f : 7.0f;
+        const float mid = icy ? 3.2f : 3.0f;
+        const float gain = icy ? glow * 1.12f : glow;
+        dc_->DrawGeometry(g.Get(), Brush(Alpha(c, (icy ? 0.10f : 0.08f) * gain)), w * wide, round_.Get());
+        dc_->DrawGeometry(g.Get(), Brush(Alpha(c, (icy ? 0.18f : 0.22f) * gain)), w * mid, round_.Get());
         dc_->DrawGeometry(g.Get(), Brush(c), w, round_.Get());
     }
 
@@ -857,13 +852,6 @@ public:
         if (s.empty()) return;
         f->SetTextAlignment(ha);
         f->SetParagraphAlignment(va);
-        // Short icy labels bloom past the line. Body paragraphs stay flat so a block of text does not fog the pane.
-        if (col::hdr && c.a > 0.45f && H(r) > 0.0f && H(r) <= 36.0f && SameRgb(c, col::muted)) {
-            const float cx = (r.left + r.right) * 0.5f;
-            const float cy = (r.top + r.bottom) * 0.5f;
-            const float span = std::min(std::max(W(r), H(r)), 200.0f);
-            Glow(D2D1::Point2F(cx, cy), std::max(22.0f, span * 0.42f), col::muted, 0.20f);
-        }
         dc_->DrawText(s.c_str(), static_cast<UINT32>(s.size()), f, r, Brush(c), D2D1_DRAW_TEXT_OPTIONS_CLIP);
     }
     void TextBrush(const std::wstring& s, const D2D1_RECT_F& r, IDWriteTextFormat* f, ID2D1Brush* b,
@@ -1119,7 +1107,7 @@ float4 ps(VSOut i) : SV_TARGET {
         // Icy #D4EEFF, Cool White #F8FAFF. Off: #123A91, #347BFF, #8DB8FF, #F4F7FF.
         const float3 blueprint = hdr > 0.5 ? float3(0.047, 0.173, 0.439) : float3(0.071, 0.227, 0.569);
         const float3 electric = hdr > 0.5 ? float3(0.231, 0.529, 1.0) : float3(0.204, 0.482, 1.0);
-        const float3 icy = hdr > 0.5 ? float3(0.831, 0.933, 1.0) : float3(0.553, 0.722, 1.0);
+        const float3 icy = hdr > 0.5 ? float3(0.431, 0.784, 1.0) : float3(0.553, 0.722, 1.0);
         const float3 cool = hdr > 0.5 ? float3(0.973, 0.980, 1.0) : float3(0.957, 0.969, 1.0);
 
         if (st1.z > 0.5) {
@@ -2604,6 +2592,27 @@ private:
         return choices;
     }
 
+    void SetProfile(Profile p, bool applyNow) {
+        SetChosenProfile(p);
+        if (!applyNow) return;
+        std::wstring detail;
+        ApplyProfile(p, detail);
+    }
+
+    void StartBench(bool asBaseline) {
+        if (benchBusy_.exchange(true)) return;
+        std::thread([this, asBaseline]() {
+            BenchResult result;
+            std::atomic<bool> stop{false};
+            const bool ok = RunBench(result, host_.dataDir, stop, nullptr);
+            if (ok) {
+                result.label = asBaseline ? L"baseline" : L"run";
+                SaveBench(host_.dataDir, result, asBaseline);
+            }
+            benchBusy_.store(false);
+        }).detach();
+    }
+
     void BeginWorkflow() {
         SaveStepChoices(CurrentChoices());
         MarkSetupComplete();
@@ -3001,6 +3010,15 @@ private:
         if (FleetComplete()) {
             fleet_ = false;
             afterburnerPrompt_ = false;
+            if (tuneScripts_) {
+                tuneScripts_ = false;
+                RunHook(L"after-tune", L"", [](const std::wstring&) {});
+                RunHook(L"performance", L"", [](const std::wstring&) {});
+            }
+            if (hardwareSettled_) {
+                AcceptHardware();
+                hardwareSettled_ = false;
+            }
             stage_ = Stage::Review;
             state_.Phase(L"REVIEW", L"set BIOS, then restart");
         }
@@ -3165,6 +3183,15 @@ private:
         if (FleetComplete()) {
             fleet_ = false;
             afterburnerPrompt_ = false;
+            if (tuneScripts_) {
+                tuneScripts_ = false;
+                RunHook(L"after-tune", L"", [](const std::wstring&) {});
+                RunHook(L"performance", L"", [](const std::wstring&) {});
+            }
+            if (hardwareSettled_) {
+                AcceptHardware();
+                hardwareSettled_ = false;
+            }
             stage_ = Stage::Review;
             state_.Phase(L"REVIEW", L"set BIOS, then restart");
         }
@@ -3603,6 +3630,54 @@ private:
         StartInstall(show);
     }
 
+    void PollExtras() {
+        const unsigned long long now = GetTickCount64();
+        if (now < nextExtrasAt_) return;
+        nextExtrasAt_ = now + 3000ull;
+        if (prefs_.gameBoost || prefs_.gameQuiet) {
+            if (!gameKnownReady_) {
+                gameKnown_ = WindowsKnownGames();
+                gameKnownReady_ = true;
+            }
+            GameHit hit;
+            const bool game = FindRunningGame(LoadGameRules(), gameKnown_, gameVerdicts_, hit);
+            if (game != gameWas_) {
+                const bool started = game && !gameWas_;
+                const bool stopped = !game && gameWas_;
+                gameWas_ = game;
+                if (prefs_.gameBoost && started && ChosenProfile() == Profile::Balanced &&
+                    ActiveProfile() != Profile::Performance) {
+                    gameLifted_ = true;
+                    std::wstring detail;
+                    ApplyProfile(Profile::Performance, detail);
+                } else if (stopped && gameLifted_) {
+                    gameLifted_ = false;
+                    std::wstring detail;
+                    ApplyProfile(Profile::Balanced, detail);
+                }
+                if (started) RunHook(L"game-start", hit.exe, [](const std::wstring&) {});
+                if (stopped) RunHook(L"game-stop", L"", [](const std::wstring&) {});
+                if (prefs_.gameQuiet) {
+                    if (game) QuietBegin();
+                    else QuietEnd();
+                }
+            }
+        } else if (gameLifted_) {
+            gameLifted_ = false;
+            gameWas_ = false;
+            std::wstring detail;
+            ApplyProfile(Profile::Balanced, detail);
+        }
+        if (prefs_.watchHardware && now >= nextHwAt_) {
+            nextHwAt_ = now + 60000ull;
+            const auto changes = DetectHardwareChanges();
+            if (!changes.empty()) {
+                hardwareNote_ = changes.front().what;
+                if (!changes.front().advice.empty()) hardwareNote_ += L" " + changes.front().advice;
+            }
+        }
+    }
+
     // ---- frame ----
     void Frame() {
         if (!rd_.Valid() && !rd_.Init(hwnd_, dpi_)) {
@@ -3610,6 +3685,7 @@ private:
             return;
         }
         PollUpdate();
+        PollExtras();
         const double now = state_.Now();
         const float dt = static_cast<float>(std::min(0.05, std::max(0.0, now - lastFrame_)));
         lastFrame_ = now;
@@ -3873,6 +3949,36 @@ private:
             CommitPrefs();
         }
         if (toggle(405, prefs_.maintainTiming, L"Maintain timing automatically")) SetMaintain(!prefs_.maintainTiming);
+        heading(L"Profile");
+        const bool performance = ChosenProfile() == Profile::Performance;
+        if (toggle(406, performance, L"Performance profile: tuned power plan and timer hold")) {
+            std::wstring detail;
+            const Profile next = performance ? Profile::Balanced : Profile::Performance;
+            SetChosenProfile(next);
+            ApplyProfile(next, detail);
+            RunHook(next == Profile::Performance ? L"performance" : L"balanced", L"", [](const std::wstring&) {});
+        }
+        if (toggle(407, prefs_.gameBoost, L"Use Performance while a game is running")) {
+            prefs_.gameBoost = !prefs_.gameBoost;
+            CommitPrefs();
+        }
+        if (toggle(408, prefs_.gameQuiet, L"Hold notification banners while a game is running")) {
+            prefs_.gameQuiet = !prefs_.gameQuiet;
+            if (!prefs_.gameQuiet) QuietEnd();
+            CommitPrefs();
+        }
+        if (toggle(409, GameBarButtonOff(), L"Game Bar button off")) SetGameBarButtonOff(!GameBarButtonOff());
+        if (toggle(418, prefs_.watchHardware, L"Watch for a GPU, CPU, BIOS, or Windows change")) {
+            prefs_.watchHardware = !prefs_.watchHardware;
+            CommitPrefs();
+        }
+        if (!hardwareNote_.empty()) {
+            const D2D1_RECT_F noteHw = D2D1::RectF(x0, y, x1, y + 36);
+            y += 38;
+            if (shown(noteHw))
+                rd_.Text(hardwareNote_, noteHw, rd_.fMonoSmall.Get(), col::muted, DWRITE_TEXT_ALIGNMENT_LEADING,
+                         DWRITE_PARAGRAPH_ALIGNMENT_CENTER);
+        }
         heading(L"Timers");
         auto stepper = [&](int minusId, int plusId, const wchar_t* label, int value, int lo, int hi, int& dest, int kind) {
             const D2D1_RECT_F row = D2D1::RectF(x0, y, x1, y + 30);
@@ -3938,13 +4044,14 @@ private:
         y += 34;
         heading(L"Full tune steps");
         static const wchar_t* kLabels[kWantCount] = {
-            L"Restore point", L"Timer measure", L"Boot service", L"CPU tune", L"GPU driver",
-            L"GPU settings",  L"Afterburner",   L"Memory",       L"Storage",
+            L"Restore point", L"Timer measure", L"Boot service", L"CPU tune", L"GPU driver", L"GPU settings",
+            L"Afterburner",   L"Memory",        L"Storage",      L"Network",   L"Audio",
         };
         const float colW = (x1 - x0 - 10) * 0.5f;
+        const int rows = (kWantCount + 1) / 2;
         for (int i = 0; i < kWantCount; ++i) {
-            const float colN = (i < 5) ? 0.0f : 1.0f;
-            const float rowN = static_cast<float>(i < 5 ? i : i - 5);
+            const float colN = (i < rows) ? 0.0f : 1.0f;
+            const float rowN = static_cast<float>(i < rows ? i : i - rows);
             const float yy = y + rowN * 32.0f;
             const D2D1_RECT_F cell = D2D1::RectF(x0 + colN * (colW + 10), yy, x0 + colN * (colW + 10) + colW, yy + 30);
             if (!shown(cell)) continue;
@@ -3953,7 +4060,7 @@ private:
                 SaveCurrentChoices();
             }
         }
-        y += 5 * 32.0f;
+        y += static_cast<float>(rows) * 32.0f;
         rd_.Unclip();
         const float used = (y - startY);
         const int maxScroll = std::max(0, static_cast<int>(std::ceil((used - H(view)) / 32.0f)));
@@ -4845,6 +4952,8 @@ private:
                     prefs_.launchAtLogin ? L"Start with Windows, minimized: on" : L"Start with Windows, minimized: off");
         AppendMenuW(menu, MF_STRING, 4106, prefs_.notify ? L"Notifications: on" : L"Notifications: off");
         AppendMenuW(menu, MF_STRING, 4107, prefs_.maintainTiming ? L"Maintain timing: on" : L"Maintain timing: off");
+        AppendMenuW(menu, MF_STRING, 4108,
+                    ChosenProfile() == Profile::Performance ? L"Profile: Performance" : L"Profile: Balanced");
         AppendMenuW(menu, MF_SEPARATOR, 0, nullptr);
         AppendMenuW(menu, MF_STRING, 4104, L"Exit");
         POINT pt{};
@@ -4875,6 +4984,12 @@ private:
             SaveMonitorPrefs(prefs_);
         } else if (cmd == 4107) {
             SetMaintain(!prefs_.maintainTiming);
+        } else if (cmd == 4108) {
+            const Profile next = ChosenProfile() == Profile::Performance ? Profile::Balanced : Profile::Performance;
+            SetChosenProfile(next);
+            std::wstring detail;
+            ApplyProfile(next, detail);
+            RunHook(next == Profile::Performance ? L"performance" : L"balanced", L"", [](const std::wstring&) {});
         } else if (cmd == 4104) {
             exitRequested_ = true;
             DestroyWindow(hwnd_);
@@ -6129,7 +6244,7 @@ private:
         rd_.Text(company, D2D1::RectF(x0, y, x0 + nameW + 8, y + 22), rd_.fSub.Get(), col::cyan,
                  DWRITE_TEXT_ALIGNMENT_LEADING, DWRITE_PARAGRAPH_ALIGNMENT_CENTER);
         y += 36;
-        rd_.Text(L"Timer resolution, CPU power, GPU, memory, and storage. Low-level settings are tuned to harden the machine for a more responsive, lower-latency configuration, without unneeded versatility or fluff. Perfect for gamers and HPC. Uncheck any step you want to skip. Begin makes a restore point first, measures timing next, then runs the remaining steps in a safe order. It asks only before a driver install or Afterburner.",
+        rd_.Text(L"Timer resolution, CPU power, GPU, memory, storage, network, and audio. Low-level settings are tuned to harden the machine for a more responsive, lower-latency configuration, without unneeded versatility or fluff. Perfect for gamers and HPC. Uncheck any step you want to skip. Begin makes a restore point first, measures timing next, then runs the remaining steps in a safe order. It asks only before a driver install or Afterburner.",
                  D2D1::RectF(card.left + 48, y, card.right - 48, y + 108), rd_.fBody.Get(), col::muted,
                  DWRITE_TEXT_ALIGNMENT_CENTER);
         y += 116;
@@ -6157,10 +6272,12 @@ private:
             L"Afterburner - download and scan, ~30 min",
             L"Memory - pagefile, compression",
             L"Storage - ASPM, TRIM, USB",
+            L"Network - adapter power, delivery",
+            L"Audio - enhancements off",
             L"Review - BIOS, then restart",
         };
         const float colW = (W(card) - 88) / 2;
-        const int rows = 5;
+        const int rows = 6;
         const float rowH = 28.0f;
         for (int i = 0; i < kWantCount + 1; ++i) {
             const float colN = i < rows ? 0.0f : 1.0f;
@@ -7078,6 +7195,19 @@ private:
     bool prepareWaived_ = false;
     bool afterburnerSkipped_ = false;
     bool afterburnerPrompt_ = false;
+    bool tuneScripts_ = false;
+    bool baselinePending_ = false;
+    bool baselineStarted_ = false;
+    bool hardwareSettled_ = false;
+    std::atomic<bool> benchBusy_{false};
+    std::vector<std::pair<DWORD, int>> gameVerdicts_;
+    std::vector<std::wstring> gameKnown_;
+    bool gameKnownReady_ = false;
+    bool gameWas_ = false;
+    bool gameLifted_ = false;
+    unsigned long long nextExtrasAt_ = 0;
+    unsigned long long nextHwAt_ = 0;
+    std::wstring hardwareNote_;
     std::atomic<bool> replayGpu_{false};
     std::atomic<bool> afterburnerStale_{false};
     int repairJob_ = -1;

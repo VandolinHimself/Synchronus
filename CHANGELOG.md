@@ -1,6 +1,23 @@
 # Changelog
 
-Current release: **2.10.3**.
+Current release: **3.0.2**.
+
+## 3.0.2 — 2026-11-24
+
+- HDR light blue stays blue. The wide white bloom is gone. Accents are brighter, with only a slight glow in the same color.
+- Network and Audio are on the welcome list and in Settings, with the other full-tune steps.
+- Settings and the tray can switch Performance and Balanced. A running game can lift Balanced, hold notification banners, and approved game scripts still run.
+- A GPU, CPU, BIOS, or Windows change is reported in Settings when hardware watch is on.
+
+## 3.0.1 — 2026-11-24
+
+- Network and audio join the full tune as named steps: adapter power saving, interrupt moderation, Windows Update delivery, and audio enhancements, each with a restore path.
+- Performance and Balanced profiles switch the tuned power plan and the timer hold without touching the rest of the tune.
+- A first full tune can take a quiet baseline bench before anything is changed, so later runs have something to compare with.
+- Hardware-change detection remembers GPU, driver, CPU, BIOS, and Windows signatures and says which steps to run again.
+- Export, import, and share codes move step choices and preferences without device ids. Approved scripts under `Scripts\` can run after a tune or when a profile or game starts.
+- Focus Assist quiet mode and the Game Bar button can be held off while Synchronus is open; both go back on uninstall.
+- Live metrics and the bench history sit beside the existing timer measurement. HDR from 2.10.3 stays at the bottom left of every pane.
 
 ## 2.10.3 — 2026-11-24
 
