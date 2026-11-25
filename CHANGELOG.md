@@ -1,6 +1,10 @@
 # Changelog
 
-Current release: **3.1.5**.
+Current release: **3.1.6**.
+
+## 3.1.6 — 2026-11-24
+
+- A finished step shows its result. It no longer stays on Preparing after the work is done.
 
 ## 3.1.5 — 2026-11-24
 

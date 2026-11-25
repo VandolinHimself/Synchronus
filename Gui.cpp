@@ -8258,9 +8258,13 @@ private:
         if (!done && Button(8, stopR, L"Stop", col::red, false, true, dt)) {
             CancelJob(StageJob(stage_.load()));
         }
+        const JobId stepId = StageJob(stage_.load());
+        const bool jobDone = stepId != JobId::Count &&
+                             jobs_[static_cast<int>(stepId)].phase.load() == static_cast<int>(JobPhase::Done);
+        const bool finished = done || jobDone;
         const wchar_t* progressLine = L"Writing settings.";
-        if (!done && !snap_.detail.empty()) progressLine = snap_.detail.c_str();
-        std::wstring doneLine = L"Complete.";
+        if (!finished && !snap_.detail.empty()) progressLine = snap_.detail.c_str();
+        std::wstring doneLine = snap_.detail.empty() ? L"Complete." : snap_.detail;
         if (done && stage_.load() == Stage::AfterburnerDone && afterburnerStale_.load()) {
             doneLine = L"Complete. A later driver install may have cleared the curve. Run this step again if the overclock is gone.";
         }
@@ -8282,7 +8286,7 @@ private:
         const int n = static_cast<int>(steps.size());
         const bool showCount = n > 0;
         const D2D1_RECT_F countR = D2D1::RectF(B.right - 78, B.top + 36, B.right - 8, B.top + 54);
-        rd_.Text(done ? doneLine.c_str() : progressLine,
+        rd_.Text(finished ? doneLine.c_str() : progressLine,
                  D2D1::RectF(B.left + 8, B.top + 36, showCount ? countR.left - 8 : B.right - 8, B.top + 54), rd_.fSmall.Get(),
                  col::muted, DWRITE_TEXT_ALIGNMENT_LEADING, DWRITE_PARAGRAPH_ALIGNMENT_CENTER);
         if (showCount) {
@@ -8291,13 +8295,25 @@ private:
         }
 
         if (steps.empty()) {
-            rd_.Text(snap_.narrateBody.empty() ? L"Preparing\u2026" : snap_.narrateBody,
-                     D2D1::RectF(B.left + 8, B.top + 60, B.right - 8, B.bottom - 8), rd_.fBody.Get(), col::muted);
+            std::wstring body;
+            if (finished) {
+                if (!snap_.narrateBody.empty()) body = snap_.narrateBody;
+                else if (!snap_.detail.empty()) body = snap_.detail;
+                else body = L"Finished.";
+            } else if (!snap_.narrateBody.empty()) {
+                body = snap_.narrateBody;
+            } else if (!snap_.detail.empty()) {
+                body = snap_.detail;
+            } else {
+                body = L"Preparing\u2026";
+            }
+            rd_.Text(body, D2D1::RectF(B.left + 8, B.top + 60, B.right - 8, B.bottom - 8), rd_.fBody.Get(),
+                     finished ? col::text : col::muted);
             return;
         }
 
         const float listTop = B.top + 60;
-        const float listBottom = done ? B.bottom - (restartConfirm_ ? 76.0f : 52.0f) : B.bottom - 92;
+        const float listBottom = finished ? B.bottom - (restartConfirm_ ? 76.0f : 52.0f) : B.bottom - 92;
         const int visible = std::max(1, static_cast<int>((listBottom - listTop) / 18.0f));
         int start = 0;
         if (n > visible) {
@@ -8331,7 +8347,7 @@ private:
                          DWRITE_TEXT_ALIGNMENT_TRAILING, DWRITE_PARAGRAPH_ALIGNMENT_CENTER);
             }
         }
-        if (!done && active >= 0 && active < n && !steps[static_cast<size_t>(active)].why.empty()) {
+        if (!finished && active >= 0 && active < n && !steps[static_cast<size_t>(active)].why.empty()) {
             rd_.FillRound(D2D1::RectF(B.left + 6, B.bottom - 82, B.right - 6, B.bottom - 6), 8, Alpha(col::violet, 0.10f));
             rd_.Text(steps[static_cast<size_t>(active)].why,
                      D2D1::RectF(B.left + 14, B.bottom - 78, B.right - 14, B.bottom - 10), rd_.fBody.Get(), col::text);
