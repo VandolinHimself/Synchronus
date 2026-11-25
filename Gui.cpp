@@ -44,6 +44,7 @@
 #include <deque>
 #include <functional>
 #include <initializer_list>
+#include <memory>
 #include <mutex>
 #include <thread>
 #include <unordered_map>
@@ -1447,13 +1448,21 @@ enum class Stage {
     StoragePrompt, StorageApplying, StorageDone, StorageFailed,
     NetworkPrompt, NetworkApplying, NetworkDone, NetworkFailed,
     AudioPrompt, AudioApplying, AudioDone, AudioFailed,
+    ProfilePrompt, ProfileApplying, ProfileDone, ProfileFailed,
+    GamesPrompt, GamesApplying, GamesDone, GamesFailed,
+    HardwarePrompt, HardwareApplying, HardwareDone, HardwareFailed,
+    BenchPrompt, BenchApplying, BenchDone, BenchFailed,
+    SharePrompt, ShareApplying, ShareDone, ShareFailed,
+    ScriptsPrompt, ScriptsApplying, ScriptsDone, ScriptsFailed,
+    MetricsPrompt, MetricsApplying, MetricsDone, MetricsFailed,
+    FocusPrompt, FocusApplying, FocusDone, FocusFailed,
     Review,
     Monitor,
     Home,
     Fleet
 };
 
-constexpr int kStepCount = 12;
+constexpr int kStepCount = 20;
 
 struct StepMeta {
     int number;
@@ -1516,8 +1525,48 @@ StepMeta Meta(Stage s) {
         case Stage::AudioDone:
         case Stage::AudioFailed:
             return {11, L"Audio", L"Enhancements off"};
+        case Stage::ProfilePrompt:
+        case Stage::ProfileApplying:
+        case Stage::ProfileDone:
+        case Stage::ProfileFailed:
+            return {12, L"Profile", L"Performance or Balanced"};
+        case Stage::GamesPrompt:
+        case Stage::GamesApplying:
+        case Stage::GamesDone:
+        case Stage::GamesFailed:
+            return {13, L"Games", L"Switch when a game starts"};
+        case Stage::HardwarePrompt:
+        case Stage::HardwareApplying:
+        case Stage::HardwareDone:
+        case Stage::HardwareFailed:
+            return {14, L"Hardware", L"What changed since the last tune"};
+        case Stage::BenchPrompt:
+        case Stage::BenchApplying:
+        case Stage::BenchDone:
+        case Stage::BenchFailed:
+            return {15, L"Bench", L"CPU, disk, and DPC"};
+        case Stage::SharePrompt:
+        case Stage::ShareApplying:
+        case Stage::ShareDone:
+        case Stage::ShareFailed:
+            return {16, L"Share", L"Export this PC's choices"};
+        case Stage::ScriptsPrompt:
+        case Stage::ScriptsApplying:
+        case Stage::ScriptsDone:
+        case Stage::ScriptsFailed:
+            return {17, L"Scripts", L"Approved hooks"};
+        case Stage::MetricsPrompt:
+        case Stage::MetricsApplying:
+        case Stage::MetricsDone:
+        case Stage::MetricsFailed:
+            return {18, L"Metrics", L"Live clocks and DPC"};
+        case Stage::FocusPrompt:
+        case Stage::FocusApplying:
+        case Stage::FocusDone:
+        case Stage::FocusFailed:
+            return {19, L"Focus", L"Notifications and Game Bar"};
         case Stage::Review:
-            return {12, L"Review", L"BIOS, then restart"};
+            return {20, L"Review", L"BIOS, then restart"};
         case Stage::Monitor:
             return {0, L"Health", L"live settings"};
         case Stage::Fleet:
@@ -1564,6 +1613,38 @@ bool IsTuneStage(Stage s) {
         case Stage::AudioApplying:
         case Stage::AudioDone:
         case Stage::AudioFailed:
+        case Stage::ProfilePrompt:
+        case Stage::ProfileApplying:
+        case Stage::ProfileDone:
+        case Stage::ProfileFailed:
+        case Stage::GamesPrompt:
+        case Stage::GamesApplying:
+        case Stage::GamesDone:
+        case Stage::GamesFailed:
+        case Stage::HardwarePrompt:
+        case Stage::HardwareApplying:
+        case Stage::HardwareDone:
+        case Stage::HardwareFailed:
+        case Stage::BenchPrompt:
+        case Stage::BenchApplying:
+        case Stage::BenchDone:
+        case Stage::BenchFailed:
+        case Stage::SharePrompt:
+        case Stage::ShareApplying:
+        case Stage::ShareDone:
+        case Stage::ShareFailed:
+        case Stage::ScriptsPrompt:
+        case Stage::ScriptsApplying:
+        case Stage::ScriptsDone:
+        case Stage::ScriptsFailed:
+        case Stage::MetricsPrompt:
+        case Stage::MetricsApplying:
+        case Stage::MetricsDone:
+        case Stage::MetricsFailed:
+        case Stage::FocusPrompt:
+        case Stage::FocusApplying:
+        case Stage::FocusDone:
+        case Stage::FocusFailed:
         case Stage::Review:
         case Stage::Monitor:
             return true;
@@ -1615,6 +1696,38 @@ int PaneFamily(Stage s) {
         case Stage::AudioApplying:
         case Stage::AudioDone:
         case Stage::AudioFailed: return 10;
+        case Stage::ProfilePrompt:
+        case Stage::ProfileApplying:
+        case Stage::ProfileDone:
+        case Stage::ProfileFailed: return 15;
+        case Stage::GamesPrompt:
+        case Stage::GamesApplying:
+        case Stage::GamesDone:
+        case Stage::GamesFailed: return 16;
+        case Stage::HardwarePrompt:
+        case Stage::HardwareApplying:
+        case Stage::HardwareDone:
+        case Stage::HardwareFailed: return 17;
+        case Stage::BenchPrompt:
+        case Stage::BenchApplying:
+        case Stage::BenchDone:
+        case Stage::BenchFailed: return 18;
+        case Stage::SharePrompt:
+        case Stage::ShareApplying:
+        case Stage::ShareDone:
+        case Stage::ShareFailed: return 19;
+        case Stage::ScriptsPrompt:
+        case Stage::ScriptsApplying:
+        case Stage::ScriptsDone:
+        case Stage::ScriptsFailed: return 20;
+        case Stage::MetricsPrompt:
+        case Stage::MetricsApplying:
+        case Stage::MetricsDone:
+        case Stage::MetricsFailed: return 21;
+        case Stage::FocusPrompt:
+        case Stage::FocusApplying:
+        case Stage::FocusDone:
+        case Stage::FocusFailed: return 22;
         case Stage::Review: return 11;
         case Stage::Home: return 12;
         case Stage::Monitor: return 13;
@@ -1635,6 +1748,14 @@ enum {
     kWantStorage,
     kWantNetwork,
     kWantAudio,
+    kWantProfile,
+    kWantGames,
+    kWantHardware,
+    kWantBench,
+    kWantShare,
+    kWantScripts,
+    kWantMetrics,
+    kWantFocus,
     kWantCount
 };
 
@@ -1650,13 +1771,23 @@ enum class JobId : int {
     Storage,
     Network,
     Audio,
+    Profile,
+    Games,
+    Hardware,
+    Bench,
+    Share,
+    Scripts,
+    Metrics,
+    Focus,
     Count
 };
 
 // Every step in the order a full tune counts them. Index i is the step for want i.
 constexpr JobId kStepJobs[kWantCount] = {JobId::Prepare, JobId::Measure,     JobId::Hold,   JobId::Cpu,
                                          JobId::GpuClean, JobId::Gpu,        JobId::Afterburner, JobId::Memory,
-                                         JobId::Storage,  JobId::Network,    JobId::Audio};
+                                         JobId::Storage,  JobId::Network,    JobId::Audio,
+                                         JobId::Profile,  JobId::Games,      JobId::Hardware, JobId::Bench,
+                                         JobId::Share,    JobId::Scripts,    JobId::Metrics,  JobId::Focus};
 
 enum class JobPhase : int { Idle = 0, Waiting, Running, Done, Failed, Cancelled };
 
@@ -1693,6 +1824,11 @@ public:
         for (int i = 0; i < kWantCount; ++i) want_[i] = true;
         // Audio changes how devices sound, so it starts unchecked.
         want_[kWantAudio] = host_.audioForce;
+        want_[kWantGames] = false;
+        want_[kWantBench] = false;
+        want_[kWantShare] = false;
+        want_[kWantMetrics] = false;
+        want_[kWantFocus] = false;
         if (host_.prepareSkip) want_[kWantPrepare] = false;
         if (host_.ppmSkip) want_[kWantCpu] = false;
         if (host_.gpuSkip) want_[kWantGpu] = false;
@@ -1991,6 +2127,14 @@ private:
             case JobId::Storage: return L"STORAGE";
             case JobId::Network: return L"NETWORK";
             case JobId::Audio: return L"AUDIO";
+            case JobId::Profile: return L"PROFILE";
+            case JobId::Games: return L"GAMES";
+            case JobId::Hardware: return L"HARDWARE";
+            case JobId::Bench: return L"BENCH";
+            case JobId::Share: return L"SHARE";
+            case JobId::Scripts: return L"SCRIPTS";
+            case JobId::Metrics: return L"METRICS";
+            case JobId::Focus: return L"FOCUS";
             default: return L"SYNCHRONUS";
         }
     }
@@ -2008,6 +2152,14 @@ private:
             case JobId::Storage: return L"Storage";
             case JobId::Network: return L"Network";
             case JobId::Audio: return L"Audio";
+            case JobId::Profile: return L"Profile";
+            case JobId::Games: return L"Games";
+            case JobId::Hardware: return L"Hardware";
+            case JobId::Bench: return L"Bench";
+            case JobId::Share: return L"Share";
+            case JobId::Scripts: return L"Scripts";
+            case JobId::Metrics: return L"Metrics";
+            case JobId::Focus: return L"Focus";
             default: return L"";
         }
     }
@@ -2054,6 +2206,38 @@ private:
             case Stage::AudioApplying:
             case Stage::AudioDone:
             case Stage::AudioFailed: return JobId::Audio;
+            case Stage::ProfilePrompt:
+            case Stage::ProfileApplying:
+            case Stage::ProfileDone:
+            case Stage::ProfileFailed: return JobId::Profile;
+            case Stage::GamesPrompt:
+            case Stage::GamesApplying:
+            case Stage::GamesDone:
+            case Stage::GamesFailed: return JobId::Games;
+            case Stage::HardwarePrompt:
+            case Stage::HardwareApplying:
+            case Stage::HardwareDone:
+            case Stage::HardwareFailed: return JobId::Hardware;
+            case Stage::BenchPrompt:
+            case Stage::BenchApplying:
+            case Stage::BenchDone:
+            case Stage::BenchFailed: return JobId::Bench;
+            case Stage::SharePrompt:
+            case Stage::ShareApplying:
+            case Stage::ShareDone:
+            case Stage::ShareFailed: return JobId::Share;
+            case Stage::ScriptsPrompt:
+            case Stage::ScriptsApplying:
+            case Stage::ScriptsDone:
+            case Stage::ScriptsFailed: return JobId::Scripts;
+            case Stage::MetricsPrompt:
+            case Stage::MetricsApplying:
+            case Stage::MetricsDone:
+            case Stage::MetricsFailed: return JobId::Metrics;
+            case Stage::FocusPrompt:
+            case Stage::FocusApplying:
+            case Stage::FocusDone:
+            case Stage::FocusFailed: return JobId::Focus;
             default: return JobId::Count;
         }
     }
@@ -2166,7 +2350,46 @@ private:
 
     void OpenTool(JobId id, Stage prompt, Stage applying) {
         hubReturn_ = true;
+        if (id == JobId::Network) netListed_ = false;
+        if (id == JobId::Audio) audioListed_ = false;
         stage_ = JobBusy(id) ? applying : prompt;
+    }
+
+    void OpenHomeTool(int i) {
+        switch (i) {
+            case 0: stage_ = fleet_ ? Stage::Fleet : Stage::Welcome; break;
+            case 1: OpenHealth(); break;
+            case 2:
+                if (JobBusy(JobId::Measure)) stage_ = Stage::Running;
+                else StartBenchmark(true);
+                break;
+            case 3: OpenTool(JobId::Cpu, Stage::PpmPrompt, Stage::PpmApplying); break;
+            case 4:
+                hubReturn_ = true;
+                stage_ = Stage::GpuClean;
+                if (!JobBusy(JobId::GpuClean) && GpuPhase() == GpuDl::Idle) BeginGpuLookup();
+                break;
+            case 5: OpenTool(JobId::Gpu, Stage::GpuPrompt, Stage::GpuApplying); break;
+            case 6: OpenTool(JobId::Afterburner, Stage::AfterburnerPrompt, Stage::AfterburnerApplying); break;
+            case 7: OpenTool(JobId::Memory, Stage::MemoryPrompt, Stage::MemoryApplying); break;
+            case 8: OpenTool(JobId::Storage, Stage::StoragePrompt, Stage::StorageApplying); break;
+            case 9:
+                hubReturn_ = true;
+                stage_ = Stage::Review;
+                state_.Phase(L"REVIEW", L"set BIOS, then restart");
+                break;
+            case 10: OpenTool(JobId::Network, Stage::NetworkPrompt, Stage::NetworkApplying); break;
+            case 11: OpenTool(JobId::Audio, Stage::AudioPrompt, Stage::AudioApplying); break;
+            case 12: OpenTool(JobId::Profile, Stage::ProfilePrompt, Stage::ProfileApplying); break;
+            case 13: OpenTool(JobId::Games, Stage::GamesPrompt, Stage::GamesApplying); break;
+            case 14: OpenTool(JobId::Hardware, Stage::HardwarePrompt, Stage::HardwareApplying); break;
+            case 15: OpenTool(JobId::Bench, Stage::BenchPrompt, Stage::BenchApplying); break;
+            case 16: OpenTool(JobId::Share, Stage::SharePrompt, Stage::ShareApplying); break;
+            case 17: OpenTool(JobId::Scripts, Stage::ScriptsPrompt, Stage::ScriptsApplying); break;
+            case 18: OpenTool(JobId::Metrics, Stage::MetricsPrompt, Stage::MetricsApplying); break;
+            case 19: OpenTool(JobId::Focus, Stage::FocusPrompt, Stage::FocusApplying); break;
+            default: break;
+        }
     }
 
     void StartUpdateCheck() {
@@ -2589,6 +2812,14 @@ private:
         choices.storage = Want(kWantStorage);
         choices.network = Want(kWantNetwork);
         choices.audio = Want(kWantAudio);
+        choices.profile = Want(kWantProfile);
+        choices.games = Want(kWantGames);
+        choices.hardware = Want(kWantHardware);
+        choices.bench = Want(kWantBench);
+        choices.share = Want(kWantShare);
+        choices.scripts = Want(kWantScripts);
+        choices.metrics = Want(kWantMetrics);
+        choices.focus = Want(kWantFocus);
         return choices;
     }
 
@@ -2617,9 +2848,10 @@ private:
         SaveStepChoices(CurrentChoices());
         MarkSetupComplete();
         // A full tune is the tuned plan and the timer hold, which is the Performance profile.
-        if (ActiveProfile() == Profile::Balanced || ChosenProfile() == Profile::Balanced) SetProfile(Profile::Performance, false);
-        tuneScripts_ = true;
-        baselinePending_ = !LoadBench(host_.dataDir).hasBaseline;
+        if (Want(kWantProfile) && (ActiveProfile() == Profile::Balanced || ChosenProfile() == Profile::Balanced))
+            SetProfile(Profile::Performance, false);
+        tuneScripts_ = Want(kWantScripts);
+        baselinePending_ = Want(kWantBench) && !LoadBench(host_.dataDir).hasBaseline;
         baselineStarted_ = false;
         chainAuto_ = false;
         hubReturn_ = false;
@@ -2658,6 +2890,14 @@ private:
         want_[kWantStorage] = choices.storage;
         want_[kWantNetwork] = choices.network;
         want_[kWantAudio] = choices.audio;
+        want_[kWantProfile] = choices.profile;
+        want_[kWantGames] = choices.games;
+        want_[kWantHardware] = choices.hardware;
+        want_[kWantBench] = choices.bench;
+        want_[kWantShare] = choices.share;
+        want_[kWantScripts] = choices.scripts;
+        want_[kWantMetrics] = choices.metrics;
+        want_[kWantFocus] = choices.focus;
     }
 
     void OpenHome() {
@@ -2819,6 +3059,140 @@ private:
         if (show) stage_ = Stage::AudioApplying;
     }
 
+    void StartProfileJob(bool show = true) {
+        if (!JobBusy(JobId::Profile)) {
+            LaunchJob(JobId::Profile, [this](SharedState& feed) {
+                feed.Phase(L"PROFILE", L"applying Performance");
+                SetChosenProfile(Profile::Performance);
+                std::wstring detail;
+                const bool ok = ApplyProfile(Profile::Performance, detail);
+                RunHook(L"performance", L"", [](const std::wstring&) {});
+                feed.Phase(ok ? L"PROFILE" : L"PROFILE FAILED", detail.empty() ? (ok ? L"Performance is on" : L"could not switch") : detail);
+                return ok ? 0 : 1;
+            });
+        }
+        if (show) stage_ = Stage::ProfileApplying;
+    }
+
+    void StartGamesJob(bool show = true) {
+        if (!JobBusy(JobId::Games)) {
+            LaunchJob(JobId::Games, [this](SharedState& feed) {
+                feed.Phase(L"GAMES", L"watching for a game");
+                prefs_.gameBoost = true;
+                CommitPrefs();
+                feed.Phase(L"GAMES", L"Performance turns on while a game is running, then Balanced returns");
+                return 0;
+            });
+        }
+        if (show) stage_ = Stage::GamesApplying;
+    }
+
+    void StartHardwareJob(bool show = true) {
+        if (!JobBusy(JobId::Hardware)) {
+            LaunchJob(JobId::Hardware, [this](SharedState& feed) {
+                feed.Phase(L"HARDWARE", L"comparing this PC with the last tune");
+                prefs_.watchHardware = true;
+                CommitPrefs();
+                const auto changes = DetectHardwareChanges();
+                if (changes.empty()) {
+                    hardwareNote_ = HardwareSummary();
+                    feed.Phase(L"HARDWARE", hardwareNote_.empty() ? L"Nothing has changed" : hardwareNote_);
+                } else {
+                    hardwareNote_ = changes.front().what;
+                    if (!changes.front().advice.empty()) hardwareNote_ += L" " + changes.front().advice;
+                    feed.Phase(L"HARDWARE", hardwareNote_);
+                }
+                return 0;
+            });
+        }
+        if (show) stage_ = Stage::HardwareApplying;
+    }
+
+    void StartBenchJob(bool show = true) {
+        if (!JobBusy(JobId::Bench)) {
+            LaunchJob(JobId::Bench, [this](SharedState& feed) {
+                feed.Phase(L"BENCH", L"timing sleep, wake, CPU, memory, and the disk");
+                BenchResult result;
+                const bool ok = RunBench(result, host_.dataDir, jobs_[static_cast<int>(JobId::Bench)].cancel,
+                                          [&](const wchar_t* phase, double fraction) {
+                    feed.Progress(fraction, 0, 0);
+                    feed.Phase(L"BENCH", phase ? phase : L"running");
+                });
+                if (ok) {
+                    result.label = L"run";
+                    SaveBench(host_.dataDir, result, false);
+                    feed.Phase(L"BENCH", Fmt(L"sleep median %.3f ms, DPC %.2f%%", result.sleepMedianMs, result.dpcPct));
+                } else {
+                    feed.Phase(L"BENCH FAILED", L"the bench did not finish");
+                }
+                return ok ? 0 : 1;
+            });
+        }
+        if (show) stage_ = Stage::BenchApplying;
+    }
+
+    void StartShareJob(bool show = true) {
+        if (!JobBusy(JobId::Share)) {
+            LaunchJob(JobId::Share, [this](SharedState& feed) {
+                feed.Phase(L"SHARE", L"writing the choices");
+                shareBody_ = ExportSettings(host_.version);
+                shareCode_ = MakeShareCode(shareBody_);
+                const std::wstring path = host_.dataDir + L"\\synchronus-profile.json";
+                const bool ok = WriteTextFile(path, shareBody_);
+                feed.Phase(ok ? L"SHARE" : L"SHARE FAILED", ok ? path : L"could not write the file");
+                return ok ? 0 : 1;
+            });
+        }
+        if (show) stage_ = Stage::ShareApplying;
+    }
+
+    void StartScriptsJob(bool show = true) {
+        if (!JobBusy(JobId::Scripts)) {
+            LaunchJob(JobId::Scripts, [this](SharedState& feed) {
+                EnsureScriptFolders();
+                feed.Phase(L"SCRIPTS", L"running approved after-tune scripts");
+                const int ran = RunHook(L"after-tune", L"", [&](const std::wstring& line) { feed.Phase(L"SCRIPTS", line); });
+                feed.Phase(L"SCRIPTS", Fmt(L"%d script%s ran", ran, ran == 1 ? L"" : L"s"));
+                return 0;
+            });
+        }
+        if (show) stage_ = Stage::ScriptsApplying;
+    }
+
+    void StartMetricsJob(bool show = true) {
+        if (!JobBusy(JobId::Metrics)) {
+            LaunchJob(JobId::Metrics, [this](SharedState& feed) {
+                feed.Phase(L"METRICS", L"reading clocks and DPC");
+                if (!meter_) meter_ = std::make_unique<LiveMeter>();
+                LiveSample sample;
+                meter_->Sample(sample);
+                Sleep(400);
+                meter_->Sample(sample);
+                meterSample_ = sample;
+                feed.Phase(L"METRICS", Fmt(L"CPU %.0f%%   DPC %.2f%%   %s", sample.cpu, sample.dpc,
+                                           sample.mhz > 0 ? Fmt(L"%.0f MHz", sample.mhz).c_str() : L"clock unread"));
+                return 0;
+            });
+        }
+        if (show) stage_ = Stage::MetricsApplying;
+    }
+
+    void StartFocusJob(bool show = true) {
+        if (!JobBusy(JobId::Focus)) {
+            LaunchJob(JobId::Focus, [this](SharedState& feed) {
+                feed.Phase(L"FOCUS", L"holding notification banners and the Game Bar button");
+                prefs_.gameQuiet = true;
+                CommitPrefs();
+                const bool quiet = QuietBegin();
+                SetGameBarButtonOff(true);
+                feed.Phase(quiet ? L"FOCUS" : L"FOCUS FAILED",
+                           quiet ? L"Banners are held. The Game Bar button is off." : L"Notification policy could not be changed.");
+                return quiet ? 0 : 1;
+            });
+        }
+        if (show) stage_ = Stage::FocusApplying;
+    }
+
     bool PhaseIdle(JobId id) const {
         return jobs_[static_cast<int>(id)].phase.load() == static_cast<int>(JobPhase::Idle);
     }
@@ -2974,6 +3348,38 @@ private:
         }
         if (Want(kWantAudio) && PhaseIdle(JobId::Audio)) {
             StartAudio(false);
+            return true;
+        }
+        if (Want(kWantProfile) && PhaseIdle(JobId::Profile)) {
+            StartProfileJob(false);
+            return true;
+        }
+        if (Want(kWantGames) && PhaseIdle(JobId::Games)) {
+            StartGamesJob(false);
+            return true;
+        }
+        if (Want(kWantHardware) && PhaseIdle(JobId::Hardware)) {
+            StartHardwareJob(false);
+            return true;
+        }
+        if (Want(kWantScripts) && PhaseIdle(JobId::Scripts)) {
+            StartScriptsJob(false);
+            return true;
+        }
+        if (Want(kWantShare) && PhaseIdle(JobId::Share)) {
+            StartShareJob(false);
+            return true;
+        }
+        if (Want(kWantFocus) && PhaseIdle(JobId::Focus)) {
+            StartFocusJob(false);
+            return true;
+        }
+        if (Want(kWantMetrics) && PhaseIdle(JobId::Metrics)) {
+            StartMetricsJob(false);
+            return true;
+        }
+        if (Want(kWantBench) && PhaseIdle(JobId::Bench) && !TimerBusy() && !benchBusy_.load()) {
+            StartBenchJob(false);
             return true;
         }
         if (HoldReady()) {
@@ -3519,6 +3925,14 @@ private:
             {JobId::Storage, Stage::StorageApplying, Stage::StorageDone, Stage::StorageFailed, Stage::StorageFailed},
             {JobId::Network, Stage::NetworkApplying, Stage::NetworkDone, Stage::NetworkFailed, Stage::NetworkFailed},
             {JobId::Audio, Stage::AudioApplying, Stage::AudioDone, Stage::AudioFailed, Stage::AudioFailed},
+            {JobId::Profile, Stage::ProfileApplying, Stage::ProfileDone, Stage::ProfileFailed, Stage::ProfileFailed},
+            {JobId::Games, Stage::GamesApplying, Stage::GamesDone, Stage::GamesFailed, Stage::GamesFailed},
+            {JobId::Hardware, Stage::HardwareApplying, Stage::HardwareDone, Stage::HardwareFailed, Stage::HardwareFailed},
+            {JobId::Bench, Stage::BenchApplying, Stage::BenchDone, Stage::BenchFailed, Stage::BenchFailed},
+            {JobId::Share, Stage::ShareApplying, Stage::ShareDone, Stage::ShareFailed, Stage::ShareFailed},
+            {JobId::Scripts, Stage::ScriptsApplying, Stage::ScriptsDone, Stage::ScriptsFailed, Stage::ScriptsFailed},
+            {JobId::Metrics, Stage::MetricsApplying, Stage::MetricsDone, Stage::MetricsFailed, Stage::MetricsFailed},
+            {JobId::Focus, Stage::FocusApplying, Stage::FocusDone, Stage::FocusFailed, Stage::FocusFailed},
         };
         const Stage stage = stage_.load();
         for (const Map& map : maps) {
@@ -4044,8 +4458,10 @@ private:
         y += 34;
         heading(L"Full tune steps");
         static const wchar_t* kLabels[kWantCount] = {
-            L"Restore point", L"Timer measure", L"Boot service", L"CPU tune", L"GPU driver", L"GPU settings",
-            L"Afterburner",   L"Memory",        L"Storage",      L"Network",   L"Audio",
+            L"Restore point", L"Timer measure", L"Boot service", L"CPU tune",    L"GPU driver", L"GPU settings",
+            L"Afterburner",   L"Memory",        L"Storage",      L"Network",     L"Audio",      L"Profile",
+            L"Games",         L"Hardware",      L"Bench",        L"Share",       L"Scripts",    L"Metrics",
+            L"Focus",
         };
         const float colW = (x1 - x0 - 10) * 0.5f;
         const int rows = (kWantCount + 1) / 2;
@@ -5950,72 +6366,55 @@ private:
         }
         const float centerL = B.left + leftW + gap;
         const float centerR = B.right - rightW - gap;
-        const wchar_t* labels[] = {L"Full tune", L"Health", L"Measure timing", L"CPU power", L"GPU driver",
-                                   L"GPU settings", L"Afterburner", L"Memory", L"Storage", L"Restart notes"};
+        const wchar_t* labels[] = {L"Full tune", L"Health",     L"Measure",    L"CPU power", L"GPU driver",
+                                   L"GPU settings", L"Afterburner", L"Memory", L"Storage",   L"Restart",
+                                   L"Network",  L"Audio",      L"Profile",    L"Games",     L"Hardware",
+                                   L"Bench",    L"Share",      L"Scripts",    L"Metrics",   L"Focus"};
         const wchar_t* blurbs[] = {
-            L"Makes a restore point first, then measures timing before changing anything else. CPU, memory, and the driver lookup then run together. Storage follows the CPU step. GPU settings and Afterburner wait until the driver choice is finished.",
+            L"Runs every checked step. Restore point first, then the rest in a safe order. Each step on this list also opens on its own.",
             L"Opens the health screen. It reads the live settings and lists anything that has drifted. Nothing changes until you choose a repair.",
-            L"Times Sleep(1) across timer resolutions and saves a scan. After more than one run, the timer holds the lowest aggregate score. The heatmap on this screen uses the newest scan.",
-            L"Writes the processor power plan. Core parking and throttling are turned off, and the plan asks the CPU to stay at a high, steady state.",
-            L"Looks up the current graphics driver and can install a clean copy. This step does not install Afterburner.",
-            L"Turns on hardware-accelerated GPU scheduling, turns off Game DVR and Game Bar capture, and writes the NVIDIA or AMD low-latency profile when that vendor is present.",
-            L"Installs MSI Afterburner and RivaTuner, scans the PCI-E graphics card, applies that curve, and saves it as a profile that loads at sign-in. The download and scan take about 30 minutes.",
+            L"Times Sleep(1) across timer resolutions and saves a scan.",
+            L"Writes the processor power plan. Core parking and throttling are turned off.",
+            L"Looks up the current graphics driver and can install a clean copy.",
+            L"Turns on hardware-accelerated GPU scheduling and writes the vendor low-latency profile.",
+            L"Installs MSI Afterburner and RivaTuner, scans the card, and saves the curve.",
             L"Sets the page file and turns memory compression off.",
-            L"Turns SysMain off and checks that TRIM is enabled for the system drive.",
-            L"Shows the BIOS settings to change by hand, then asks you to restart. Windows cannot write those settings for you.",
+            L"Turns SysMain off and checks that TRIM is enabled.",
+            L"Shows the BIOS settings to change by hand, then asks you to restart.",
+            L"Lists each adapter and turns off the power-saving and interrupt-moderation options that add latency.",
+            L"Lists the connected playback and recording devices and turns enhancements off.",
+            L"Switches between Performance and Balanced. Performance keeps the tuned plan and the timer hold.",
+            L"Watches for a game and lifts Balanced to Performance until that game exits.",
+            L"Compares the GPU, driver, CPU, BIOS, and Windows build with the last tune.",
+            L"Times sleep, wake, CPU, memory, and the disk, and keeps the run next to the baseline.",
+            L"Writes these step choices to a file and a share code. No device ids are included.",
+            L"Lists scripts under Program Files\\Synchronus\\Scripts and runs the ones you have approved.",
+            L"Shows live CPU use, DPC, clock, and memory.",
+            L"Holds notification banners and turns the Game Bar button off.",
         };
         const std::wstring banner = JobBanner();
         if (!banner.empty()) {
             rd_.Text(banner, D2D1::RectF(B.left, B.top, B.left + leftW, B.top + 20), rd_.fSmall.Get(), col::muted);
         }
         const bool showUpdate = updatePulse_;
-        const float heatH = std::max(180.0f, H(B) * 0.36f);
+        const float heatH = 132.0f;
         const float btnTop = B.top + (banner.empty() ? 0.0f : 24.0f);
         const float btnBottom = B.bottom - heatH - 46.0f - (showUpdate ? 52.0f : 12.0f);
-        const float btnGap = 8.0f;
-        const float btnH = std::max(40.0f, (btnBottom - btnTop - 4.0f * btnGap) / 5.0f);
+        const float btnGap = 4.0f;
+        constexpr int kHomeTools = 20;
+        constexpr int kHomeRows = 10;
+        const float btnH = std::max(22.0f, (btnBottom - btnTop - (kHomeRows - 1) * btnGap) / kHomeRows);
         const float colW = (leftW - 10.0f) / 2.0f;
-        for (int i = 0; i < 10; ++i) {
+        IDWriteTextFormat* homeFont = btnH < 32.0f ? rd_.fSmall.Get() : rd_.fHomeBtn.Get();
+        for (int i = 0; i < kHomeTools; ++i) {
             const float x = B.left + (i % 2) * (colW + 10);
             const float y = btnTop + (i / 2) * (btnH + btnGap);
             const D2D1_RECT_F cell = D2D1::RectF(x, y, x + colW, y + btnH);
             NoteTip(cell, labels[i], blurbs[i]);
-            if (!Button(200 + i, cell, labels[i], col::cyan, i == 0, true, dt, false, false, rd_.fHomeBtn.Get())) continue;
-            if (i == 0) {
-                stage_ = fleet_ ? Stage::Fleet : Stage::Welcome;
-            } else if (i == 1) {
-                OpenHealth();
-            } else if (i == 2) {
-                if (JobBusy(JobId::Measure)) stage_ = Stage::Running;
-                else StartBenchmark(true);
-            } else if (i == 3) {
-                OpenTool(JobId::Cpu, Stage::PpmPrompt, Stage::PpmApplying);
-            } else if (i == 4) {
-                hubReturn_ = true;
-                stage_ = Stage::GpuClean;
-                if (!JobBusy(JobId::GpuClean)) {
-                    GpuDl phase;
-                    {
-                        std::lock_guard<std::mutex> g(gpuM_);
-                        phase = gpuPhase_;
-                    }
-                    if (phase == GpuDl::Idle) BeginGpuLookup();
-                }
-            } else if (i == 5) {
-                OpenTool(JobId::Gpu, Stage::GpuPrompt, Stage::GpuApplying);
-            } else if (i == 6) {
-                OpenTool(JobId::Afterburner, Stage::AfterburnerPrompt, Stage::AfterburnerApplying);
-            } else if (i == 7) {
-                OpenTool(JobId::Memory, Stage::MemoryPrompt, Stage::MemoryApplying);
-            } else if (i == 8) {
-                OpenTool(JobId::Storage, Stage::StoragePrompt, Stage::StorageApplying);
-            } else {
-                hubReturn_ = true;
-                stage_ = Stage::Review;
-                state_.Phase(L"REVIEW", L"set BIOS, then restart");
-            }
+            if (!Button(200 + i, cell, labels[i], col::cyan, i == 0, true, dt, false, false, homeFont)) continue;
+            OpenHomeTool(i);
         }
-        const float buttonsBottom = btnTop + 5 * btnH + 4 * btnGap;
+        const float buttonsBottom = btnTop + kHomeRows * btnH + (kHomeRows - 1) * btnGap;
         const D2D1_RECT_F updateR = D2D1::RectF(B.left, buttonsBottom + 8, B.left + leftW, buttonsBottom + 44);
         if (showUpdate) {
             NoteTip(updateR, L"Install update",
@@ -6244,12 +6643,12 @@ private:
         rd_.Text(company, D2D1::RectF(x0, y, x0 + nameW + 8, y + 22), rd_.fSub.Get(), col::cyan,
                  DWRITE_TEXT_ALIGNMENT_LEADING, DWRITE_PARAGRAPH_ALIGNMENT_CENTER);
         y += 36;
-        rd_.Text(L"Timer resolution, CPU power, GPU, memory, storage, network, and audio. Low-level settings are tuned to harden the machine for a more responsive, lower-latency configuration, without unneeded versatility or fluff. Perfect for gamers and HPC. Uncheck any step you want to skip. Begin makes a restore point first, measures timing next, then runs the remaining steps in a safe order. It asks only before a driver install or Afterburner.",
-                 D2D1::RectF(card.left + 48, y, card.right - 48, y + 108), rd_.fBody.Get(), col::muted,
+        rd_.Text(L"Timer, CPU, GPU, memory, storage, network, audio, profile, games, hardware, bench, share, scripts, metrics, and focus. Uncheck any step you want the full tune to skip. Each step also opens on its own from Home.",
+                 D2D1::RectF(card.left + 48, y, card.right - 48, y + 52), rd_.fBody.Get(), col::muted,
                  DWRITE_TEXT_ALIGNMENT_CENTER);
-        y += 116;
+        y += 58;
 
-        rd_.Text(L"Select the steps to run  -  everything is on by default",
+        rd_.Text(L"Select the steps to run",
                  D2D1::RectF(card.left + 36, y, card.right - 220, y + 22), rd_.fSmall.Get(), col::muted,
                  DWRITE_TEXT_ALIGNMENT_LEADING, DWRITE_PARAGRAPH_ALIGNMENT_CENTER);
         const D2D1_RECT_F allR = D2D1::RectF(card.right - 210, y, card.right - 128, y + 22);
@@ -6274,17 +6673,26 @@ private:
             L"Storage - ASPM, TRIM, USB",
             L"Network - adapter power, delivery",
             L"Audio - enhancements off",
+            L"Profile - Performance or Balanced",
+            L"Games - switch when a game starts",
+            L"Hardware - what changed",
+            L"Bench - CPU, disk, DPC",
+            L"Share - export these choices",
+            L"Scripts - approved hooks",
+            L"Metrics - clocks and DPC",
+            L"Focus - banners and Game Bar",
             L"Review - BIOS, then restart",
         };
-        const float colW = (W(card) - 88) / 2;
-        const int rows = 6;
-        const float rowH = 28.0f;
+        const int cols = 3;
+        const int rows = (kWantCount + 1 + cols - 1) / cols;
+        const float colW = (W(card) - 88) / cols;
+        const float rowH = 22.0f;
         for (int i = 0; i < kWantCount + 1; ++i) {
-            const float colN = i < rows ? 0.0f : 1.0f;
-            const float row = static_cast<float>(i < rows ? i : i - rows);
-            const float x = card.left + 36 + colN * (colW + 16);
-            const float yy = y + row * rowH;
-            const D2D1_RECT_F cell = D2D1::RectF(x, yy, x + colW, yy + 30);
+            const int colN = i / rows;
+            const int row = i % rows;
+            const float x = card.left + 28 + colN * (colW + 8);
+            const float yy = y + static_cast<float>(row) * rowH;
+            const D2D1_RECT_F cell = D2D1::RectF(x, yy, x + colW - 6, yy + rowH - 2);
             const bool locked = (i == kWantCount);
             const bool on = locked ? true : want_[i];
             if (CheckRow(20 + i, cell, on, locked, kLabels[i], dt) && !locked) {
@@ -6564,6 +6972,48 @@ private:
                              [this] { StartStorage(); },
                              [this] { OpenHome(); });
                 break;
+            case Stage::NetworkPrompt:
+            case Stage::NetworkApplying:
+            case Stage::NetworkDone:
+            case Stage::NetworkFailed:
+            case Stage::AudioPrompt:
+            case Stage::AudioApplying:
+            case Stage::AudioDone:
+            case Stage::AudioFailed:
+            case Stage::ProfilePrompt:
+            case Stage::ProfileApplying:
+            case Stage::ProfileDone:
+            case Stage::ProfileFailed:
+            case Stage::GamesPrompt:
+            case Stage::GamesApplying:
+            case Stage::GamesDone:
+            case Stage::GamesFailed:
+            case Stage::HardwarePrompt:
+            case Stage::HardwareApplying:
+            case Stage::HardwareDone:
+            case Stage::HardwareFailed:
+            case Stage::BenchPrompt:
+            case Stage::BenchApplying:
+            case Stage::BenchDone:
+            case Stage::BenchFailed:
+            case Stage::SharePrompt:
+            case Stage::ShareApplying:
+            case Stage::ShareDone:
+            case Stage::ShareFailed:
+            case Stage::ScriptsPrompt:
+            case Stage::ScriptsApplying:
+            case Stage::ScriptsDone:
+            case Stage::ScriptsFailed:
+            case Stage::MetricsPrompt:
+            case Stage::MetricsApplying:
+            case Stage::MetricsDone:
+            case Stage::MetricsFailed:
+            case Stage::FocusPrompt:
+            case Stage::FocusApplying:
+            case Stage::FocusDone:
+            case Stage::FocusFailed:
+                DrawUtility(B, dt);
+                break;
             case Stage::Review:
                 DrawReview(B, dt);
                 break;
@@ -6581,6 +7031,257 @@ private:
                 if (Button(5, btnB, L"Open log", col::muted, false, true, dt)) OpenLog();
                 break;
             }
+        }
+    }
+
+    void CopyText(const std::wstring& text) {
+        if (!hwnd_ || !OpenClipboard(hwnd_)) return;
+        EmptyClipboard();
+        HGLOBAL mem = GlobalAlloc(GMEM_MOVEABLE, (text.size() + 1) * sizeof(wchar_t));
+        if (mem) {
+            memcpy(GlobalLock(mem), text.c_str(), (text.size() + 1) * sizeof(wchar_t));
+            GlobalUnlock(mem);
+            SetClipboardData(CF_UNICODETEXT, mem);
+        }
+        CloseClipboard();
+    }
+
+    bool PasteText(std::wstring& out) {
+        out.clear();
+        if (!hwnd_ || !OpenClipboard(hwnd_)) return false;
+        HANDLE data = GetClipboardData(CF_UNICODETEXT);
+        if (data) {
+            if (const wchar_t* p = static_cast<const wchar_t*>(GlobalLock(data))) {
+                out = p;
+                GlobalUnlock(data);
+            }
+        }
+        CloseClipboard();
+        return !out.empty();
+    }
+
+    void ToolButtons(const D2D1_RECT_F& B, float dt, int id, const wchar_t* go, D2D1_COLOR_F accent,
+                     const std::function<void()>& run) {
+        const float cx = (B.left + B.right) / 2;
+        const float bw = std::min(270.0f, (W(B) - 16) / 2);
+        const D2D1_RECT_F btnA = D2D1::RectF(cx - bw - 6, B.bottom - 38, cx - 6, B.bottom - 4);
+        const D2D1_RECT_F btnB = D2D1::RectF(cx + 6, B.bottom - 38, cx + 6 + bw, B.bottom - 4);
+        if (Button(id, btnA, go, accent, true, true, dt, true, true)) run();
+        if (Button(id + 1, btnB, L"Home", col::muted, false, true, dt)) OpenHome();
+    }
+
+    void DrawUtility(const D2D1_RECT_F& B, float dt) {
+        const Stage stage = stage_.load();
+        auto progress = [&](Stage done) { DrawTweakProgress(B, dt, stage == done, false); };
+        if (stage == Stage::NetworkApplying || stage == Stage::NetworkDone) return progress(Stage::NetworkDone);
+        if (stage == Stage::AudioApplying || stage == Stage::AudioDone) return progress(Stage::AudioDone);
+        if (stage == Stage::ProfileApplying || stage == Stage::ProfileDone) return progress(Stage::ProfileDone);
+        if (stage == Stage::GamesApplying || stage == Stage::GamesDone) return progress(Stage::GamesDone);
+        if (stage == Stage::HardwareApplying || stage == Stage::HardwareDone) return progress(Stage::HardwareDone);
+        if (stage == Stage::BenchApplying || stage == Stage::BenchDone) return progress(Stage::BenchDone);
+        if (stage == Stage::ShareApplying || stage == Stage::ShareDone) return progress(Stage::ShareDone);
+        if (stage == Stage::ScriptsApplying || stage == Stage::ScriptsDone) return progress(Stage::ScriptsDone);
+        if (stage == Stage::MetricsApplying || stage == Stage::MetricsDone) return progress(Stage::MetricsDone);
+        if (stage == Stage::FocusApplying || stage == Stage::FocusDone) return progress(Stage::FocusDone);
+        if (stage == Stage::NetworkFailed)
+            return DrawPackFail(B, dt, L"Network settings could not be written.", [this] { StartNetwork(); }, [this] { OpenHome(); });
+        if (stage == Stage::AudioFailed)
+            return DrawPackFail(B, dt, L"Audio enhancements could not be changed.", [this] { StartAudio(); }, [this] { OpenHome(); });
+        if (stage == Stage::ProfileFailed)
+            return DrawPackFail(B, dt, L"The profile could not be applied.", [this] { StartProfileJob(); }, [this] { OpenHome(); });
+        if (stage == Stage::GamesFailed)
+            return DrawPackFail(B, dt, L"Game watch could not be turned on.", [this] { StartGamesJob(); }, [this] { OpenHome(); });
+        if (stage == Stage::HardwareFailed)
+            return DrawPackFail(B, dt, L"The hardware check did not finish.", [this] { StartHardwareJob(); }, [this] { OpenHome(); });
+        if (stage == Stage::BenchFailed)
+            return DrawPackFail(B, dt, L"The bench did not finish.", [this] { StartBenchJob(); }, [this] { OpenHome(); });
+        if (stage == Stage::ShareFailed)
+            return DrawPackFail(B, dt, L"The share file could not be written.", [this] { StartShareJob(); }, [this] { OpenHome(); });
+        if (stage == Stage::ScriptsFailed)
+            return DrawPackFail(B, dt, L"A script did not finish.", [this] { StartScriptsJob(); }, [this] { OpenHome(); });
+        if (stage == Stage::MetricsFailed)
+            return DrawPackFail(B, dt, L"Live metrics could not be read.", [this] { StartMetricsJob(); }, [this] { OpenHome(); });
+        if (stage == Stage::FocusFailed)
+            return DrawPackFail(B, dt, L"Notification policy could not be changed.", [this] { StartFocusJob(); }, [this] { OpenHome(); });
+
+        const D2D1_RECT_F body = D2D1::RectF(B.left + 12, B.top + 58, B.right - 12, B.bottom - 48);
+        if (stage == Stage::NetworkPrompt) {
+            if (!netListed_) {
+                const NetPlan plan = PlanNetwork(LoadNetOptions());
+                netBody_.clear();
+                if (plan.adapters.empty()) netBody_ = L"No Ethernet or Wi-Fi adapter was found.";
+                for (const auto& a : plan.adapters) {
+                    netBody_ += a.name + (a.wifi ? L"   Wi-Fi\n" : L"   Ethernet\n");
+                    if (a.changes.empty()) netBody_ += L"  This driver has none of the latency switches.\n";
+                    for (const auto& c : a.changes)
+                        netBody_ += L"  " + c.title + (c.already ? L"   already set\n" : L"   will change\n");
+                }
+                netBody_ += Fmt(L"\n%d change%s waiting. They apply after a restart. The link stays up now.", plan.pending,
+                                plan.pending == 1 ? L"" : L"s");
+                netListed_ = true;
+            }
+            rd_.Text(L"Network", D2D1::RectF(B.left, B.top + 6, B.right, B.top + 30), rd_.fPhase.Get(), col::cyan,
+                     DWRITE_TEXT_ALIGNMENT_CENTER);
+            rd_.Text(L"Adapter power saving, interrupt moderation, and update sharing.",
+                     D2D1::RectF(B.left, B.top + 30, B.right, B.top + 52), rd_.fSmall.Get(), col::text,
+                     DWRITE_TEXT_ALIGNMENT_CENTER);
+            rd_.Text(netBody_, body, rd_.fMonoSmall.Get(), col::muted);
+            ToolButtons(B, dt, 60, L"Apply network", col::cyan, [this] { StartNetwork(); });
+            return;
+        }
+        if (stage == Stage::AudioPrompt) {
+            if (!audioListed_) {
+                audioBody_.clear();
+                const auto devices = ListAudioDevices();
+                if (devices.empty()) audioBody_ = L"No connected playback or recording device was found.";
+                for (const auto& d : devices) {
+                    audioBody_ += d.name + (d.capture ? L"   recording" : L"   playback");
+                    if (!d.readable) audioBody_ += L"   unreadable\n";
+                    else audioBody_ += d.enhancementsOff ? L"   enhancements already off\n" : L"   enhancements on\n";
+                }
+                audioBody_ += L"\nOff removes the driver's effects and the buffering they add. Windows already runs the audio engine at real-time priority.";
+                audioListed_ = true;
+            }
+            rd_.Text(L"Audio", D2D1::RectF(B.left, B.top + 6, B.right, B.top + 30), rd_.fPhase.Get(), col::cyan,
+                     DWRITE_TEXT_ALIGNMENT_CENTER);
+            rd_.Text(L"Turn enhancements off on the devices that are connected.",
+                     D2D1::RectF(B.left, B.top + 30, B.right, B.top + 52), rd_.fSmall.Get(), col::text,
+                     DWRITE_TEXT_ALIGNMENT_CENTER);
+            rd_.Text(audioBody_, body, rd_.fMonoSmall.Get(), col::muted);
+            ToolButtons(B, dt, 62, L"Turn enhancements off", col::cyan, [this] { StartAudio(); });
+            return;
+        }
+        if (stage == Stage::ProfilePrompt) {
+            const bool perf = ChosenProfile() == Profile::Performance;
+            rd_.Text(L"Profile", D2D1::RectF(B.left, B.top + 6, B.right, B.top + 30), rd_.fPhase.Get(), col::cyan,
+                     DWRITE_TEXT_ALIGNMENT_CENTER);
+            rd_.Text(perf ? L"Performance is selected. The tuned power plan and the timer hold stay on."
+                          : L"Balanced is selected. The power plan goes back and the timer hold is released.",
+                     D2D1::RectF(B.left + 12, B.top + 36, B.right - 12, B.top + 80), rd_.fBody.Get(), col::muted,
+                     DWRITE_TEXT_ALIGNMENT_CENTER);
+            const float cx = (B.left + B.right) / 2;
+            const float bw = std::min(220.0f, (W(B) - 36) / 2);
+            if (Button(64, D2D1::RectF(cx - bw - 6, B.top + 96, cx - 6, B.top + 132), L"Performance", col::cyan, perf, true, dt)) {
+                SetChosenProfile(Profile::Performance);
+                std::wstring detail;
+                ApplyProfile(Profile::Performance, detail);
+            }
+            if (Button(65, D2D1::RectF(cx + 6, B.top + 96, cx + 6 + bw, B.top + 132), L"Balanced", col::amber, !perf, true, dt)) {
+                SetChosenProfile(Profile::Balanced);
+                std::wstring detail;
+                ApplyProfile(Profile::Balanced, detail);
+            }
+            ToolButtons(B, dt, 66, L"Apply Performance", col::cyan, [this] { StartProfileJob(); });
+            return;
+        }
+        if (stage == Stage::GamesPrompt) {
+            const GameRules rules = LoadGameRules();
+            std::wstring text = prefs_.gameBoost ? L"Watch is on. A game lifts Balanced to Performance until it exits.\n"
+                                                 : L"Watch is off. A game does not change the profile.\n";
+            text += rules.libraries ? L"Windows' game list and launcher folders count.\n" : L"Only names you add count as games.\n";
+            if (!rules.include.empty()) text += L"Always a game: " + rules.include.front() + L"\n";
+            if (!rules.exclude.empty()) text += L"Never a game: " + rules.exclude.front() + L"\n";
+            if (gameWas_) text += L"A game is running now.\n";
+            rd_.Text(L"Games", D2D1::RectF(B.left, B.top + 6, B.right, B.top + 30), rd_.fPhase.Get(), col::cyan,
+                     DWRITE_TEXT_ALIGNMENT_CENTER);
+            rd_.Text(text, body, rd_.fBody.Get(), col::muted);
+            ToolButtons(B, dt, 68, prefs_.gameBoost ? L"Watch is on" : L"Turn watch on", col::cyan, [this] { StartGamesJob(); });
+            return;
+        }
+        if (stage == Stage::HardwarePrompt) {
+            rd_.Text(L"Hardware", D2D1::RectF(B.left, B.top + 6, B.right, B.top + 30), rd_.fPhase.Get(), col::cyan,
+                     DWRITE_TEXT_ALIGNMENT_CENTER);
+            rd_.Text(hardwareNote_.empty() ? HardwareSummary() : hardwareNote_, body, rd_.fBody.Get(), col::muted);
+            ToolButtons(B, dt, 70, L"Check again", col::cyan, [this] { StartHardwareJob(); });
+            return;
+        }
+        if (stage == Stage::BenchPrompt) {
+            const BenchHistory history = LoadBench(host_.dataDir);
+            std::wstring text = history.hasBaseline ? L"A baseline is saved.\n" : L"No baseline yet. The first full tune that includes Bench can take one before anything else changes.\n";
+            if (!history.runs.empty()) {
+                const auto& r = history.runs.front();
+                text += Fmt(L"Last run: sleep median %.3f ms, DPC %.2f%%, disk write %.0f MB/s", r.sleepMedianMs, r.dpcPct,
+                            r.diskWriteMbps);
+            }
+            rd_.Text(L"Bench", D2D1::RectF(B.left, B.top + 6, B.right, B.top + 30), rd_.fPhase.Get(), col::cyan,
+                     DWRITE_TEXT_ALIGNMENT_CENTER);
+            rd_.Text(text, body, rd_.fBody.Get(), col::muted);
+            ToolButtons(B, dt, 72, L"Run bench", col::cyan, [this] { StartBenchJob(); });
+            return;
+        }
+        if (stage == Stage::SharePrompt) {
+            rd_.Text(L"Share", D2D1::RectF(B.left, B.top + 6, B.right, B.top + 30), rd_.fPhase.Get(), col::cyan,
+                     DWRITE_TEXT_ALIGNMENT_CENTER);
+            rd_.Text(shareCode_.empty() ? L"Export writes the step choices and preferences. It does not include a user name or device id."
+                                        : shareCode_,
+                     body, rd_.fMonoSmall.Get(), col::muted);
+            const float yb = B.bottom - 78;
+            if (Button(74, D2D1::RectF(B.left + 12, yb, B.left + 160, yb + 30), L"Copy code", col::cyan, false, !shareCode_.empty(), dt))
+                CopyText(shareCode_);
+            if (Button(75, D2D1::RectF(B.left + 168, yb, B.left + 330, yb + 30), L"Import clipboard", col::amber, false, true, dt)) {
+                std::wstring text, json, summary, err;
+                if (PasteText(text) && ReadShareCode(text, json) && ImportSettings(json, summary, err)) shareBody_ = summary;
+                else if (!text.empty() && ImportSettings(text, summary, err)) shareBody_ = summary;
+                else shareBody_ = err.empty() ? L"The clipboard is not a Synchronus share." : err;
+            }
+            if (!shareBody_.empty() && shareCode_.empty())
+                rd_.Text(shareBody_, D2D1::RectF(B.left + 12, B.top + 36, B.right - 12, yb - 6), rd_.fSmall.Get(), col::muted);
+            ToolButtons(B, dt, 76, L"Export", col::cyan, [this] { StartShareJob(); });
+            return;
+        }
+        if (stage == Stage::ScriptsPrompt) {
+            EnsureScriptFolders();
+            const auto scripts = ListScripts();
+            rd_.Text(L"Scripts", D2D1::RectF(B.left, B.top + 6, B.right, B.top + 30), rd_.fPhase.Get(), col::cyan,
+                     DWRITE_TEXT_ALIGNMENT_CENTER);
+            rd_.Text(scripts.empty() ? (L"No scripts yet. Put a .ps1 or .bat file in " + ScriptsDir()) : L"A script runs only after it is approved.",
+                     D2D1::RectF(B.left + 12, B.top + 32, B.right - 12, B.top + 54), rd_.fSmall.Get(), col::muted);
+            float y = B.top + 58;
+            const int shown = std::min(8, static_cast<int>(scripts.size()));
+            for (int i = 0; i < shown; ++i) {
+                const D2D1_RECT_F row = D2D1::RectF(B.left + 8, y, B.right - 8, y + 28);
+                const std::wstring label = scripts[static_cast<size_t>(i)].hook + L"  " + scripts[static_cast<size_t>(i)].name;
+                if (CheckRow(760 + i, row, scripts[static_cast<size_t>(i)].approved, false, label.c_str(), dt)) {
+                    ApproveScript(scripts[static_cast<size_t>(i)], !scripts[static_cast<size_t>(i)].approved);
+                }
+                y += 30;
+            }
+            ToolButtons(B, dt, 78, L"Run after-tune", col::cyan, [this] { StartScriptsJob(); });
+            return;
+        }
+        if (stage == Stage::MetricsPrompt) {
+            if (!meter_) meter_ = std::make_unique<LiveMeter>();
+            const unsigned long long now = GetTickCount64();
+            if (now >= nextMeterAt_) {
+                nextMeterAt_ = now + 500;
+                meter_->Sample(meterSample_);
+            }
+            const LiveSample& s = meterSample_;
+            rd_.Text(L"Metrics", D2D1::RectF(B.left, B.top + 6, B.right, B.top + 30), rd_.fPhase.Get(), col::cyan,
+                     DWRITE_TEXT_ALIGNMENT_CENTER);
+            rd_.Text(Fmt(L"CPU  %.0f%%\nDPC  %.2f%%    ISR  %.2f%%\nClock  %.0f MHz\nMemory  %.0f%%\nTimer  %.4f ms",
+                         s.cpu, s.dpc, s.isr, s.mhz, s.memory, s.timerMs),
+                     body, rd_.fPhase.Get(), col::text);
+            ToolButtons(B, dt, 80, L"Sample once", col::cyan, [this] { StartMetricsJob(); });
+            return;
+        }
+        if (stage == Stage::FocusPrompt) {
+            rd_.Text(L"Focus", D2D1::RectF(B.left, B.top + 6, B.right, B.top + 30), rd_.fPhase.Get(), col::cyan,
+                     DWRITE_TEXT_ALIGNMENT_CENTER);
+            rd_.Text(L"Holds Windows notification banners and turns the Game Bar button off. Uninstall puts both back.",
+                     D2D1::RectF(B.left + 12, B.top + 36, B.right - 12, B.top + 80), rd_.fBody.Get(), col::muted,
+                     DWRITE_TEXT_ALIGNMENT_CENTER);
+            const float yb = B.top + 96;
+            if (Button(82, D2D1::RectF(B.left + 12, yb, B.left + 220, yb + 32), QuietHeld() ? L"Banners held" : L"Hold banners",
+                       col::cyan, QuietHeld(), true, dt)) {
+                if (QuietHeld()) QuietEnd();
+                else QuietBegin();
+            }
+            if (Button(83, D2D1::RectF(B.left + 232, yb, B.left + 460, yb + 32),
+                       GameBarButtonOff() ? L"Game Bar button off" : L"Turn Game Bar button off", col::amber,
+                       GameBarButtonOff(), true, dt))
+                SetGameBarButtonOff(!GameBarButtonOff());
+            ToolButtons(B, dt, 84, L"Hold both", col::cyan, [this] { StartFocusJob(); });
         }
     }
 
@@ -7208,6 +7909,15 @@ private:
     unsigned long long nextExtrasAt_ = 0;
     unsigned long long nextHwAt_ = 0;
     std::wstring hardwareNote_;
+    std::wstring netBody_;
+    std::wstring audioBody_;
+    std::wstring shareBody_;
+    std::wstring shareCode_;
+    bool netListed_ = false;
+    bool audioListed_ = false;
+    std::unique_ptr<LiveMeter> meter_;
+    LiveSample meterSample_{};
+    unsigned long long nextMeterAt_ = 0;
     std::atomic<bool> replayGpu_{false};
     std::atomic<bool> afterburnerStale_{false};
     int repairJob_ = -1;

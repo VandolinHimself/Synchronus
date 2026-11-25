@@ -484,6 +484,14 @@ void SaveStepChoices(const StepChoices& choices) {
     put(L"storage", choices.storage);
     put(L"network", choices.network);
     put(L"audio", choices.audio);
+    put(L"profile", choices.profile);
+    put(L"games", choices.games);
+    put(L"hardware", choices.hardware);
+    put(L"bench", choices.bench);
+    put(L"share", choices.share);
+    put(L"scripts", choices.scripts);
+    put(L"metrics", choices.metrics);
+    put(L"focus", choices.focus);
     RegCloseKey(key);
 }
 
@@ -505,6 +513,14 @@ StepChoices LoadStepChoices() {
     get(L"storage", c.storage);
     get(L"network", c.network);
     get(L"audio", c.audio);
+    get(L"profile", c.profile);
+    get(L"games", c.games);
+    get(L"hardware", c.hardware);
+    get(L"bench", c.bench);
+    get(L"share", c.share);
+    get(L"scripts", c.scripts);
+    get(L"metrics", c.metrics);
+    get(L"focus", c.focus);
     return c;
 }
 
@@ -513,7 +529,8 @@ bool StepChosen(const wchar_t* name) {
     const std::wstring full = std::wstring(L"Want_") + name;
     if (ReadDword(HKEY_CURRENT_USER, kMonitor, full.c_str(), v)) return v != 0;
     // Audio is off until it is chosen. Every other step is on.
-    return _wcsicmp(name, L"audio") != 0;
+    return _wcsicmp(name, L"audio") != 0 && _wcsicmp(name, L"games") != 0 && _wcsicmp(name, L"bench") != 0 &&
+           _wcsicmp(name, L"share") != 0 && _wcsicmp(name, L"metrics") != 0 && _wcsicmp(name, L"focus") != 0;
 }
 
 void AppendHealthLog(const std::wstring& line) {

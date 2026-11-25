@@ -1,6 +1,11 @@
 # Changelog
 
-Current release: **3.0.2**.
+Current release: **3.1.1**.
+
+## 3.1.1 — 2026-11-24
+
+- Network, Audio, Profile, Games, Hardware, Bench, Share, Scripts, Metrics, and Focus each open from Home and run on their own, the same way CPU, Memory, and Storage do.
+- Those steps are also checkboxes on the full-tune welcome screen and in Settings. A checked step runs with the full tune. An unchecked step is skipped there and can still be opened from Home.
 
 ## 3.0.2 — 2026-11-24
 

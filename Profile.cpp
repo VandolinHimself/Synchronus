@@ -382,7 +382,10 @@ std::wstring ExportSettings(const std::wstring& version) {
          ", \"hold\": " + Flag(steps.hold) + ", \"cpu\": " + Flag(steps.cpu) + ", \"gpuClean\": " + Flag(steps.gpuClean) +
          ", \"gpu\": " + Flag(steps.gpu) + ", \"afterburner\": " + Flag(steps.afterburner) + ", \"memory\": " +
          Flag(steps.memory) + ", \"storage\": " + Flag(steps.storage) + ", \"network\": " + Flag(steps.network) +
-         ", \"audio\": " + Flag(steps.audio) + "},\n";
+         ", \"audio\": " + Flag(steps.audio) + ", \"profile\": " + Flag(steps.profile) + ", \"games\": " + Flag(steps.games) +
+         ", \"hardware\": " + Flag(steps.hardware) + ", \"bench\": " + Flag(steps.bench) + ", \"share\": " + Flag(steps.share) +
+         ", \"scripts\": " + Flag(steps.scripts) + ", \"metrics\": " + Flag(steps.metrics) + ", \"focus\": " +
+         Flag(steps.focus) + "},\n";
     j += std::string("  \"prefs\": {\"closeToTray\": ") + Flag(prefs.closeToTray) + ", \"launchAtLogin\": " +
          Flag(prefs.launchAtLogin) + ", \"notify\": " + Flag(prefs.notify) + ", \"maintain\": " + Flag(prefs.maintainTiming) +
          ", \"scanHours\": " + std::to_string(prefs.scanHours) + ", \"maintainMinutes\": " +
@@ -429,6 +432,14 @@ bool ImportSettings(const std::wstring& json, std::wstring& summary, std::wstrin
     s.storage = steps->Bool("storage", s.storage);
     s.network = steps->Bool("network", s.network);
     s.audio = steps->Bool("audio", s.audio);
+    s.profile = steps->Bool("profile", s.profile);
+    s.games = steps->Bool("games", s.games);
+    s.hardware = steps->Bool("hardware", s.hardware);
+    s.bench = steps->Bool("bench", s.bench);
+    s.share = steps->Bool("share", s.share);
+    s.scripts = steps->Bool("scripts", s.scripts);
+    s.metrics = steps->Bool("metrics", s.metrics);
+    s.focus = steps->Bool("focus", s.focus);
     SaveStepChoices(s);
 
     MonitorPrefs p = LoadMonitorPrefs();

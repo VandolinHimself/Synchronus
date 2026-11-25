@@ -97,6 +97,14 @@ struct StepChoices {
     bool storage = true;
     bool network = true;
     bool audio = false;  // changes how devices sound, so it is a choice
+    bool profile = true;
+    bool games = false;
+    bool hardware = true;
+    bool bench = false;
+    bool share = false;
+    bool scripts = true;
+    bool metrics = false;
+    bool focus = false;
 };
 
 bool SetupComplete();
