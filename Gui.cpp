@@ -162,6 +162,8 @@ D2D1_COLOR_F amber = Rgb(0x8DB8FF);
 D2D1_COLOR_F green = Rgb(0x8DB8FF);
 D2D1_COLOR_F red = Rgb(0xFF8A9A);
 D2D1_COLOR_F white = Rgb(0xF4F7FF);
+D2D1_COLOR_F figure = Rgb(0x347BFF);   // bright readout, same as cyan until HDR
+D2D1_COLOR_F figure2 = Rgb(0x123A91);  // second series
 bool hdr = false;
 
 void UseHdr(bool on) {
@@ -177,17 +179,22 @@ void UseHdr(bool on) {
         dim = Rgb(0x4D72B8);
         cyan = Rgb(0x347BFF);
         red = Rgb(0xFF8A9A);
+        figure = cyan;
+        figure2 = Rgb(0x123A91);
     } else {
-        bg = Rgb(0x020618);
-        panel = Rgb(0x030D29);
-        panel2 = Rgb(0x041334);
-        border = Rgb(0x0C2C70);
-        grid = Rgb(0x051944);
-        text = Rgb(0xF8FAFF);
-        muted = Rgb(0x6EC8FF);  // light blue, brighter, still blue
-        dim = Rgb(0x5277BB);
-        cyan = Rgb(0x4A96FF);
+        // Deep navy panels and the bright cyan used by the CPU overview readout.
+        bg = Rgb(0x010A1C);
+        panel = Rgb(0x021A3C);
+        panel2 = Rgb(0x032652);
+        border = Rgb(0x0C78C4);
+        grid = Rgb(0x0A4A78);
+        text = Rgb(0xE9F7FF);
+        muted = Rgb(0x6ED4FF);
+        dim = Rgb(0x3D7CA8);
+        cyan = Rgb(0x2EC8FF);
         red = Rgb(0xFF9BAB);
+        figure = Rgb(0x4AE8FF);
+        figure2 = Rgb(0x1496FF);
     }
     teal = muted;
     violet = border;
@@ -957,7 +964,7 @@ public:
 
     // formats
     ComPtr<IDWriteTextFormat> fTitle, fPhase, fLabel, fSmall, fBody, fMono, fMonoSmall, fMonoBig, fHuge, fButton,
-        fHomeBtn, fGuideTitle, fGuide, fSub, fTileLabel;
+        fHomeBtn, fGuideTitle, fGuide, fSub, fTileLabel, fMetric, fMetricValue;
 
 private:
     bool InitLattice() {
@@ -1013,7 +1020,7 @@ float4 ps(VSOut i) : SV_TARGET {
     ro = rotZ(rotX(rotY(ro, yaw), pitch), roll);
     rd = rotZ(rotX(rotY(rd, yaw), pitch), roll);
 
-    float3 bg = hdr > 0.5 ? float3(0.0034, 0.0076, 0.030) : float3(0.012, 0.028, 0.07);
+    float3 bg = hdr > 0.5 ? float3(0.004, 0.039, 0.110) : float3(0.012, 0.028, 0.07);
     bg *= 1.0 - 0.35 * dot(ndc, ndc);
 
     float3 inv = 1.0 / rd;
@@ -1107,8 +1114,8 @@ float4 ps(VSOut i) : SV_TARGET {
         // Same hues. HDR is the wider scale: Blueprint #0C2C70, Electric #3B87FF,
         // Icy #D4EEFF, Cool White #F8FAFF. Off: #123A91, #347BFF, #8DB8FF, #F4F7FF.
         const float3 blueprint = hdr > 0.5 ? float3(0.047, 0.173, 0.439) : float3(0.071, 0.227, 0.569);
-        const float3 electric = hdr > 0.5 ? float3(0.231, 0.529, 1.0) : float3(0.204, 0.482, 1.0);
-        const float3 icy = hdr > 0.5 ? float3(0.431, 0.784, 1.0) : float3(0.553, 0.722, 1.0);
+        const float3 electric = hdr > 0.5 ? float3(0.180, 0.784, 1.0) : float3(0.204, 0.482, 1.0);
+        const float3 icy = hdr > 0.5 ? float3(0.290, 0.910, 1.0) : float3(0.553, 0.722, 1.0);
         const float3 cool = hdr > 0.5 ? float3(0.973, 0.980, 1.0) : float3(0.957, 0.969, 1.0);
 
         if (st1.z > 0.5) {
@@ -1253,10 +1260,13 @@ float4 ps(VSOut i) : SV_TARGET {
     }
 
     ComPtr<IDWriteTextFormat> Format(const wchar_t* family, DWRITE_FONT_WEIGHT weight, float size, bool wrap = false,
-                                     bool trim = true) {
+                                     bool trim = true, bool system = false) {
         ComPtr<IDWriteTextFormat> f;
-        dwrite_->CreateTextFormat(family, fonts_.Get(), weight, DWRITE_FONT_STYLE_NORMAL, DWRITE_FONT_STRETCH_NORMAL,
-                                  size, L"en-us", &f);
+        dwrite_->CreateTextFormat(family, system ? nullptr : fonts_.Get(), weight, DWRITE_FONT_STYLE_NORMAL,
+                                  DWRITE_FONT_STRETCH_NORMAL, size, L"en-us", &f);
+        if (!f && system)
+            dwrite_->CreateTextFormat(L"Gruppo", fonts_.Get(), weight, DWRITE_FONT_STYLE_NORMAL, DWRITE_FONT_STRETCH_NORMAL,
+                                      size, L"en-us", &f);
         if (!f) {
             dwrite_->CreateTextFormat(L"Segoe UI", nullptr, weight, DWRITE_FONT_STYLE_NORMAL,
                                       DWRITE_FONT_STRETCH_NORMAL, size, L"en-us", &f);
@@ -1327,6 +1337,9 @@ float4 ps(VSOut i) : SV_TARGET {
         fHomeBtn = Format(L"Philosopher", DWRITE_FONT_WEIGHT_BOLD, 16);
         fGuideTitle = Format(L"Philosopher", DWRITE_FONT_WEIGHT_BOLD, 22, true, false);
         fGuide = Format(L"Philosopher", DWRITE_FONT_WEIGHT_NORMAL, 16, true, false);
+        // Bahnschrift is the squared readout face used on the bright CPU overview figures.
+        fMetric = Format(L"Bahnschrift", DWRITE_FONT_WEIGHT_SEMI_BOLD, 13, false, true, true);
+        fMetricValue = Format(L"Bahnschrift", DWRITE_FONT_WEIGHT_SEMI_BOLD, 18, false, true, true);
     }
 
     ComPtr<ID2D1LinearGradientBrush> MakeLinear(D2D1_COLOR_F a, D2D1_COLOR_F b) {
@@ -7140,8 +7153,13 @@ private:
         if (w > 1.5f) rd_.FillRound(D2D1::RectF(r.left, r.top, r.left + w, r.bottom), rad, c);
     }
 
+    IDWriteTextFormat* MetricFace(bool value) const {
+        if (col::hdr) return value ? rd_.fMetricValue.Get() : rd_.fMetric.Get();
+        return value ? rd_.fPhase.Get() : rd_.fSmall.Get();
+    }
+
     void DrawGauge(D2D1_POINT_2F c, float radius, float frac, D2D1_COLOR_F color, const std::wstring& value,
-                   const wchar_t* label) {
+                   const wchar_t* label, bool metricFace = false) {
         const float a0 = 135.0f * kPi / 180.0f;
         const float sweep = 270.0f * kPi / 180.0f;
         rd_.Arc(c, radius, a0, a0 + sweep, Alpha(col::border, 0.9f), 8.0f);
@@ -7149,9 +7167,13 @@ private:
             rd_.Glow(c, radius * 0.45f, color, 0.16f);
             rd_.Arc(c, radius, a0, a0 + sweep * Clamp01(frac), color, 8.0f);
         }
-        rd_.Text(value, D2D1::RectF(c.x - radius, c.y - 18, c.x + radius, c.y + 8), rd_.fPhase.Get(), col::text,
+        IDWriteTextFormat* valueFace = metricFace ? MetricFace(true) : rd_.fPhase.Get();
+        IDWriteTextFormat* labelFace = metricFace ? MetricFace(false) : rd_.fSmall.Get();
+        const D2D1_COLOR_F ink = metricFace ? color : col::text;
+        const D2D1_COLOR_F labelInk = metricFace ? color : col::muted;
+        rd_.Text(value, D2D1::RectF(c.x - radius, c.y - 18, c.x + radius, c.y + 8), valueFace, ink,
                  DWRITE_TEXT_ALIGNMENT_CENTER, DWRITE_PARAGRAPH_ALIGNMENT_CENTER);
-        rd_.Text(label, D2D1::RectF(c.x - radius, c.y + 14, c.x + radius, c.y + 36), rd_.fSmall.Get(), col::muted,
+        rd_.Text(label, D2D1::RectF(c.x - radius, c.y + 14, c.x + radius, c.y + 36), labelFace, labelInk,
                  DWRITE_TEXT_ALIGNMENT_CENTER, DWRITE_PARAGRAPH_ALIGNMENT_CENTER);
     }
 
@@ -7322,7 +7344,9 @@ private:
             if (p.t >= clock - 12.0) peak = std::max(peak, p.dpc);
         dpcScale_ += (std::max(0.5f, peak * 1.2f) - dpcScale_) * std::min(1.0f, dt * 1.5f);
         const LiveSample& s = sample;
-        rd_.Text(L"METRICS", D2D1::RectF(B.left, B.top, B.left + 220, B.top + 32), rd_.fPhase.Get(), col::cyan,
+        const D2D1_COLOR_F fig = col::hdr ? col::figure : col::cyan;
+        const D2D1_COLOR_F fig2 = col::hdr ? col::figure2 : col::violet;
+        rd_.Text(L"METRICS", D2D1::RectF(B.left, B.top, B.left + 220, B.top + 32), MetricFace(false), fig,
                  DWRITE_TEXT_ALIGNMENT_LEADING, DWRITE_PARAGRAPH_ALIGNMENT_CENTER);
         rd_.Text(L"Live CPU, DPC, clock, memory, and GPU. The first sample only primes the counters.",
                  D2D1::RectF(B.left + 200, B.top, B.right - 120, B.top + 32), rd_.fSmall.Get(), col::dim,
@@ -7341,29 +7365,35 @@ private:
                                 s.hasGpuLoad ? shownGpu_ / 100.0f : 0.0f};
         const std::wstring gValue[4] = {Fmt(L"%.0f%%", shownCpu_), Fmt(L"%.0f%%", shownMem_), Fmt(L"%.2f%%", shownDpc_),
                                         s.hasGpuLoad ? Fmt(L"%.0f%%", shownGpu_) : L"—"};
-        D2D1_COLOR_F gColor[4] = {col::cyan, col::muted, s.dpc > 2.0 ? col::red : col::amber, col::green};
+        D2D1_COLOR_F gColor[4] = {fig, fig, fig, fig};
+        if (!col::hdr) {
+            gColor[0] = col::cyan;
+            gColor[1] = col::muted;
+            gColor[2] = s.dpc > 2.0 ? col::red : col::amber;
+            gColor[3] = col::green;
+        }
         for (int i = 0; i < 4; ++i) {
             const D2D1_RECT_F card = D2D1::RectF(B.left + i * (gw + gap), y, B.left + i * (gw + gap) + gw, y + gaugeH);
             FillCard(card);
             const float radius = std::min(gw, gaugeH) * 0.30f;
             DrawGauge(D2D1::Point2F((card.left + card.right) * 0.5f, card.top + gaugeH * 0.48f), radius, gFrac[i], gColor[i],
-                      gValue[i], gLabel[i]);
+                      gValue[i], gLabel[i], true);
         }
         y += gaugeH + gap;
         const float remain = std::max(80.0f, B.bottom - y);
         const float graphH = std::max(120.0f, (remain - 64.0f - gap) * 0.72f);
         const D2D1_RECT_F cpuCard = D2D1::RectF(B.left, y, B.right, y + graphH);
         FillCard(cpuCard);
-        rd_.Text(L"CPU", D2D1::RectF(cpuCard.left + 12, cpuCard.top + 6, cpuCard.left + 80, cpuCard.top + 24), rd_.fSmall.Get(),
-                 col::cyan);
-        rd_.Text(L"Memory", D2D1::RectF(cpuCard.left + 70, cpuCard.top + 6, cpuCard.left + 160, cpuCard.top + 24), rd_.fSmall.Get(),
-                 col::violet);
+        rd_.Text(L"CPU", D2D1::RectF(cpuCard.left + 12, cpuCard.top + 6, cpuCard.left + 80, cpuCard.top + 24), MetricFace(false),
+                 fig);
+        rd_.Text(L"MEMORY", D2D1::RectF(cpuCard.left + 70, cpuCard.top + 6, cpuCard.left + 180, cpuCard.top + 24),
+                 MetricFace(false), fig2);
         rd_.Text(Fmt(L"%.0f%%    %.0f%%", shownCpu_, shownMem_),
-                 D2D1::RectF(cpuCard.right - 160, cpuCard.top + 6, cpuCard.right - 12, cpuCard.top + 24), rd_.fMonoSmall.Get(),
-                 col::text, DWRITE_TEXT_ALIGNMENT_TRAILING);
+                 D2D1::RectF(cpuCard.right - 180, cpuCard.top + 6, cpuCard.right - 12, cpuCard.top + 24), MetricFace(true),
+                 fig, DWRITE_TEXT_ALIGNMENT_TRAILING);
         const D2D1_RECT_F cpuPlot = D2D1::RectF(cpuCard.left + 4, cpuCard.top + 26, cpuCard.right - 4, cpuCard.bottom - 4);
-        DrawSlidingCurve(cpuPlot, trace, clock, 12.0, 1, 100.0f, Alpha(col::violet, 0.85f), 1.2f, false, false);
-        DrawSlidingCurve(cpuPlot, trace, clock, 12.0, 0, 100.0f, col::cyan, 1.8f, true, true);
+        DrawSlidingCurve(cpuPlot, trace, clock, 12.0, 1, 100.0f, fig2, 1.6f, false, false);
+        DrawSlidingCurve(cpuPlot, trace, clock, 12.0, 0, 100.0f, fig, 2.0f, true, true);
         y += graphH + gap;
         const float cardH = std::max(52.0f, B.bottom - y);
         const wchar_t* names[4] = {L"TIMER", L"ISR", L"CLOCK", s.hasGpuTemp ? L"GPU TEMP" : L"ZONE"};
@@ -7377,12 +7407,12 @@ private:
         for (int i = 0; i < 4; ++i) {
             const D2D1_RECT_F card = D2D1::RectF(B.left + i * (sw + gap), y, B.left + i * (sw + gap) + sw, y + cardH);
             FillCard(card);
-            rd_.Text(names[i], D2D1::RectF(card.left + 10, card.top + 6, card.right - 8, card.top + 24), rd_.fSmall.Get(), col::cyan);
-            rd_.Text(values[i], D2D1::RectF(card.left + 10, card.top + 24, card.right - 8, card.bottom - 18), rd_.fPhase.Get(), col::text,
+            rd_.Text(names[i], D2D1::RectF(card.left + 10, card.top + 6, card.right - 8, card.top + 24), MetricFace(false), fig);
+            rd_.Text(values[i], D2D1::RectF(card.left + 10, card.top + 24, card.right - 8, card.bottom - 18), MetricFace(true), fig,
                      DWRITE_TEXT_ALIGNMENT_LEADING, DWRITE_PARAGRAPH_ALIGNMENT_CENTER);
             if (i == 1)
                 DrawHBar(D2D1::RectF(card.left + 10, card.bottom - 14, card.right - 10, card.bottom - 6),
-                         static_cast<float>(std::min(1.0, s.isr / 5.0)), col::amber);
+                         static_cast<float>(std::min(1.0, s.isr / 5.0)), fig);
         }
     }
 
