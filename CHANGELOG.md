@@ -1,6 +1,10 @@
 # Changelog
 
-Current release: **3.1.2**.
+Current release: **3.1.3**.
+
+## 3.1.3 — 2026-11-24
+
+- The Restart button is gone from Home. Full tune spans the top of the tool list.
 
 ## 3.1.2 — 2026-11-24
 

@@ -2423,21 +2423,16 @@ private:
             case 6: OpenTool(JobId::Afterburner, Stage::AfterburnerPrompt, Stage::AfterburnerApplying); break;
             case 7: OpenTool(JobId::Memory, Stage::MemoryPrompt, Stage::MemoryApplying); break;
             case 8: OpenTool(JobId::Storage, Stage::StoragePrompt, Stage::StorageApplying); break;
-            case 9:
-                hubReturn_ = true;
-                stage_ = Stage::Review;
-                state_.Phase(L"REVIEW", L"set BIOS, then restart");
-                break;
-            case 10: OpenTool(JobId::Network, Stage::NetworkPrompt, Stage::NetworkApplying); break;
-            case 11: OpenTool(JobId::Audio, Stage::AudioPrompt, Stage::AudioApplying); break;
-            case 12: OpenTool(JobId::Profile, Stage::ProfilePrompt, Stage::ProfileApplying); break;
-            case 13: OpenTool(JobId::Games, Stage::GamesPrompt, Stage::GamesApplying); break;
-            case 14: OpenTool(JobId::Hardware, Stage::HardwarePrompt, Stage::HardwareApplying); break;
-            case 15: OpenTool(JobId::Bench, Stage::BenchPrompt, Stage::BenchApplying); break;
-            case 16: OpenTool(JobId::Share, Stage::SharePrompt, Stage::ShareApplying); break;
-            case 17: OpenTool(JobId::Scripts, Stage::ScriptsPrompt, Stage::ScriptsApplying); break;
-            case 18: OpenTool(JobId::Metrics, Stage::MetricsPrompt, Stage::MetricsApplying); break;
-            case 19: OpenTool(JobId::Focus, Stage::FocusPrompt, Stage::FocusApplying); break;
+            case 9: OpenTool(JobId::Network, Stage::NetworkPrompt, Stage::NetworkApplying); break;
+            case 10: OpenTool(JobId::Audio, Stage::AudioPrompt, Stage::AudioApplying); break;
+            case 11: OpenTool(JobId::Profile, Stage::ProfilePrompt, Stage::ProfileApplying); break;
+            case 12: OpenTool(JobId::Games, Stage::GamesPrompt, Stage::GamesApplying); break;
+            case 13: OpenTool(JobId::Hardware, Stage::HardwarePrompt, Stage::HardwareApplying); break;
+            case 14: OpenTool(JobId::Bench, Stage::BenchPrompt, Stage::BenchApplying); break;
+            case 15: OpenTool(JobId::Share, Stage::SharePrompt, Stage::ShareApplying); break;
+            case 16: OpenTool(JobId::Scripts, Stage::ScriptsPrompt, Stage::ScriptsApplying); break;
+            case 17: OpenTool(JobId::Metrics, Stage::MetricsPrompt, Stage::MetricsApplying); break;
+            case 18: OpenTool(JobId::Focus, Stage::FocusPrompt, Stage::FocusApplying); break;
             default: break;
         }
     }
@@ -6419,9 +6414,9 @@ private:
         const float centerL = B.left + leftW + gap;
         const float centerR = B.right - rightW - gap;
         const wchar_t* labels[] = {L"Full tune", L"Health",     L"Measure",    L"CPU power", L"GPU driver",
-                                   L"GPU settings", L"Afterburner", L"Memory", L"Storage",   L"Restart",
-                                   L"Network",  L"Audio",      L"Profile",    L"Games",     L"Hardware",
-                                   L"Bench",    L"Share",      L"Scripts",    L"Metrics",   L"Focus"};
+                                   L"GPU settings", L"Afterburner", L"Memory", L"Storage",   L"Network",
+                                   L"Audio",    L"Profile",    L"Games",      L"Hardware",  L"Bench",
+                                   L"Share",    L"Scripts",    L"Metrics",    L"Focus"};
         const wchar_t* blurbs[] = {
             L"Runs every checked step. Restore point first, then the rest in a safe order. Each step on this list also opens on its own.",
             L"Opens the health screen. It reads the live settings and lists anything that has drifted. Nothing changes until you choose a repair.",
@@ -6432,7 +6427,6 @@ private:
             L"Installs MSI Afterburner and RivaTuner, scans the card, and saves the curve.",
             L"Sets the page file and turns memory compression off.",
             L"Turns SysMain off and checks that TRIM is enabled.",
-            L"Shows the BIOS settings to change by hand, then asks you to restart.",
             L"Lists each adapter and turns off the power-saving and interrupt-moderation options that add latency.",
             L"Lists the connected playback and recording devices and turns enhancements off.",
             L"Switches between Performance and Balanced. Performance keeps the tuned plan and the timer hold.",
@@ -6453,15 +6447,21 @@ private:
         const float btnTop = B.top + (banner.empty() ? 0.0f : 24.0f);
         const float btnBottom = B.bottom - heatH - 46.0f - (showUpdate ? 52.0f : 12.0f);
         const float btnGap = 4.0f;
-        constexpr int kHomeTools = 20;
+        constexpr int kHomeTools = 19;
         constexpr int kHomeRows = 10;
         const float btnH = std::max(22.0f, (btnBottom - btnTop - (kHomeRows - 1) * btnGap) / kHomeRows);
         const float colW = (leftW - 10.0f) / 2.0f;
         IDWriteTextFormat* homeFont = btnH < 32.0f ? rd_.fSmall.Get() : rd_.fHomeBtn.Get();
         for (int i = 0; i < kHomeTools; ++i) {
-            const float x = B.left + (i % 2) * (colW + 10);
-            const float y = btnTop + (i / 2) * (btnH + btnGap);
-            const D2D1_RECT_F cell = D2D1::RectF(x, y, x + colW, y + btnH);
+            D2D1_RECT_F cell;
+            if (i == 0) {
+                cell = D2D1::RectF(B.left, btnTop, B.left + leftW, btnTop + btnH);
+            } else {
+                const int grid = i - 1;
+                const float x = B.left + (grid % 2) * (colW + 10);
+                const float y = btnTop + (1 + grid / 2) * (btnH + btnGap);
+                cell = D2D1::RectF(x, y, x + colW, y + btnH);
+            }
             NoteTip(cell, labels[i], blurbs[i]);
             if (!Button(200 + i, cell, labels[i], col::cyan, i == 0, true, dt, false, false, homeFont)) continue;
             OpenHomeTool(i);
