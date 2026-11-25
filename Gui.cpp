@@ -5609,6 +5609,11 @@ private:
         else if (kind == L"storage") id = JobId::Storage;
         else if (kind == L"network") id = JobId::Network;
         else if (kind == L"audio") id = JobId::Audio;
+        else if (kind == L"profile") id = JobId::Profile;
+        else if (kind == L"games") id = JobId::Games;
+        else if (kind == L"hardware") id = JobId::Hardware;
+        else if (kind == L"focus") id = JobId::Focus;
+        else if (kind == L"share") id = JobId::Share;
         else if (kind == L"afterburner") id = JobId::Afterburner;
         else if (kind == L"timer") {
             id = JobId::Hold;
@@ -5636,6 +5641,11 @@ private:
         else if (id == JobId::Storage) StartStorage(false);
         else if (id == JobId::Network) StartNetwork(false);
         else if (id == JobId::Audio) StartAudio(false);
+        else if (id == JobId::Profile) StartProfileJob(false);
+        else if (id == JobId::Games) StartGamesJob(false);
+        else if (id == JobId::Hardware) StartHardwareJob(false);
+        else if (id == JobId::Focus) StartFocusJob(false);
+        else if (id == JobId::Share) StartShareJob(false);
         else if (id == JobId::Afterburner) StartAfterburner(false);
         else if (id == JobId::Hold) StartInstall(false, timerUnits);
     }

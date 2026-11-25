@@ -555,6 +555,194 @@ void AppendHealthLog(const std::wstring& line) {
     CloseHandle(file);
 }
 
+void AppendFeatureChecks(std::vector<HealthCheck>& out) {
+    auto dataDir = [] {
+        wchar_t env[MAX_PATH];
+        const DWORD n = GetEnvironmentVariableW(L"ProgramData", env, MAX_PATH);
+        return (n > 0 && n < MAX_PATH ? std::wstring(env) : L"C:\\ProgramData") + L"\\Synchronus";
+    };
+
+    {
+        HealthCheck c = Make(L"profile.active", L"Profile", L"Profile in effect", L"profile");
+        const Profile chosen = ChosenProfile();
+        const Profile active = ActiveProfile();
+        c.expected = ProfileName(chosen);
+        c.observed = ProfileName(active);
+        if (CheckDisabled(c.id)) {
+            c.status = HealthStatus::Disabled;
+            c.explanation = L"This check is turned off in Settings.";
+        } else if (chosen == active) {
+            c.status = HealthStatus::Pass;
+            c.explanation = L"The profile you selected is the one Windows is using.";
+        } else {
+            c.status = HealthStatus::Attention;
+            c.severity = 1;
+            c.explanation = L"The selected profile and the live profile do not match. Repair applies the one you selected.";
+        }
+        out.push_back(std::move(c));
+    }
+    {
+        HealthCheck c = Make(L"games.watch", L"Games", L"Game watch", L"games");
+        const bool on = LoadMonitorPrefs().gameBoost;
+        c.expected = StepChosen(L"games") ? L"on" : L"optional";
+        c.observed = on ? L"on" : L"off";
+        if (CheckDisabled(c.id)) {
+            c.status = HealthStatus::Disabled;
+            c.explanation = L"This check is turned off in Settings.";
+        } else if (on) {
+            c.status = HealthStatus::Pass;
+            c.explanation = L"A running game lifts Balanced to Performance, then returns it.";
+        } else if (StepChosen(L"games")) {
+            c.status = HealthStatus::Attention;
+            c.severity = 1;
+            c.explanation = L"Game watch is in the full tune, but it is off. Repair turns it on.";
+        } else {
+            c.status = HealthStatus::Info;
+            c.repair.clear();
+            c.explanation = L"Game watch is off. Turn it on from Games if you want a game to lift Balanced.";
+        }
+        out.push_back(std::move(c));
+    }
+    {
+        HealthCheck c = Make(L"hardware.watch", L"Hardware", L"Hardware still matches the last tune", L"hardware");
+        const auto changes = DetectHardwareChanges();
+        const bool watch = LoadMonitorPrefs().watchHardware;
+        c.expected = L"no change since the last tune";
+        if (CheckDisabled(c.id)) {
+            c.status = HealthStatus::Disabled;
+            c.explanation = L"This check is turned off in Settings.";
+        } else if (!changes.empty()) {
+            c.status = HealthStatus::Attention;
+            c.severity = 1;
+            c.observed = changes.front().what;
+            c.explanation = changes.front().advice.empty() ? L"The PC is not the one that was tuned." : changes.front().advice;
+            c.repair.clear();
+        } else if (watch) {
+            c.status = HealthStatus::Pass;
+            c.observed = HardwareSummary();
+            c.explanation = L"GPU, driver, CPU, BIOS, and Windows still match the saved signature.";
+            c.repair.clear();
+        } else if (StepChosen(L"hardware")) {
+            c.status = HealthStatus::Attention;
+            c.severity = 1;
+            c.observed = L"watch off";
+            c.explanation = L"Hardware watch is in the full tune, but it is off. Repair turns it on.";
+        } else {
+            c.status = HealthStatus::Info;
+            c.observed = L"watch off";
+            c.repair.clear();
+            c.explanation = L"Hardware watch is off. Turn it on from Hardware if you want a warning after a part changes.";
+        }
+        out.push_back(std::move(c));
+    }
+    {
+        HealthCheck c = Make(L"bench.saved", L"Bench", L"Saved bench", L"");
+        const BenchHistory history = LoadBench(dataDir());
+        const bool saved = history.hasBaseline || !history.runs.empty();
+        c.expected = StepChosen(L"bench") ? L"a saved run" : L"optional";
+        c.observed = saved ? (history.hasBaseline ? L"baseline and a run" : L"a run") : L"none";
+        if (CheckDisabled(c.id)) {
+            c.status = HealthStatus::Disabled;
+            c.explanation = L"This check is turned off in Settings.";
+        } else if (saved) {
+            c.status = HealthStatus::Pass;
+            c.explanation = L"A bench is saved, so a later run has something to compare with.";
+        } else if (StepChosen(L"bench")) {
+            c.status = HealthStatus::Attention;
+            c.severity = 1;
+            c.explanation = L"Bench is in the full tune, and no run has been saved. Open Bench to take one. It is not started from here.";
+        } else {
+            c.status = HealthStatus::Info;
+            c.explanation = L"No bench is saved. Open Bench when you want a before-and-after.";
+        }
+        out.push_back(std::move(c));
+    }
+    {
+        HealthCheck c = Make(L"scripts.approved", L"Scripts", L"Approved scripts", L"");
+        int found = 0, approved = 0;
+        for (const auto& script : ListScripts()) {
+            ++found;
+            if (script.approved) ++approved;
+        }
+        c.expected = L"approved scripts run at their hook";
+        c.observed = Format(L"%d approved of %d", approved, found);
+        if (CheckDisabled(c.id)) {
+            c.status = HealthStatus::Disabled;
+            c.explanation = L"This check is turned off in Settings.";
+        } else if (approved > 0) {
+            c.status = HealthStatus::Pass;
+            c.explanation = L"Approved scripts run after a tune, a profile change, or a game, matching the hook folder.";
+        } else {
+            c.status = HealthStatus::Info;
+            c.explanation = found ? L"Scripts are present, and none are approved yet."
+                                  : L"No scripts are in the Synchronus scripts folder.";
+        }
+        out.push_back(std::move(c));
+    }
+    {
+        HealthCheck c = Make(L"focus.held", L"Focus", L"Banners and Game Bar", L"focus");
+        const bool quiet = QuietHeld();
+        const bool bar = GameBarButtonOff();
+        const bool want = StepChosen(L"focus") || LoadMonitorPrefs().gameQuiet;
+        c.expected = want ? L"banners held or the Game Bar button off" : L"optional";
+        c.observed = quiet && bar ? L"banners held, Game Bar button off"
+                                  : quiet ? L"banners held"
+                                          : bar ? L"Game Bar button off"
+                                                : L"unchanged";
+        if (CheckDisabled(c.id)) {
+            c.status = HealthStatus::Disabled;
+            c.explanation = L"This check is turned off in Settings.";
+        } else if (quiet || bar) {
+            c.status = HealthStatus::Pass;
+            c.explanation = L"Distractions are held. Uninstall puts them back.";
+        } else if (want) {
+            c.status = HealthStatus::Attention;
+            c.severity = 1;
+            c.explanation = L"Focus is selected, and neither the banners nor the Game Bar button are held. Repair holds both.";
+        } else {
+            c.status = HealthStatus::Info;
+            c.repair.clear();
+            c.explanation = L"Banners and the Game Bar button are as Windows left them.";
+        }
+        out.push_back(std::move(c));
+    }
+    {
+        HealthCheck c = Make(L"share.file", L"Share", L"Exported choices", L"share");
+        const std::wstring path = dataDir() + L"\\synchronus-profile.json";
+        const bool exists = GetFileAttributesW(path.c_str()) != INVALID_FILE_ATTRIBUTES;
+        c.expected = StepChosen(L"share") ? L"a share file" : L"optional";
+        c.observed = exists ? path : L"no file";
+        if (CheckDisabled(c.id)) {
+            c.status = HealthStatus::Disabled;
+            c.explanation = L"This check is turned off in Settings.";
+        } else if (exists) {
+            c.status = HealthStatus::Pass;
+            c.explanation = L"The choices are written to a file. The file has no user name and no device id.";
+        } else if (StepChosen(L"share")) {
+            c.status = HealthStatus::Attention;
+            c.severity = 1;
+            c.explanation = L"Share is in the full tune, and the file has not been written. Repair writes it.";
+        } else {
+            c.status = HealthStatus::Info;
+            c.repair.clear();
+            c.explanation = L"No share file yet. Export from Share when you want a copy of these choices.";
+        }
+        out.push_back(std::move(c));
+    }
+    {
+        HealthCheck c = Make(L"metrics.live", L"Metrics", L"Live metrics", L"");
+        c.expected = L"read only";
+        c.observed = L"sampled while the Metrics window is open";
+        c.status = HealthStatus::Info;
+        c.explanation = L"Metrics reads CPU, DPC, clock, memory, and GPU. It does not change the PC.";
+        if (CheckDisabled(c.id)) {
+            c.status = HealthStatus::Disabled;
+            c.explanation = L"This check is turned off in Settings.";
+        }
+        out.push_back(std::move(c));
+    }
+}
+
 std::vector<HealthCheck> RunHealth(const std::atomic<bool>* cancelled) {
     std::vector<HealthCheck> out;
     auto push = [&](HealthCheck c) {
@@ -793,6 +981,8 @@ std::vector<HealthCheck> RunHealth(const std::atomic<bool>* cancelled) {
     if (Stopped(cancelled)) return out;
     AppendNetworkChecks(out, cancelled);
     AppendAudioChecks(out, cancelled);
+    if (Stopped(cancelled)) return out;
+    AppendFeatureChecks(out);
     if (Stopped(cancelled)) return out;
     // Balanced leaves the power plan and the timer to Windows. Those rows are not drift.
     RelaxForProfile(out);

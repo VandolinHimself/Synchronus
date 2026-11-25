@@ -1,6 +1,10 @@
 # Changelog
 
-Current release: **3.1.4**.
+Current release: **3.1.5**.
+
+## 3.1.5 — 2026-11-24
+
+- The health check now reads profile, game watch, hardware changes, the saved bench, approved scripts, Focus, the share file, and live metrics, along with network and audio.
 
 ## 3.1.4 — 2026-11-24
 
