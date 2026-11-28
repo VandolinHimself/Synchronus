@@ -72,6 +72,8 @@
 namespace gui {
 namespace {
 
+constexpr UINT kMoveRenderTimer = 9;
+
 using gui::AppendHealthLog;
 using gui::DriftCount;
 using gui::HealthCheck;
@@ -669,6 +671,23 @@ public:
 
     D2D1_SIZE_F Size() const { return dc_ ? dc_->GetSize() : D2D1::SizeF(1, 1); }
 
+    void SetSizeMove(bool on) { sizeMove_ = on; }
+
+    UINT MoveFrameTimerMs() const {
+        if (!hwnd_) return 16;
+        HMONITOR mon = MonitorFromWindow(hwnd_, MONITOR_DEFAULTTONEAREST);
+        MONITORINFOEXW mi{};
+        mi.cbSize = sizeof(mi);
+        if (!GetMonitorInfoW(mon, &mi)) return 16;
+        DEVMODEW dm{};
+        dm.dmSize = sizeof(dm);
+        if (!EnumDisplaySettingsW(mi.szDevice, ENUM_CURRENT_SETTINGS, &dm)) return 16;
+        const UINT hz = dm.dmDisplayFrequency;
+        if (!hz) return 16;
+        const UINT ms = (1000u + hz - 1) / hz;
+        return std::max<UINT>(1, std::min<UINT>(32, ms));
+    }
+
     void Begin() {
         dc_->BeginDraw();
         dc_->Clear(col::bg);
@@ -678,7 +697,12 @@ public:
     bool End() {
         HRESULT hr = dc_->EndDraw();
         if (hr == D2DERR_RECREATE_TARGET) return false;
-        hr = swapChain_->Present(1, 0);
+        if (sizeMove_) {
+            hr = swapChain_->Present(0, DXGI_PRESENT_DO_NOT_WAIT);
+            if (hr == DXGI_ERROR_WAS_STILL_DRAWING) return true;
+        } else {
+            hr = swapChain_->Present(1, 0);
+        }
         if (hr == DXGI_ERROR_DEVICE_REMOVED || hr == DXGI_ERROR_DEVICE_RESET) return false;
         return true;
     }
@@ -1413,6 +1437,7 @@ float4 ps(VSOut i) : SV_TARGET {
 
     HWND hwnd_ = nullptr;
     float dpi_ = 96;
+    bool sizeMove_ = false;
     ComPtr<IDXGISwapChain1> swapChain_;
     ComPtr<ID2D1Factory1> d2dFactory_;
     ComPtr<ID2D1DeviceContext> dc_;
@@ -2037,6 +2062,14 @@ private:
 
     LRESULT WndProc(UINT msg, WPARAM wp, LPARAM lp) {
         switch (msg) {
+            case WM_ENTERSIZEMOVE:
+                rd_.SetSizeMove(true);
+                SetTimer(hwnd_, kMoveRenderTimer, rd_.MoveFrameTimerMs(), nullptr);
+                return 0;
+            case WM_EXITSIZEMOVE:
+                rd_.SetSizeMove(false);
+                KillTimer(hwnd_, kMoveRenderTimer);
+                return 0;
             case WM_SIZE:
                 if (wp != SIZE_MINIMIZED) rd_.Resize(LOWORD(lp), HIWORD(lp));
                 return 0;
@@ -2104,6 +2137,10 @@ private:
                 PostQuitMessage(0);
                 return 0;
             case WM_TIMER:
+                if (wp == kMoveRenderTimer) {
+                    Frame();
+                    return 0;
+                }
                 if (wp == 7) {
                     const unsigned long long now = GetTickCount64();
                     if (now >= nextUpdateAt_) {

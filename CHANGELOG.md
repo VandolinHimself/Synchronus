@@ -1,6 +1,10 @@
 # Changelog
 
-Current release: **3.1.7**.
+Current release: **3.2.1**.
+
+## 3.2.1 — 2026-11-28
+
+- The window keeps drawing at the display refresh rate while you move or resize it. Animation, metrics, and the live sweep no longer freeze until you release the title bar.
 
 ## 3.1.7 — 2026-11-24
 

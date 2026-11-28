@@ -140,28 +140,28 @@ Opening the window checks one address for a newer build, and repeats that check 
 https://luciuswayne.com/synchronus/latest.json
 ```
 
-That address does not change. The request is a GET, and the query `?current=3.1.7` (the running version) can be ignored. Serve the file over HTTPS with `Cache-Control: no-store`. Plain HTTP is refused. The list may be read from `luciuswayne.com`, `www.luciuswayne.com`, or `media.luciuswayne.com`.
+That address does not change. The request is a GET, and the query `?current=3.2.1` (the running version) can be ignored. Serve the file over HTTPS with `Cache-Control: no-store`. Plain HTTP is refused. The list may be read from `luciuswayne.com`, `www.luciuswayne.com`, or `media.luciuswayne.com`.
 
 The executable must be `https://media.luciuswayne.com/Synchronus.exe` or `https://media.luciuswayne.com/Synchronus-<release>.exe`, including after a redirect. The release token is 1–64 characters of letters, numbers, `.`, `_`, and `-`, and it cannot contain `..`. This release is published as:
 
 ```
-https://media.luciuswayne.com/Synchronus-3.1.7.exe
+https://media.luciuswayne.com/Synchronus-3.2.1.exe
 ```
 
 ```json
 {
-  "version": "3.1.7",
-  "url": "https://media.luciuswayne.com/Synchronus-3.1.7.exe",
+  "version": "3.2.1",
+  "url": "https://media.luciuswayne.com/Synchronus-3.2.1.exe",
   "notes": "What changed, in plain text.",
   "sha256": "paste the 64 hex digits here",
   "size": 1234567
 }
 ```
 
-`version`, `url`, and `sha256` are required. `notes` and `size` are optional. `version` is numeric (`3.1.7` and `3.1.7.0` are the same) and must be newer than the running copy. Publish each build under its own `Synchronus-<version>.exe` name. The media host keeps files for a long time, so a new name is what makes the download a new file. `sha256` is the SHA-256 of that file:
+`version`, `url`, and `sha256` are required. `notes` and `size` are optional. `version` is numeric (`3.2.1` and `3.2.1.0` are the same) and must be newer than the running copy. Publish each build under its own `Synchronus-<version>.exe` name. The media host keeps files for a long time, so a new name is what makes the download a new file. `sha256` is the SHA-256 of that file:
 
 ```
-certutil -hashfile Synchronus-3.1.7.exe SHA256
+certutil -hashfile Synchronus-3.2.1.exe SHA256
 ```
 
 The downloaded file's `FILEVERSION` must be that same `version`. In this tree that is `Synchronus.rc` and `kVersion` in `Synchronus.cpp`. If the list is missing or the machine is offline, the window stays quiet. A rejected list is written to `%ProgramData%\Synchronus\Synchronus.log`.
@@ -174,7 +174,7 @@ Open `Synchronus.sln` in Visual Studio 2019 or 2022 with the
 Desktop development with C++ workload, or from this directory:
 
 ```powershell
-.\build.ps1            # -> dist\Synchronus-3.1.7.exe
+.\build.ps1            # -> dist\Synchronus-3.2.1.exe
 ```
 
 The script reads `FileVersion` from `Synchronus.rc` and writes
@@ -230,4 +230,4 @@ Philosopher, Gruppo, and Bruno Ace SC are bundled under the
 
 ## Changelog
 
-Version history is in [CHANGELOG.md](CHANGELOG.md). The current release is 3.1.7.
+Version history is in [CHANGELOG.md](CHANGELOG.md). The current release is 3.2.1.
